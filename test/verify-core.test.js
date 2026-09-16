@@ -550,7 +550,45 @@ test('an add-on path that the core also ships is refused', (t) => {
 test('an add-on file inside a directory the core owns is refused', (t) => {
   const { core, consumer } = assemblyFixture(t, ['app/server/extra.js', 'app/server/prompt/runner.js']);
   refused(() => verify.checkAssembly({ core, consumer }),
-    /app\/server\/extra\.js is inside app\/server\/[\s\S]*app\/server\/prompt\/runner\.js is inside app\/server\//);
+    /app\/server\/extra\.js is at or inside app\/server,[\s\S]*app\/server\/prompt\/runner\.js is at or inside app\/server,/);
+});
+
+test('files, links and directories that collide with the core\'s shape are refused', (t) => {
+  // Each case builds its own add-on tree next to the same installed core.
+  /** @type {Array<[string, (dir: string) => void, RegExp]>} */
+  const cases = [
+    ['a file at a directory the core owns', (c) => {
+      fs.mkdirSync(path.join(c, 'app'), { recursive: true });
+      fs.writeFileSync(path.join(c, 'app', 'server'), 'x');
+    }, /app\/server is also|app\/server is a file where the core has a directory[\s\S]*app\/server is at or inside app\/server/],
+    ['an empty directory the core owns', (c) => {
+      fs.mkdirSync(path.join(c, 'app', 'server'), { recursive: true });
+    }, /app\/server is at or inside app\/server/],
+    ['a link at a directory the core owns', (c) => {
+      fs.mkdirSync(path.join(c, 'app'), { recursive: true });
+      fs.symlinkSync('/tmp', path.join(c, 'app', 'server'));
+    }, /app\/server is a link where the core has a directory/],
+    ['a file where the core has a directory', (c) => {
+      fs.mkdirSync(path.join(c, 'rootfs', 'usr', 'local'), { recursive: true });
+      fs.writeFileSync(path.join(c, 'rootfs', 'usr', 'local', 'bin'), 'x');
+    }, /rootfs\/usr\/local\/bin is a file where the core has a directory/],
+    ['a link where the core has a directory', (c) => {
+      fs.mkdirSync(path.join(c, 'rootfs', 'usr'), { recursive: true });
+      fs.symlinkSync('/usr/local', path.join(c, 'rootfs', 'usr', 'local'));
+    }, /rootfs\/usr\/local is a link where the core has a directory/],
+    ['a directory where the core has a file', (c) => {
+      fs.mkdirSync(path.join(c, 'rootfs', 'usr', 'local', 'bin', 'ha-state'), { recursive: true });
+    }, /rootfs\/usr\/local\/bin\/ha-state is a directory where the core has a file/],
+    ['a whole root that is not a directory', (c) => {
+      fs.symlinkSync('/', path.join(c, 'rootfs'));
+    }, /rootfs is a link where the core has a directory/],
+  ];
+  for (const [name, build, pattern] of cases) {
+    const { core, consumer } = assemblyFixture(t, []);
+    build(consumer);
+    assert.throws(() => verify.checkAssembly({ core, consumer }),
+      (err) => err instanceof verify.Refusal && pattern.test(err.message), name);
+  }
 });
 
 test('a link in the add-on tree is a path like any other', (t) => {

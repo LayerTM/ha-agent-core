@@ -48,7 +48,12 @@ Everything engine-specific comes from one module the add-on provides at
 The adapter may require its own modules and `app/server/prompt/security.js`, and
 nothing else of the core; the core returns to the adapter only through these
 members. `tools/check-adapter-graph.js <app dir>` checks that on an assembled
-tree, together with the absence of cycles and of non-literal local requires.
+tree: it reads every file under `server/` and `adapter/`, follows only
+`require('<string literal>')`, refuses every other way to load or evaluate code
+(require used as a value, `import`, `module.require`, `createRequire`, `eval`,
+`Function`, the `vm` and `module` built-ins, `.mjs` and `.node` files, local
+requires of anything but `.js`, `.cjs` or `.json`, or outside those two
+directories), and reports cycles.
 
 ## The release archive
 
@@ -152,7 +157,7 @@ node verify-core.js check --lock core.lock.json --adapter-api 1 --previous-lock 
 | `verify-core.js url --lock FILE` | print the validated archive URL |
 | `verify-core.js check --lock FILE --adapter-api N [--previous-lock FILE]` | validate a lock |
 | `verify-core.js install --lock FILE --adapter-api N [--previous-lock FILE] --archive FILE --dest DIR` | verify and install |
-| `verify-core.js check-assembly --core DIR --consumer DIR` | refuse an add-on whose `app/`, `ha-tools/` or `rootfs/` shares a path with the installed core (also by letter case), or adds anything under `app/server/` |
+| `verify-core.js check-assembly --core DIR --consumer DIR` | refuse an add-on whose `app/`, `ha-tools/` or `rootfs/` puts a file, link or special file where the core has a file or a directory, or a directory where the core has a file (letter case ignored), or has anything at or under `app/server` |
 
 Exit status: `0` verified, `1` refused (the reason is printed), `2` usage error.
 

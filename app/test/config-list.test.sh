@@ -82,34 +82,8 @@ check "output is newline-terminated (what the old reader lost)" \
 check "a missing options file yields nothing, not an error" \
     "$(config_list environment_vars "${work}/does-not-exist.json")" ''
 
-# Every list-type option in config.yaml must be read by config_list, not by
-# bashio::config — the bug was three call sites, and a fourth is one edit away.
-# Every list-type option in config.yaml must be read by config_list, not by
-# bashio::config — the bug was three call sites, and a fourth is one edit away.
-leaked="$(python3 - "${repo}" <<'PYSCAN'
-import pathlib, re, sys
-
-repo = pathlib.Path(sys.argv[1])
-schema = (repo / "config.yaml").read_text().split("schema:")[1]
-
-lists, key = [], None
-for line in schema.splitlines():
-    match = re.match(r"^  (\w+):", line)
-    if match:
-        key = match.group(1)
-    elif re.match(r"^    - ", line) and key:
-        lists.append(key)
-        key = None
-
-sources = [
-    path.read_text(errors="ignore")
-    for path in (repo / "rootfs").rglob("*")
-    if path.is_file()
-]
-print(" ".join(k for k in lists if any(f"bashio::config '{k}'" in src for src in sources)))
-PYSCAN
-)"
-check "no list option is still read via bashio::config" "${leaked}" ""
+# That every list-type option of an add-on is read through config_list is a
+# property of the add-on's own options schema, so the add-on's suite checks it.
 
 echo
 if [ "${fails}" -eq 0 ]; then

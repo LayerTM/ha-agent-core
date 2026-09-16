@@ -413,29 +413,44 @@ function install({ lock, previousLock, adapterApi, archive, dest }) {
 // ---------------------------------------------------------------------------
 
 // The trees an add-on image is assembled from. A path is claimed by the core or
-// by the add-on, never by both (also not by case), and the add-on adds nothing
-// under a directory the core owns whole.
+// by the add-on, never by both (also not by letter case): the add-on may not put
+// a file where the core has a file or a directory, nor a directory where the core
+// has a file, and it has nothing at all at or under a directory the core owns
+// whole. Links and special files count as files — a copy would place them.
 const ASSEMBLY_ROOTS = ['app', 'ha-tools', 'rootfs'];
-const CORE_ONLY_DIRS = ['app/server/'];
+const CORE_ONLY_DIRS = ['app/server'];
 
-function consumerFiles(consumer) {
+// Every entry of the add-on's assembled roots, directories included, as
+// { rel, kind } with kind one of dir, file, link, other.
+function consumerEntries(consumer) {
   const found = [];
   const walk = (rel) => {
-    let entries;
-    try {
-      entries = fs.readdirSync(path.join(consumer, rel), { withFileTypes: true });
-    } catch (err) {
-      if (err.code === 'ENOENT' && !rel.includes('/')) return;
-      throw err;
-    }
-    for (const entry of entries) {
+    for (const entry of fs.readdirSync(path.join(consumer, rel), { withFileTypes: true })) {
       const child = `${rel}/${entry.name}`;
-      if (entry.isDirectory()) walk(child);
-      else found.push(child); // links and specials are paths too: they would be copied
+      if (entry.isDirectory()) {
+        found.push({ rel: child, kind: 'dir' });
+        walk(child);
+      } else {
+        const kind = entry.isSymbolicLink() ? 'link' : entry.isFile() ? 'file' : 'other';
+        found.push({ rel: child, kind });
+      }
     }
   };
-  for (const root of ASSEMBLY_ROOTS) walk(root);
-  return found.sort();
+  for (const root of ASSEMBLY_ROOTS) {
+    let stat;
+    try {
+      stat = fs.lstatSync(path.join(consumer, root));
+    } catch (err) {
+      if (err.code === 'ENOENT') continue;
+      throw err;
+    }
+    if (!stat.isDirectory()) {
+      found.push({ rel: root, kind: stat.isSymbolicLink() ? 'link' : stat.isFile() ? 'file' : 'other' });
+      continue;
+    }
+    walk(root);
+  }
+  return found.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
 }
 
 function checkAssembly({ core, consumer }) {
@@ -445,8 +460,17 @@ function checkAssembly({ core, consumer }) {
     'installed manifest',
   );
   requireExactKeys(manifest, MANIFEST_KEYS, 'installed manifest');
-  if (manifest.name !== ROOT || !Array.isArray(manifest.files)) refuse(`${manifestFile} is not an ${ROOT} manifest`);
-  const corePaths = new Set(manifest.files.map((f) => String(f.path).toLowerCase()));
+  if (manifest.name !== ROOT || !Array.isArray(manifest.files)
+      || !manifest.files.every((f) => isPlainObject(f) && typeof f.path === 'string')) {
+    refuse(`${manifestFile} is not an ${ROOT} manifest`);
+  }
+  const coreFiles = new Set();
+  const coreDirs = new Set();
+  for (const { path: rel } of manifest.files) {
+    const lower = rel.toLowerCase();
+    coreFiles.add(lower);
+    for (let i = lower.indexOf('/'); i !== -1; i = lower.indexOf('/', i + 1)) coreDirs.add(lower.slice(0, i));
+  }
   let stat;
   try {
     stat = fs.statSync(consumer);
@@ -455,16 +479,22 @@ function checkAssembly({ core, consumer }) {
   }
   if (!stat.isDirectory()) refuse(`${consumer} is not a directory`);
   const problems = [];
-  const mine = consumerFiles(consumer);
-  for (const rel of mine) {
+  const entries = consumerEntries(consumer);
+  for (const { rel, kind } of entries) {
     const lower = rel.toLowerCase();
-    if (corePaths.has(lower)) problems.push(`${rel} is also a core file`);
+    if (kind === 'dir') {
+      if (coreFiles.has(lower)) problems.push(`${rel} is a directory where the core has a file`);
+    } else {
+      if (coreFiles.has(lower)) problems.push(`${rel} is also a core file`);
+      if (coreDirs.has(lower)) problems.push(`${rel} is a ${kind} where the core has a directory`);
+    }
     for (const dir of CORE_ONLY_DIRS) {
-      if (lower.startsWith(dir)) problems.push(`${rel} is inside ${dir}, which the core owns`);
+      if (lower === dir || lower.startsWith(`${dir}/`)) problems.push(`${rel} is at or inside ${dir}, which the core owns`);
     }
   }
   if (problems.length) refuse(`the add-on and ${ROOT} ${manifest.version} overlap:\n  ${problems.join('\n  ')}`);
-  return { version: manifest.version, consumerFiles: mine.length, coreFiles: manifest.files.length };
+  const files = entries.filter((e) => e.kind !== 'dir').length;
+  return { version: manifest.version, consumerFiles: files, coreFiles: manifest.files.length };
 }
 
 // ---------------------------------------------------------------------------
