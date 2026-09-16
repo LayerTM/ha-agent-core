@@ -71,6 +71,10 @@ jobs:
           TAG: ${{ steps.version.outputs.tag }}
         run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
+            if [ "$PUBLISH" != true ]; then
+              echo "::notice::$TAG is already published; the next release needs a new version"
+              exit 0
+            fi
             echo "::error::release $TAG already exists; a published version is never replaced"
             exit 1
           fi
