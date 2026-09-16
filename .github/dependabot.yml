@@ -28,3 +28,27 @@ updates:
     groups:
       npm:
         patterns: ["*"]
+
+  # The add-on core's runtime dependencies (console + prompt server).
+  - package-ecosystem: npm
+    directory: "/app"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "deps"
+    labels: ["dependencies"]
+    groups:
+      npm-app:
+        patterns: ["*"]
+
+  # The screenshot helper, a separate manifest and lockfile.
+  - package-ecosystem: npm
+    directory: "/ha-tools"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "deps"
+    labels: ["dependencies"]
+    groups:
+      npm-ha-tools:
+        patterns: ["*"]

@@ -8,7 +8,8 @@ const globals = require('globals');
 
 module.exports = [
   {
-    ignores: ['node_modules/**', 'dist/**'],
+    // app/ and ha-tools/ carry their own lint configuration and CI job.
+    ignores: ['node_modules/**', 'dist/**', 'app/**', 'ha-tools/**'],
   },
 
   js.configs.recommended,

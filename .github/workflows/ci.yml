@@ -41,6 +41,46 @@ jobs:
       - name: Type-check (tsc --checkJs)
         run: npm run typecheck
 
+  # The add-on core itself: its moved suites and the engine-neutral contract,
+  # with the same commands the add-ons run.
+  app:
+    name: Core app
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "26"
+      - name: Install dependencies
+        run: npm ci
+      - name: Run tests
+        run: npm test
+      - name: Run alerts loop tests (bash + jq)
+        run: npm run test:alerts
+      - name: Run config-list tests (bash + jq)
+        run: npm run test:config
+
+  app-lint:
+    name: Core app lint & types
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "26"
+      - name: Install dependencies
+        run: npm ci
+      - name: Lint (eslint)
+        run: npm run lint
+      - name: Type-check (tsc --checkJs)
+        run: npm run typecheck
+
   # The release archive is built twice from the same commit on each architecture
   # and must come out byte-identical; the result is then installed with the
   # consumer verifier the way a consumer build does it.
@@ -73,6 +113,23 @@ jobs:
           node tools/verify-core.js install --lock "$lock" --adapter-api "$api" \
             --archive "$(ls "$RUNNER_TEMP"/first/*.tar)" --dest "$RUNNER_TEMP/installed"
           test -f "$RUNNER_TEMP/installed/core-manifest.json"
+      - name: The archive carries the core and nothing of its tests
+        run: |
+          i="$RUNNER_TEMP/installed"
+          for f in app/server/adapter-contract.js app/server/prompt/server.js app/package-lock.json \
+                   ha-tools/package-lock.json rootfs/usr/local/bin/cc-alerts \
+                   tools/verify-core.js tools/check-adapter-graph.js; do
+            test -f "$i/$f" || { echo "::error::missing $f"; exit 1; }
+          done
+          if [ -e "$i/app/test" ] || [ -e "$i/test" ] || [ -e "$i/app/adapter" ]; then
+            echo "::error::tests or an adapter were packed"; exit 1
+          fi
+          # Modes are the committed ones, not the builder's.
+          git ls-files -s -- app/server ha-tools rootfs | while read -r mode _ _ path; do
+            want=$([ "$mode" = 100755 ] && echo 755 || echo 644)
+            got=$(stat -c %a "$i/$path")
+            [ "$got" = "$want" ] || { echo "::error::$path is $got, committed $want"; exit 1; }
+          done
       - uses: actions/upload-artifact@v7
         with:
           name: core-archive-${{ matrix.arch }}

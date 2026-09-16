@@ -4,8 +4,56 @@ Shared core for Home Assistant add-ons that run a coding agent. Each add-on
 consumes the core as a pinned release archive, verified before anything from it
 is unpacked or executed.
 
-> **Status:** the release and verification tooling is in place; the core's
-> runtime code has not been added yet.
+## What the core contains
+
+| path | what |
+|---|---|
+| `app/server/` | the web console (terminal, tabs, uploads, restart) and the prompt API server |
+| `app/package.json`, `app/package-lock.json` | their dependencies, installed by the add-on with `npm ci` |
+| `ha-tools/` | the dashboard screenshot helper |
+| `rootfs/` | shared scripts: alerts, audit and backup hooks, Home Assistant helpers, shell configuration |
+| `tools/verify-core.js`, `tools/check-adapter-graph.js` | the checks an add-on runs when it assembles its image |
+
+An add-on assembles its image from this tree plus its own files, in the same
+layout: its engine adapter goes to `app/adapter/`, its console frontend to
+`app/public/`, its own scripts next to the core's under `rootfs/`.
+
+## The engine adapter
+
+Everything engine-specific comes from one module the add-on provides at
+`app/adapter/index.js`. The core loads it in one place,
+`app/server/adapter-contract.js`, and refuses to start if its `apiVersion` is not
+`1` or a member is missing or of the wrong type:
+
+| member | type | used for |
+|---|---|---|
+| `runner.run(options)` | function | one prompt run; resolves to the run outcome |
+| `runner.shutdown()` | function | stop every running agent process |
+| `runner.safeLangTag(raw)` | function | the language tag a run may use, or `''` |
+| `runner.TIMEOUT_MS` | number | the wall-clock ceiling of one request |
+| `prompt.limitsCredential({ oauthToken, homeDir })` | function | the access token the account-limits call uses, or `''` |
+| `prompt.fetchLimits(accessToken, fetch)` | function | the upstream account-limits request; resolves to the response |
+| `prompt.limitEntry(item)` | function | one upstream limit as a contract entry, or `null` |
+| `prompt.authConfigured({ env, home })` | function | whether the agent has credentials |
+| `prompt.writeMcpConfig({ dir, url, bearer })` | function | write (or, without a URL, remove) the MCP configuration in `dir` |
+| `prompt.hasAuditHook(raw)` | function | whether the run settings carry the audit hook; without it the prompt API does not start |
+| `prompt.removeSavedSessions(homeDir, workDir)` | function | remove transcripts earlier versions saved |
+| `prompt.credentials({ options, env, optionString })` | function | `{ apiKey, oauthToken }` |
+| `prompt.secretValues({ options, env, optionString })` | function | `{ options: [...], env: [...] }`, added to the redactor |
+| `console.bin` | string | the agent executable whose version the console shows |
+| `console.updateCommand` | string | the command behind the console's update button |
+| `console.windowName`, `console.launcher` | strings | the agent's terminal tab |
+| `console.remoteWindow(env)` | optional function | `{ name, argv }` of an extra tab, or `null` |
+
+The adapter may require its own modules and `app/server/prompt/security.js`, and
+nothing else of the core; the core returns to the adapter only through these
+members. `tools/check-adapter-graph.js <app dir>` checks that on an assembled
+tree: it reads every file under `server/` and `adapter/`, follows only
+`require('<string literal>')`, refuses every other way to load or evaluate code
+(require used as a value, `import`, `module.require`, `createRequire`, `eval`,
+`Function`, the `vm` and `module` built-ins, `.mjs` and `.node` files, local
+requires of anything but `.js`, `.cjs` or `.json`, or outside those two
+directories), and reports cycles.
 
 ## The release archive
 
@@ -45,6 +93,8 @@ it already pinned.
 
 The consumer keeps two files in its own repository: `core.lock.json` from the
 release, and a reviewed copy of [`tools/verify-core.js`](tools/verify-core.js).
+(The archive also carries the verifier, for reference; the copy that decides
+whether to trust an archive is never the one inside it.)
 The verifier has no dependencies; it is never taken from the archive it checks.
 
 ```json
@@ -107,6 +157,7 @@ node verify-core.js check --lock core.lock.json --adapter-api 1 --previous-lock 
 | `verify-core.js url --lock FILE` | print the validated archive URL |
 | `verify-core.js check --lock FILE --adapter-api N [--previous-lock FILE]` | validate a lock |
 | `verify-core.js install --lock FILE --adapter-api N [--previous-lock FILE] --archive FILE --dest DIR` | verify and install |
+| `verify-core.js check-assembly --core DIR --consumer DIR` | refuse an add-on whose `app/`, `ha-tools/` or `rootfs/` puts a file, link or special file where the core has a file or a directory, or a directory where the core has a file (letter case ignored), or has anything at or under `app/server` |
 
 Exit status: `0` verified, `1` refused (the reason is printed), `2` usage error.
 
@@ -128,13 +179,18 @@ node tools/pack.js --out dist
 
 ## Development
 
-Requires Node.js 22 or later (CI uses Node.js 26) and Python 3.
+Requires Node.js 22 or later (CI uses Node.js 26), Python 3, bash and jq.
+
+The tests in `app/test/contract/` run the prompt API and the console against a
+neutral test adapter (`app/test/fixtures/neutral-adapter.js`) that records what
+the core dispatches; it is never packed.
 
 ```sh
 npm ci
 npm test
 npm run lint
 npm run typecheck
+(cd app && npm ci && npm test && npm run test:alerts && npm run test:config && npm run lint && npm run typecheck)
 python .github/scripts/secret_scan.py .
 python .github/scripts/hygiene_scan.py .
 ```

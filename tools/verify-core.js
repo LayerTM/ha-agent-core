@@ -34,6 +34,9 @@
  *   verify-core.js check   --lock FILE --adapter-api N [--previous-lock FILE]
  *   verify-core.js install --lock FILE --adapter-api N [--previous-lock FILE]
  *                          --archive FILE --dest DIR
+ *   verify-core.js check-assembly --core DIR --consumer DIR
+ *     (the add-on's app/, ha-tools/ and rootfs/ share no path with the installed
+ *     core, and add nothing under a directory the core owns whole)
  * Exit: 0 verified, 1 refused, 2 usage error.
  */
 
@@ -406,19 +409,111 @@ function install({ lock, previousLock, adapterApi, archive, dest }) {
 }
 
 // ---------------------------------------------------------------------------
+// Assembly: an add-on's own files next to an installed core
+// ---------------------------------------------------------------------------
+
+// The trees an add-on image is assembled from. A path is claimed by the core or
+// by the add-on, never by both (also not by letter case): the add-on may not put
+// a file where the core has a file or a directory, nor a directory where the core
+// has a file, and it has nothing at all at or under a directory the core owns
+// whole. Links and special files count as files — a copy would place them.
+const ASSEMBLY_ROOTS = ['app', 'ha-tools', 'rootfs'];
+const CORE_ONLY_DIRS = ['app/server'];
+
+// Every entry of the add-on's assembled roots, directories included, as
+// { rel, kind } with kind one of dir, file, link, other.
+function consumerEntries(consumer) {
+  const found = [];
+  const walk = (rel) => {
+    for (const entry of fs.readdirSync(path.join(consumer, rel), { withFileTypes: true })) {
+      const child = `${rel}/${entry.name}`;
+      if (entry.isDirectory()) {
+        found.push({ rel: child, kind: 'dir' });
+        walk(child);
+      } else {
+        const kind = entry.isSymbolicLink() ? 'link' : entry.isFile() ? 'file' : 'other';
+        found.push({ rel: child, kind });
+      }
+    }
+  };
+  for (const root of ASSEMBLY_ROOTS) {
+    let stat;
+    try {
+      stat = fs.lstatSync(path.join(consumer, root));
+    } catch (err) {
+      if (err.code === 'ENOENT') continue;
+      throw err;
+    }
+    if (!stat.isDirectory()) {
+      found.push({ rel: root, kind: stat.isSymbolicLink() ? 'link' : stat.isFile() ? 'file' : 'other' });
+      continue;
+    }
+    walk(root);
+  }
+  return found.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
+}
+
+function checkAssembly({ core, consumer }) {
+  const manifestFile = path.join(core, MANIFEST_NAME);
+  const manifest = parseJson(
+    readFileBounded(manifestFile, LIMITS.archiveBytes, 'installed manifest').toString('utf8'),
+    'installed manifest',
+  );
+  requireExactKeys(manifest, MANIFEST_KEYS, 'installed manifest');
+  if (manifest.name !== ROOT || !Array.isArray(manifest.files)
+      || !manifest.files.every((f) => isPlainObject(f) && typeof f.path === 'string')) {
+    refuse(`${manifestFile} is not an ${ROOT} manifest`);
+  }
+  const coreFiles = new Set();
+  const coreDirs = new Set();
+  for (const { path: rel } of manifest.files) {
+    const lower = rel.toLowerCase();
+    coreFiles.add(lower);
+    for (let i = lower.indexOf('/'); i !== -1; i = lower.indexOf('/', i + 1)) coreDirs.add(lower.slice(0, i));
+  }
+  let stat;
+  try {
+    stat = fs.statSync(consumer);
+  } catch (err) {
+    refuse(`${consumer} cannot be read: ${err.message}`);
+  }
+  if (!stat.isDirectory()) refuse(`${consumer} is not a directory`);
+  const problems = [];
+  const entries = consumerEntries(consumer);
+  for (const { rel, kind } of entries) {
+    const lower = rel.toLowerCase();
+    if (kind === 'dir') {
+      if (coreFiles.has(lower)) problems.push(`${rel} is a directory where the core has a file`);
+    } else {
+      if (coreFiles.has(lower)) problems.push(`${rel} is also a core file`);
+      if (coreDirs.has(lower)) problems.push(`${rel} is a ${kind} where the core has a directory`);
+    }
+    for (const dir of CORE_ONLY_DIRS) {
+      if (lower === dir || lower.startsWith(`${dir}/`)) problems.push(`${rel} is at or inside ${dir}, which the core owns`);
+    }
+  }
+  if (problems.length) refuse(`the add-on and ${ROOT} ${manifest.version} overlap:\n  ${problems.join('\n  ')}`);
+  const files = entries.filter((e) => e.kind !== 'dir').length;
+  return { version: manifest.version, consumerFiles: files, coreFiles: manifest.files.length };
+}
+
+// ---------------------------------------------------------------------------
 // Command line
 // ---------------------------------------------------------------------------
 
 const USAGE = `usage:
   verify-core.js url     --lock FILE
   verify-core.js check   --lock FILE --adapter-api N [--previous-lock FILE]
-  verify-core.js install --lock FILE --adapter-api N [--previous-lock FILE] --archive FILE --dest DIR`;
+  verify-core.js install --lock FILE --adapter-api N [--previous-lock FILE] --archive FILE --dest DIR
+  verify-core.js check-assembly --core DIR --consumer DIR`;
 
 const REQUIRED = {
   url: ['lock'],
   check: ['lock', 'adapter-api'],
   install: ['lock', 'adapter-api', 'archive', 'dest'],
+  'check-assembly': ['core', 'consumer'],
 };
+const OPTIONAL_FLAGS = { check: ['previous-lock'], install: ['previous-lock'] };
 
 class UsageError extends Error {}
 
@@ -437,12 +532,14 @@ function parseCommand(argv) {
         'adapter-api': { type: 'string' },
         archive: { type: 'string' },
         dest: { type: 'string' },
+        core: { type: 'string' },
+        consumer: { type: 'string' },
       },
     }));
   } catch (err) {
     throw new UsageError(err.message);
   }
-  const allowed = new Set([...REQUIRED[command], ...(command === 'url' ? [] : ['previous-lock'])]);
+  const allowed = new Set([...REQUIRED[command], ...(OPTIONAL_FLAGS[command] || [])]);
   for (const key of Object.keys(values)) {
     if (!allowed.has(key)) throw new UsageError(`--${key} is not an option of ${command}`);
   }
@@ -462,6 +559,8 @@ function parseCommand(argv) {
       adapterApi,
       archive: values.archive,
       dest: values.dest,
+      core: values.core,
+      consumer: values.consumer,
     },
   };
 }
@@ -482,6 +581,9 @@ function run(argv, out = process.stdout, err = process.stderr) {
       const lock = loadLocks(options);
       checkAdapterApi(lock, options.adapterApi);
       out.write(`lock verified: ${ROOT} ${lock.version}\n`);
+    } else if (command === 'check-assembly') {
+      const result = checkAssembly(options);
+      out.write(`assembly verified: ${result.consumerFiles} add-on files, ${result.coreFiles} files of ${ROOT} ${result.version}\n`);
     } else {
       const result = install(options);
       out.write(`installed ${ROOT} ${result.version} (${result.files} files) into ${result.dest}\n`);
@@ -509,6 +611,7 @@ module.exports = {
   parseTar,
   inspectArchive,
   install,
+  checkAssembly,
   run,
 };
 

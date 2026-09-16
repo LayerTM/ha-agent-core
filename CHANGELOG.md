@@ -15,3 +15,9 @@ uses [Semantic Versioning](https://semver.org/).
   the pinned digest, the archive structure and its manifest before writing a
   single file, and never overlays an existing installation.
 - Release workflow that publishes a tagged version once, after every CI gate.
+- The add-on core: web console, prompt API server, shared scripts and the
+  screenshot helper, with the engine-specific parts behind one adapter module
+  (`app/adapter/index.js`) that the core validates when it loads it.
+- Engine-neutral contract tests for the prompt API and the adapter boundary.
+- `tools/check-adapter-graph.js` and `verify-core.js check-assembly`, the checks
+  an add-on runs on its assembled image tree.
