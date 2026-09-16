@@ -1,0 +1,17 @@
+{
+  // Type-checks the JavaScript sources without requiring annotations.
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "module": "commonjs",
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "strict": false,
+    "skipLibCheck": true,
+    "maxNodeModuleJsDepth": 0,
+    "types": ["node"]
+  },
+  "include": ["tools/**/*.js", "test/**/*.js"],
+  "exclude": ["node_modules", "dist"]
+}

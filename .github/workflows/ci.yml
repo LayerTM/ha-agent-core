@@ -1,0 +1,131 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  # The release workflow runs every gate here against the tagged commit before it
+  # publishes anything.
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "26"
+      - name: Install dependencies
+        run: npm ci
+      - name: Run tests
+        run: npm test
+
+  lint-js:
+    name: JS lint & types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "26"
+      - name: Install dependencies
+        run: npm ci
+      - name: Lint (eslint)
+        run: npm run lint
+      - name: Type-check (tsc --checkJs)
+        run: npm run typecheck
+
+  # The release archive is built twice from the same commit on each architecture
+  # and must come out byte-identical; the result is then installed with the
+  # consumer verifier the way a consumer build does it.
+  package:
+    name: Package (${{ matrix.arch }})
+    strategy:
+      matrix:
+        include:
+          - arch: x64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "26"
+      - name: Build the archive twice
+        run: |
+          node tools/pack.js --out "$RUNNER_TEMP/first"
+          node tools/pack.js --out "$RUNNER_TEMP/second"
+          cmp "$RUNNER_TEMP/first/core.lock.json" "$RUNNER_TEMP/second/core.lock.json"
+          for f in "$RUNNER_TEMP"/first/*.tar; do cmp "$f" "$RUNNER_TEMP/second/$(basename "$f")"; done
+      - name: Install it with the consumer verifier
+        run: |
+          lock="$RUNNER_TEMP/first/core.lock.json"
+          api="$(node -p 'require("./package.json").haAgentCore.adapterApi')"
+          node tools/verify-core.js check --lock "$lock" --adapter-api "$api"
+          node tools/verify-core.js install --lock "$lock" --adapter-api "$api" \
+            --archive "$(ls "$RUNNER_TEMP"/first/*.tar)" --dest "$RUNNER_TEMP/installed"
+          test -f "$RUNNER_TEMP/installed/core-manifest.json"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: core-archive-${{ matrix.arch }}
+          path: ${{ runner.temp }}/first/
+          if-no-files-found: error
+
+  # Anyone can rebuild a release and compare it with the published digest only if
+  # the archive does not depend on the machine that packed it.
+  reproducible:
+    name: Reproducible archive
+    needs: package
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Both architectures packaged
+        run: test "${{ needs.package.result }}" = success
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: core-archive-*
+          path: ${{ runner.temp }}/archives
+      - name: Both architectures produced the same bytes
+        run: |
+          cd "$RUNNER_TEMP/archives"
+          cmp core-archive-x64/core.lock.json core-archive-arm64/core.lock.json
+          for f in core-archive-x64/*.tar; do cmp "$f" "core-archive-arm64/$(basename "$f")"; done
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      - name: Self-test the scanner
+        working-directory: .github/scripts
+        run: python test_secret_scan.py
+      - name: Scan tracked files for secrets and personal data
+        run: python .github/scripts/secret_scan.py .
+
+  # A repository is copied onto machines nothing like the one it was written on.
+  # An absolute home or temporary path, a symlink pointing outside the clone, a
+  # link to an authoring transcript or an attribution trailer left in a tracked
+  # file all work on exactly one computer and are dead everywhere else.
+  hygiene:
+    name: Repository hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      - name: Self-test the scanner
+        working-directory: .github/scripts
+        run: python test_hygiene_scan.py
+      - name: Scan tracked files for traces of one machine
+        run: python .github/scripts/hygiene_scan.py .
