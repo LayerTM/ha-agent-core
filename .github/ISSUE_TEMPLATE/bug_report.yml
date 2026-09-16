@@ -1,0 +1,29 @@
+name: Bug report
+description: Something in the core, its archive or its verifier does not work as documented.
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Core version
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: input
+    id: node
+    attributes:
+      label: Node.js version
+      placeholder: "26.x"
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: The command you ran and its full output. Remove tokens and other private values first.
+      render: shell

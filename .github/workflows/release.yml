@@ -1,0 +1,63 @@
+name: release
+
+# Pushing a tag vX.Y.Z publishes that version: every CI gate runs against the
+# tagged commit first, then the archive is built from it, installed once with the
+# consumer verifier, and attached to a new release together with its SHA-256 and
+# the lock a consumer pins. A version is published once; an existing release is
+# never replaced.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  gates:
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: Publish
+    needs: gates
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "26"
+      - name: The tag names the package version and a commit on main
+        run: |
+          version="$(node -p 'require("./package.json").version')"
+          test "$TAG" = "v$version" || { echo "::error::tag $TAG does not match package version $version"; exit 1; }
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "::error::$TAG is not on main"; exit 1; }
+          awk -v v="$version" '$0 ~ "^## \\[" v "\\]" {on=1; next} on && /^## / {exit} on {print}' CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+          test -s "$RUNNER_TEMP/notes.md" || { echo "::error::CHANGELOG.md has no section for $version"; exit 1; }
+      - name: The version has not been published
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::error::release $TAG already exists; a published version is never replaced"
+            exit 1
+          fi
+      - name: Build and verify the archive
+        run: |
+          node tools/pack.js --out "$RUNNER_TEMP/dist"
+          lock="$RUNNER_TEMP/dist/core.lock.json"
+          api="$(node -p 'require("./package.json").haAgentCore.adapterApi')"
+          node tools/verify-core.js install --lock "$lock" --adapter-api "$api" \
+            --archive "$(ls "$RUNNER_TEMP"/dist/*.tar.gz)" --dest "$RUNNER_TEMP/installed"
+      - name: Publish the release
+        run: |
+          gh release create "$TAG" --verify-tag --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md" \
+            "$RUNNER_TEMP"/dist/*.tar.gz "$RUNNER_TEMP"/dist/*.tar.gz.sha256 "$RUNNER_TEMP/dist/core.lock.json"
