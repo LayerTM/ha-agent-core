@@ -11,6 +11,7 @@ const terminal = require('./terminal');
 const promptServer = require('./prompt');
 const { stampAssetVersion } = require('./shell');
 const sources = require('./sources');
+const { adapter } = require('./adapter-contract');
 
 const PORT = Number(process.env.CLAUDE_CONSOLE_PORT || 8099);
 const UPLOAD_DIR = process.env.UPLOAD_DIR || '/data/uploads';
@@ -144,11 +145,11 @@ async function main() {
   await fsp.mkdir(UPLOAD_DIR, { recursive: true });
   await tmux.ensureMain();
 
-  if (process.env.REMOTE_CONTROL === 'true') {
-    // Official Anthropic Remote Control: runs in its own tab so the session
-    // URL and QR code render in a real terminal. Requires a full-scope /login;
-    // the wrapper keeps the tab alive with guidance if that's missing.
-    tmux.ensureWindow('remote', ['/usr/local/bin/start-remote']).catch((err) => {
+  // An engine's remote-control tab, when the adapter has one and the add-on
+  // options turn it on: the adapter describes the window, the console opens it.
+  const remote = adapter().console.remoteWindow ? adapter().console.remoteWindow(process.env) : null;
+  if (remote) {
+    tmux.ensureWindow(remote.name, remote.argv).catch((err) => {
       console.error('remote-control window failed:', err.stderr || err.message);
     });
   }

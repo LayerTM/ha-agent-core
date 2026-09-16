@@ -505,3 +505,67 @@ test('an archive built by the packer installs end to end', (t) => {
   assert.equal(fs.statSync(path.join(dest, 'src', 'deep', 'tool.sh')).mode & 0o777, 0o755);
   assert.ok(!fs.existsSync(path.join(dest, 'test')));
 });
+
+// --- assembly ------------------------------------------------------------------
+
+function assemblyFixture(t, consumerFilesToWrite) {
+  const dir = tempDir(t);
+  const core = path.join(dir, 'core');
+  fs.mkdirSync(core);
+  fs.writeFileSync(path.join(core, 'core-manifest.json'), JSON.stringify({
+    name: 'ha-agent-core', version: '1.2.3', commit: COMMIT, adapterApi: 1,
+    files: ['app/server/index.js', 'app/package.json', 'rootfs/usr/local/bin/ha-state', 'LICENSE']
+      .map((p) => ({ path: p, mode: 0o644, size: 0, sha256: verify.sha256(Buffer.alloc(0)) })),
+  }));
+  const consumer = path.join(dir, 'addon');
+  for (const rel of consumerFilesToWrite) {
+    fs.mkdirSync(path.dirname(path.join(consumer, rel)), { recursive: true });
+    fs.writeFileSync(path.join(consumer, rel), 'x');
+  }
+  fs.mkdirSync(consumer, { recursive: true });
+  return { core, consumer };
+}
+
+test('an add-on that adds only its own paths assembles', (t) => {
+  const { core, consumer } = assemblyFixture(t, [
+    'app/adapter/index.js', 'app/public/index.html', 'rootfs/usr/local/bin/start-agent', 'Dockerfile', 'LICENSE',
+  ]);
+  const result = cli('check-assembly', '--core', core, '--consumer', consumer);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, 'assembly verified: 3 add-on files, 4 files of ha-agent-core 1.2.3\n');
+  // Files outside the assembled roots are the add-on's business.
+  assert.equal(verify.checkAssembly({ core, consumer }).consumerFiles, 3);
+});
+
+test('an add-on path that the core also ships is refused', (t) => {
+  for (const clash of ['app/package.json', 'rootfs/usr/local/bin/ha-state', 'rootfs/usr/local/bin/HA-State', 'app/server/index.js']) {
+    const { core, consumer } = assemblyFixture(t, ['app/adapter/index.js', clash]);
+    refused(() => verify.checkAssembly({ core, consumer }), /overlap/);
+    const result = cli('check-assembly', '--core', core, '--consumer', consumer);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, new RegExp(`${clash.replace(/[.]/g, '\\.')} is also a core file`));
+  }
+});
+
+test('an add-on file inside a directory the core owns is refused', (t) => {
+  const { core, consumer } = assemblyFixture(t, ['app/server/extra.js', 'app/server/prompt/runner.js']);
+  refused(() => verify.checkAssembly({ core, consumer }),
+    /app\/server\/extra\.js is inside app\/server\/[\s\S]*app\/server\/prompt\/runner\.js is inside app\/server\//);
+});
+
+test('a link in the add-on tree is a path like any other', (t) => {
+  const { core, consumer } = assemblyFixture(t, ['app/adapter/index.js']);
+  fs.symlinkSync('/etc/hostname', path.join(consumer, 'app', 'package.json'));
+  refused(() => verify.checkAssembly({ core, consumer }), /app\/package\.json is also a core file/);
+});
+
+test('a missing or foreign manifest, or a missing add-on tree, is refused', (t) => {
+  const { core, consumer } = assemblyFixture(t, []);
+  refused(() => verify.checkAssembly({ core: path.join(core, 'nope'), consumer }), /installed manifest cannot be read/);
+  refused(() => verify.checkAssembly({ core, consumer: path.join(consumer, 'nope') }), /cannot be read/);
+  fs.writeFileSync(path.join(core, 'core-manifest.json'), '{"name":"other"}');
+  refused(() => verify.checkAssembly({ core, consumer }), /installed manifest is missing/);
+  assert.equal(cli('check-assembly', '--core', core).status, 2);
+  assert.equal(cli('check-assembly', '--core', core, '--consumer', consumer, '--lock', 'x').status, 2);
+  assert.equal(cli('url', '--lock', 'x', '--previous-lock', 'y').status, 2);
+});

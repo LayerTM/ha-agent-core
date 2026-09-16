@@ -2,6 +2,7 @@
 
 const { execFile } = require('node:child_process');
 const fs = require('node:fs');
+const { adapter } = require('./adapter-contract');
 
 const MAIN = 'main';
 const CLAUDE_WINDOW = '0';
@@ -44,7 +45,8 @@ function ensureMain() {
     ensureMainInFlight = (async () => {
       if (await hasSession(MAIN)) return;
       try {
-        await run(['new-session', '-d', '-s', MAIN, '-n', 'claude', '-c', workdir(), '/usr/local/bin/start-claude']);
+        const { windowName, launcher } = adapter().console;
+        await run(['new-session', '-d', '-s', MAIN, '-n', windowName, '-c', workdir(), launcher]);
       } catch (err) {
         if (!/duplicate session/.test(String(err.stderr || ''))) throw err;
       }
@@ -82,7 +84,7 @@ async function killWindow(index) {
 }
 
 async function respawnClaude() {
-  await run(['respawn-window', '-k', '-t', `${MAIN}:${CLAUDE_WINDOW}`, '/usr/local/bin/start-claude']);
+  await run(['respawn-window', '-k', '-t', `${MAIN}:${CLAUDE_WINDOW}`, adapter().console.launcher]);
 }
 
 async function capturePane(index, lines) {

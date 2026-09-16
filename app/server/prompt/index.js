@@ -13,7 +13,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { createPromptApp } = require('./server');
 const { buildRedactor } = require('./security');
-const runner = require('./runner');
+const { adapter } = require('../adapter-contract');
 const { resolveCoreTarget } = require('./core-target');
 const { startCoreRelay } = require('./core-relay');
 
@@ -66,65 +66,25 @@ async function loadToken(options) {
   return token;
 }
 
-// The MCP config the spawned Claude reads (0600). It points at the loopback
-// relay and carries the per-boot RELAY token — not the Home Assistant one, which
-// now stays in this process (see core-relay.js). The relay is what talks to
-// Core, so this hop is plain HTTP on 127.0.0.1 and needs no TLS handling from a
-// client we do not control. Assist entity exposure remains the outer capability
-// ceiling. Never the Supervisor token.
-async function writeMcpConfig(url, bearer) {
-  const dir = path.join(DATA_DIR, 'claude-prompt');
-  await fsp.mkdir(dir, { recursive: true, mode: 0o700 });
-  const file = path.join(dir, 'ha-mcp.json');
-  if (!url || !bearer) {
-    await fsp.rm(file, { force: true });
-    return null;
-  }
-  const config = {
-    mcpServers: {
-      ha: {
-        type: 'http',
-        url,
-        headers: { Authorization: `Bearer ${bearer}` },
-      },
-    },
-  };
-  await fsp.writeFile(file, JSON.stringify(config, null, 2), { mode: 0o600 });
-  return file;
+// The MCP config the spawned agent reads, written by the adapter into the
+// prompt server's private 0700 directory (0600). It points at the loopback relay
+// and carries the per-boot RELAY token — not the Home Assistant one, which stays
+// in this process (see core-relay.js). Never the Supervisor token. Resolves to
+// the file path, or null (file removed) when there is no relay.
+function writeMcpConfig(url, bearer) {
+  return adapter().prompt.writeMcpConfig({ dir: path.join(DATA_DIR, 'claude-prompt'), url, bearer });
 }
 
 // The settings a chat run gets instead of the console's settings files carry
-// the audit hook (built by the service script from addon-hooks.sh). True only
-// when at least one PostToolUse hook command is there to record actions.
+// the audit hook. True only when a hook is there to record actions.
 function hasAuditHook(raw) {
-  try {
-    const post = JSON.parse(raw).hooks.PostToolUse;
-    return Array.isArray(post) && post.some((entry) => Array.isArray(entry?.hooks)
-      && entry.hooks.some((h) => typeof h?.command === 'string' && h.command !== ''));
-  } catch {
-    return false;
-  }
+  return adapter().prompt.hasAuditHook(raw);
 }
 
-// Earlier versions let every chat run save its session — a transcript holding
-// the home state the run read — under Claude's project directory for the work
-// folder, and nothing removed them. Runs no longer save one; this clears what is
-// left. /data survives updates, so it runs at every start and does nothing once
-// the directory is gone. Resolves to the number of transcripts removed.
-async function removeSavedPromptSessions(homeDir, workDir) {
-  // Claude names a folder's project directory after its path with every
-  // character outside [A-Za-z0-9] replaced by '-': /data/claude-prompt/work is
-  // -data-claude-prompt-work, the directory found on installations.
-  const dir = path.join(homeDir, '.claude', 'projects', workDir.replace(/[^A-Za-z0-9]/g, '-'));
-  let entries;
-  try {
-    entries = await fsp.readdir(dir);
-  } catch (err) {
-    if (err.code === 'ENOENT') return 0;
-    throw err;
-  }
-  await fsp.rm(dir, { recursive: true, force: true });
-  return entries.filter((name) => name.endsWith('.jsonl')).length;
+// Transcripts that earlier versions let chat runs save are removed at every
+// start. Resolves to the number of transcripts removed.
+function removeSavedPromptSessions(homeDir, workDir) {
+  return adapter().prompt.removeSavedSessions(homeDir, workDir);
 }
 
 async function ensureWorkDir() {
@@ -233,15 +193,16 @@ async function start() {
     : await writeMcpConfig('', '');
   const workDir = await ensureWorkDir();
 
+  // The engine's credentials, in the order the redactor has always received them:
+  // its option values after the Home Assistant ones, its environment values last.
+  const secrets = adapter().prompt.secretValues({ options, env: process.env, optionString });
   const redact = buildRedactor([
     token,
     haToken,
     optionString(options, 'ha_token'),
-    optionString(options, 'api_key'),
-    optionString(options, 'oauth_token'),
+    ...secrets.options,
     process.env.SUPERVISOR_TOKEN,
-    process.env.ANTHROPIC_API_KEY,
-    process.env.CLAUDE_CODE_OAUTH_TOKEN,
+    ...secrets.env,
   ]);
 
   const auditFile = path.join(DATA_DIR, 'claude-audit.log');
@@ -274,8 +235,7 @@ async function start() {
     // For /api/account_limits: which credential the account has, in the same
     // order everything else here uses (option first, then environment). The
     // interactive-login case has neither and is read from HOME at call time.
-    apiKey: optionString(options, 'api_key') || process.env.ANTHROPIC_API_KEY || '',
-    oauthToken: optionString(options, 'oauth_token') || process.env.CLAUDE_CODE_OAUTH_TOKEN || '',
+    ...adapter().prompt.credentials({ options, env: process.env, optionString }),
     homeDir: process.env.HOME || '/data/home',
     workDir,
     addonVersion: process.env.ADDON_VERSION || 'unknown',
@@ -307,7 +267,7 @@ async function start() {
   announceDiscovery(token).catch((err) => log(`discovery error: ${err.message}`));
 
   return function shutdown() {
-    runner.shutdown();
+    adapter().runner.shutdown();
     if (relay) relay.close();
     server.close();
     server.closeAllConnections();

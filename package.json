@@ -17,7 +17,14 @@
   "files": [
     "LICENSE",
     "package.json",
-    "package-lock.json"
+    "package-lock.json",
+    "app/server/",
+    "app/package.json",
+    "app/package-lock.json",
+    "ha-tools/",
+    "rootfs/",
+    "tools/verify-core.js",
+    "tools/check-adapter-graph.js"
   ],
   "scripts": {
     "test": "node --test \"test/**/*.test.js\"",

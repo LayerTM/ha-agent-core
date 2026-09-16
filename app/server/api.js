@@ -9,8 +9,8 @@ const express = require('express');
 const Busboy = require('busboy');
 const tmux = require('./tmux');
 const { broadcastTabs } = require('./terminal');
+const { adapter } = require('./adapter-contract');
 
-const CLAUDE_BIN = '/data/home/.local/bin/claude';
 const MAX_UPLOAD_BYTES = 1024 * 1024 * 1024; // 1 GiB hard cap
 const MAX_CAPTURE_LINES = 50000;
 const MAX_QUICK_PROMPTS = 20;
@@ -49,7 +49,7 @@ function exec(cmd, args, options = {}) {
 
 async function claudeVersion() {
   try {
-    const { stdout } = await exec(CLAUDE_BIN, ['--version'], { env: { ...process.env, HOME: '/data/home' } });
+    const { stdout } = await exec(adapter().console.bin, ['--version'], { env: { ...process.env, HOME: '/data/home' } });
     return stdout.trim().split(/\s+/)[0];
   } catch {
     return null;
@@ -201,7 +201,7 @@ function createRouter({ uploadDir, viewerCount = null }) {
     let failed = false;
     try {
       const args = target ? [target] : [];
-      const { stdout, stderr } = await exec('/usr/local/bin/update-claude', args, {
+      const { stdout, stderr } = await exec(adapter().console.updateCommand, args, {
         timeout: 10 * 60 * 1000,
         env: { ...process.env, HOME: '/data/home' },
       });

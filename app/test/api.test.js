@@ -22,6 +22,9 @@ process.env.CC_ALERTS_STATE_PATH = STATE;
 // No Supervisor in the test env: keep /alerts from attempting the HA-states fetch.
 delete process.env.SUPERVISOR_TOKEN;
 
+// The console reads its engine values from the adapter; a neutral one here.
+require('../server/adapter-contract').useAdapter(require('./fixtures/neutral-adapter').createNeutralAdapter().adapter);
+
 const express = require('express');
 const { createRouter } = require('../server/api');
 

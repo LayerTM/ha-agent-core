@@ -14,8 +14,10 @@ const {
   ipAllowed, tokenMatches, sanitizePrompt, sanitizeId,
   validateIntents, redactDeep, sha12,
 } = require('./security');
-const { runClaude, TIMEOUT_MS, safeLangTag } = require('./runner');
+const { adapter } = require('../adapter-contract');
 const { createHistoryStore } = require('./history');
+
+const { run: runClaude, TIMEOUT_MS, safeLangTag } = adapter().runner;
 
 const MAX_PROMPT_BYTES = 8 * 1024;
 const MAX_CONCURRENT_RUNS = 2;
@@ -605,58 +607,24 @@ function createPromptApp({
   // if asked; the endpoint therefore reports the auth MODE next to the list and
   // an API-key install gets an empty list rather than an error, so a consumer
   // creates no entities at all instead of a row of unavailable ones.
-  // Fixed, deliberately not overridable: this is where the account's access token
-  // is SENT, and the add-on exports every `environment_vars` entry into this
-  // process — so an override would let one pasted config line ship the credential
-  // to any host, with nothing in the log to show it. The siblings that do take an
-  // environment override are numeric tuning; a credential's destination is not
-  // configuration. Tests inject `limitsFetch` instead.
-  const LIMITS_URL = 'https://api.anthropic.com/api/oauth/usage';
+  // Where the access token is sent, and with which headers, is the adapter's
+  // (fixed there, deliberately not overridable). Tests inject `limitsFetch`.
   const LIMITS_TTL_MS = 5 * 60 * 1000;
   // Both are keyed on WHICH credential asked, so figures fetched for one account
   // are never served to the next one after a re-login.
   let limitsCache = { value: null, stamp: 0, key: '' };
   let limitsInFlight = null; // { key, promise } while a call is out
 
-  // The OAuth access token as the CLI keeps it: the pasted `oauth_token` option
-  // (or its environment variable) first, otherwise the credential file an
-  // interactive `claude` login writes. Read at call time, so logging in after the
-  // add-on started is picked up without a restart.
+  // Which access token the account has, read at call time so a login after the
+  // add-on started is picked up without a restart; '' when there is none.
   function oauthAccessToken() {
-    if (oauthToken) return oauthToken;
-    try {
-      const stored = JSON.parse(fs.readFileSync(`${homeDir}/.claude/.credentials.json`, 'utf8'));
-      const saved = stored && stored.claudeAiOauth && stored.claudeAiOauth.accessToken;
-      return typeof saved === 'string' ? saved : '';
-    } catch {
-      return '';
-    }
+    return adapter().prompt.limitsCredential({ oauthToken, homeDir });
   }
 
-  // One upstream entry → one contract entry. An unknown `kind` passes through
-  // unchanged: the list is the account's, not ours, and a bucket we have never
-  // seen is still a real limit the user is subject to. A `kind` or `percent` that
-  // is not what it claims makes the whole payload unparsable (null → 503) — a
-  // limit reported as 0 % would read as "plenty left".
+  // One upstream entry → one contract entry, or null when the entry is not what
+  // it claims (which makes the whole payload unparsable).
   function limitEntry(item) {
-    if (!item || typeof item !== 'object') return null;
-    if (typeof item.kind !== 'string' || !Number.isFinite(item.percent)) return null;
-    // The contract promises an integer 0–100. A fraction is rounded (a gauge has
-    // no use for 82.4999), and a value outside the range is not a percentage at
-    // all — that payload is unparsable rather than something to clamp into a
-    // plausible-looking number.
-    const percent = Math.round(item.percent);
-    if (percent < 0 || percent > 100) return null;
-    const modelName = item.scope && item.scope.model && item.scope.model.display_name;
-    return {
-      kind: item.kind,
-      percent,
-      // null, not '': the same situation `resets_at` answers with null, and an
-      // empty string would read as a severity the account actually reported.
-      severity: typeof item.severity === 'string' ? item.severity : null,
-      resets_at: typeof item.resets_at === 'string' ? item.resets_at : null,
-      model: typeof modelName === 'string' ? modelName : null,
-    };
+    return adapter().prompt.limitEntry(item);
   }
 
   // Resolves to the report, or null when there is nothing honest to say.
@@ -676,10 +644,7 @@ function createPromptApp({
     if (limitsInFlight && limitsInFlight.key === credentialKey) return limitsInFlight.promise;
     const promise = (async () => {
       try {
-        const resp = await limitsFetch(LIMITS_URL, {
-          headers: { Authorization: `Bearer ${accessToken}`, 'anthropic-beta': 'oauth-2025-04-20' },
-          signal: AbortSignal.timeout(10000),
-        });
+        const resp = await adapter().prompt.fetchLimits(accessToken, limitsFetch);
         if (!resp.ok) return null;
         const body = /** @type {any} */ (await resp.json());
         if (!body || !Array.isArray(body.limits)) return null;
@@ -750,11 +715,7 @@ function createPromptApp({
   app.get('/api/status', async (req, res) => {
     const version = await claudeVersion();
     const home = process.env.HOME || '/data/home';
-    const authConfigured = Boolean(
-      process.env.ANTHROPIC_API_KEY
-      || process.env.CLAUDE_CODE_OAUTH_TOKEN
-      || fs.existsSync(`${home}/.claude/.credentials.json`),
-    );
+    const authConfigured = Boolean(adapter().prompt.authConfigured({ env: process.env, home }));
     res.json({
       ready: Boolean(version) && authConfigured,
       version: addonVersion,
