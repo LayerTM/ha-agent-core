@@ -7,7 +7,7 @@
  * A consumer pins one release in a lock file it keeps in its own repository:
  *
  *   { "lockVersion": 1, "version": "X.Y.Z", "commit": "<40 hex>",
- *     "url": "https://.../releases/download/vX.Y.Z/ha-agent-core-X.Y.Z.tar.gz",
+ *     "url": "https://.../releases/download/vX.Y.Z/ha-agent-core-X.Y.Z.tar",
  *     "sha256": "<64 hex>", "adapterApi": N }
  *
  * and, at build time, downloads that URL to a file and runs `install`. Nothing is
@@ -40,7 +40,6 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
-const zlib = require('node:zlib');
 const { parseArgs } = require('node:util');
 
 const ROOT = 'ha-agent-core';
@@ -52,7 +51,6 @@ const FILE_KEYS = ['mode', 'path', 'sha256', 'size'];
 const MODES = new Set([0o644, 0o755]);
 const LIMITS = Object.freeze({
   archiveBytes: 64 * 1024 * 1024,
-  unpackedBytes: 256 * 1024 * 1024,
   entries: 20000,
 });
 
@@ -68,7 +66,7 @@ function refuse(message) {
 }
 
 function archiveName(version) {
-  return `${ROOT}-${version}.tar.gz`;
+  return `${ROOT}-${version}.tar`;
 }
 
 function sha256(data) {
@@ -127,7 +125,7 @@ function parseLock(text) {
 }
 
 // The URL must name the release asset of exactly the pinned version: an https
-// release-download path ending in vX.Y.Z/ha-agent-core-X.Y.Z.tar.gz, with no
+// release-download path ending in vX.Y.Z/ha-agent-core-X.Y.Z.tar, with no
 // credentials, query or fragment that could make the same text fetch something else.
 function checkUrl(url, version) {
   if (typeof url !== 'string') refuse('lock.url is not a string');
@@ -242,7 +240,6 @@ function checkCollisions(entries) {
 function parseTar(tar) {
   if (tar.length % BLOCK !== 0) refuse('archive is not a whole number of tar blocks');
   const entries = [];
-  let total = 0;
   let offset = 0;
   for (;;) {
     if (offset + BLOCK > tar.length) refuse('archive ends without an end-of-archive marker');
@@ -271,8 +268,6 @@ function parseTar(tar) {
     const padded = Math.ceil(size / BLOCK) * BLOCK;
     if (offset + padded > tar.length) refuse(`${entryPath}: truncated`);
     if (!isZero(tar.subarray(offset + size, offset + padded))) refuse(`${entryPath}: non-zero padding`);
-    total += size;
-    if (total > LIMITS.unpackedBytes) refuse('archive unpacks beyond the size limit');
     entries.push({ path: entryPath, mode, size, data: tar.subarray(offset, offset + size) });
     if (entries.length > LIMITS.entries) refuse('archive has too many entries');
     offset += padded;
@@ -318,13 +313,7 @@ function inspectArchive(archive, lock) {
   if (archive.length > LIMITS.archiveBytes) refuse('archive exceeds the size limit');
   const actual = sha256(archive);
   if (actual !== lock.sha256) refuse(`digest mismatch: the lock pins ${lock.sha256}, the archive is ${actual}`);
-  let tar;
-  try {
-    tar = zlib.gunzipSync(archive, { maxOutputLength: LIMITS.unpackedBytes + 2 * 1024 * 1024 });
-  } catch (err) {
-    refuse(`archive does not decompress: ${err.message}`);
-  }
-  const entries = parseTar(tar);
+  const entries = parseTar(archive);
   checkManifest(entries, lock);
   return entries;
 }

@@ -8,8 +8,9 @@ uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- `tools/pack.js` builds the release archive `ha-agent-core-X.Y.Z.tar.gz` from a
-  single commit, reproducibly, together with its SHA-256 and a consumer lock.
+- `tools/pack.js` builds the release archive `ha-agent-core-X.Y.Z.tar` from a
+  single commit, byte-for-byte reproducibly on any platform, together with its
+  SHA-256 and a consumer lock.
 - `tools/verify-core.js`, the dependency-free consumer verifier: checks the lock,
   the pinned digest, the archive structure and its manifest before writing a
   single file, and never overlays an existing installation.

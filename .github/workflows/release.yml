@@ -56,8 +56,8 @@ jobs:
           lock="$RUNNER_TEMP/dist/core.lock.json"
           api="$(node -p 'require("./package.json").haAgentCore.adapterApi')"
           node tools/verify-core.js install --lock "$lock" --adapter-api "$api" \
-            --archive "$(ls "$RUNNER_TEMP"/dist/*.tar.gz)" --dest "$RUNNER_TEMP/installed"
+            --archive "$(ls "$RUNNER_TEMP"/dist/*.tar)" --dest "$RUNNER_TEMP/installed"
       - name: Publish the release
         run: |
           gh release create "$TAG" --verify-tag --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md" \
-            "$RUNNER_TEMP"/dist/*.tar.gz "$RUNNER_TEMP"/dist/*.tar.gz.sha256 "$RUNNER_TEMP/dist/core.lock.json"
+            "$RUNNER_TEMP"/dist/*.tar "$RUNNER_TEMP"/dist/*.tar.sha256 "$RUNNER_TEMP/dist/core.lock.json"

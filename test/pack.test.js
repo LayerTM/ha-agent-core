@@ -4,7 +4,6 @@ const assert = require('node:assert/strict');
 const { execFileSync, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
-const zlib = require('node:zlib');
 const { test } = require('node:test');
 
 const pack = require('../tools/pack.js');
@@ -29,7 +28,7 @@ test('packs exactly the declared files with their modes, plus a manifest', (t) =
   assert.equal(manifest.version, '1.2.3');
   assert.equal(manifest.commit, git(repo, 'rev-parse', 'HEAD').trim());
   assert.equal(manifest.adapterApi, 1);
-  assert.equal(lock.url, 'https://github.com/example/ha-agent-core/releases/download/v1.2.3/ha-agent-core-1.2.3.tar.gz');
+  assert.equal(lock.url, 'https://github.com/example/ha-agent-core/releases/download/v1.2.3/ha-agent-core-1.2.3.tar');
 });
 
 test('the archive depends on the commit only, not on the clone or the working tree', (t) => {
@@ -45,14 +44,14 @@ test('the archive depends on the commit only, not on the clone or the working tr
   assert.equal(first.lock.sha256, second.lock.sha256);
 });
 
-test('the gzip header carries no time, name or host', (t) => {
+test('the archive is an uncompressed ustar stream', (t) => {
   const { archive } = pack.build({ repo: makeRepo(t) });
-  assert.deepEqual([...archive.subarray(0, 10)], [0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 2, 255]);
+  assert.equal(archive.length % 512, 0);
+  assert.equal(archive.subarray(257, 265).toString('latin1'), 'ustar\x0000');
 });
 
 test('every tar timestamp is the commit time and every owner is zero', (t) => {
-  const { archive } = pack.build({ repo: makeRepo(t) });
-  const tar = zlib.gunzipSync(archive);
+  const { archive: tar } = pack.build({ repo: makeRepo(t) });
   const epoch = Date.parse('2026-01-02T03:04:05Z') / 1000;
   for (let off = 0; tar[off] !== 0; ) {
     const header = tar.subarray(off, off + 512);
@@ -137,16 +136,16 @@ test('the command line writes the archive, its checksum and the lock, and never 
   const first = spawnSync(process.execPath, [PACK, '--out', out], { cwd: repo, encoding: 'utf8' });
   assert.equal(first.status, 0, first.stderr);
   const lock = JSON.parse(fs.readFileSync(path.join(out, 'core.lock.json'), 'utf8'));
-  const archive = fs.readFileSync(path.join(out, 'ha-agent-core-1.2.3.tar.gz'));
+  const archive = fs.readFileSync(path.join(out, 'ha-agent-core-1.2.3.tar'));
   assert.equal(verify.sha256(archive), lock.sha256);
-  assert.equal(fs.readFileSync(path.join(out, 'ha-agent-core-1.2.3.tar.gz.sha256'), 'utf8'),
-    `${lock.sha256}  ha-agent-core-1.2.3.tar.gz\n`);
-  assert.equal(first.stdout, `${lock.sha256}  ${path.join(out, 'ha-agent-core-1.2.3.tar.gz')}\n`);
+  assert.equal(fs.readFileSync(path.join(out, 'ha-agent-core-1.2.3.tar.sha256'), 'utf8'),
+    `${lock.sha256}  ha-agent-core-1.2.3.tar\n`);
+  assert.equal(first.stdout, `${lock.sha256}  ${path.join(out, 'ha-agent-core-1.2.3.tar')}\n`);
 
   const again = spawnSync(process.execPath, [PACK, '--out', out], { cwd: repo, encoding: 'utf8' });
   assert.equal(again.status, 1);
   assert.match(again.stderr, /already exists/);
-  assert.ok(fs.readFileSync(path.join(out, 'ha-agent-core-1.2.3.tar.gz')).equals(archive));
+  assert.ok(fs.readFileSync(path.join(out, 'ha-agent-core-1.2.3.tar')).equals(archive));
 
   const usage = spawnSync(process.execPath, [PACK], { cwd: repo, encoding: 'utf8' });
   assert.equal(usage.status, 2);

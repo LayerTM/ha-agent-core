@@ -6,9 +6,10 @@
  *
  * The archive is a function of the commit alone: file contents and modes come from
  * the commit's tree (never from the working tree), entries are sorted, every
- * timestamp is the commit time, owners are zero and the gzip header carries no
- * name, time or host. Packing the same commit with the same Node.js major gives
- * the same bytes, wherever it runs.
+ * timestamp is the commit time and owners are zero. It is not compressed: the
+ * deflate output of zlib differs between CPU architectures even for one Node.js
+ * build, and an archive that is a function of the commit alone can be rebuilt
+ * anywhere and compared byte for byte with the published one.
  *
  * What is packed is `files` in the commit's package.json. Only regular files are
  * accepted; a symlink or submodule in that set stops the build. The archive gets a
@@ -19,14 +20,13 @@
  *
  * Usage:
  *   pack.js --out DIR [--commit REF]
- * Writes DIR/ha-agent-core-X.Y.Z.tar.gz, DIR/ha-agent-core-X.Y.Z.tar.gz.sha256 and
+ * Writes DIR/ha-agent-core-X.Y.Z.tar, DIR/ha-agent-core-X.Y.Z.tar.sha256 and
  * DIR/core.lock.json (the lock a consumer pins). Refuses to overwrite any of them.
  */
 
 const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
-const zlib = require('node:zlib');
 const { parseArgs } = require('node:util');
 
 const verify = require('./verify-core.js');
@@ -39,7 +39,7 @@ const GIT_MODES = { 100644: 0o644, 100755: 0o755 };
 function git(repo, args, encoding = 'utf8') {
   return execFileSync('git', ['-C', repo, ...args], {
     encoding,
-    maxBuffer: verify.LIMITS.unpackedBytes,
+    maxBuffer: verify.LIMITS.archiveBytes,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 }
@@ -96,14 +96,6 @@ function buildTar(entries, mtime) {
     ...entries.map((entry) => tarEntry({ ...entry, mtime })),
     Buffer.alloc(2 * BLOCK),
   ]);
-}
-
-function gzip(tar) {
-  const gz = zlib.gzipSync(tar, { level: 9 });
-  // RFC 1952: bytes 4-7 are MTIME (zlib writes 0) and byte 9 is OS, which zlib
-  // sets from the platform it was compiled for; 255 means "unknown" everywhere.
-  gz[9] = 255;
-  return gz;
 }
 
 function readPackage(repo, commit) {
@@ -164,7 +156,7 @@ function build({ repo, commit = 'HEAD' }) {
     { path: `${verify.ROOT}/${verify.MANIFEST_NAME}`, mode: 0o644, data: Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`) },
     ...files.map((f) => ({ ...f, path: `${verify.ROOT}/${f.path}` })),
   ];
-  const archive = gzip(buildTar(entries, mtime));
+  const archive = buildTar(entries, mtime);
   const fileName = verify.archiveName(pkg.version);
   const lock = {
     lockVersion: verify.LOCK_VERSION,
@@ -218,7 +210,7 @@ function main(argv) {
   }
 }
 
-module.exports = { build, write, buildTar, tarHeader, splitPath, gzip };
+module.exports = { build, write, buildTar, tarHeader, splitPath };
 
 if (require.main === module) {
   process.exitCode = main(process.argv.slice(2));

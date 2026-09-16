@@ -4,7 +4,6 @@ const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
-const zlib = require('node:zlib');
 const { test } = require('node:test');
 
 const pack = require('../tools/pack.js');
@@ -20,7 +19,7 @@ function lockFor(archive, overrides = {}) {
     lockVersion: 1,
     version: '1.2.3',
     commit: COMMIT,
-    url: `${URL_BASE}/v1.2.3/ha-agent-core-1.2.3.tar.gz`,
+    url: `${URL_BASE}/v1.2.3/ha-agent-core-1.2.3.tar`,
     sha256: verify.sha256(archive),
     adapterApi: 1,
     ...overrides,
@@ -66,8 +65,7 @@ function craft(entries, { manifest, manifestExtra = {}, trailer, blocksAfter = 2
     if (e.mutateHeader) e.mutateHeader(header);
     return Buffer.concat([header, data, Buffer.alloc((512 - (data.length % 512)) % 512)]);
   });
-  const tar = Buffer.concat([...blocks, Buffer.alloc(512 * blocksAfter), trailer || Buffer.alloc(0)]);
-  return pack.gzip(tar);
+  return Buffer.concat([...blocks, Buffer.alloc(512 * blocksAfter), trailer || Buffer.alloc(0)]);
 }
 
 const GOOD = [
@@ -112,10 +110,10 @@ test('a lock with a missing, unknown or malformed field is refused', () => {
     [{ ...base, url: `${base.url}#x` }, /query or fragment/],
     [{ ...base, url: base.url.replace('https://', 'https://user:pw@') }, /credentials/],
     [{ ...base, url: base.url.replace('v1.2.3/', 'v1.2.4/') }, /does not end in/],
-    [{ ...base, url: base.url.replace('1.2.3.tar.gz', '1.2.4.tar.gz') }, /does not end in/],
+    [{ ...base, url: base.url.replace('1.2.3.tar', '1.2.4.tar') }, /does not end in/],
     [{ ...base, url: base.url.replace('/releases/download', '/raw') }, /does not end in/],
     [{ ...base, url: base.url.replace('releases', 'x/../releases') }, /canonical/],
-    [{ ...base, url: 'https:/releases/download/v1.2.3/ha-agent-core-1.2.3.tar.gz' }, /canonical|does not end in/],
+    [{ ...base, url: 'https:/releases/download/v1.2.3/ha-agent-core-1.2.3.tar' }, /canonical|does not end in/],
     [{ ...base, url: 7 }, /not a string/],
   ];
   for (const [lock, pattern] of cases) {
@@ -130,7 +128,7 @@ test('a lock may move to a new version but never re-point a pinned one', () => {
   const previous = verify.parseLock(JSON.stringify(lockFor(Buffer.from('old'))));
   verify.checkTransition(previous, previous);
   const next = verify.parseLock(JSON.stringify(lockFor(Buffer.from('new'), {
-    version: '1.2.4', url: `${URL_BASE}/v1.2.4/ha-agent-core-1.2.4.tar.gz`,
+    version: '1.2.4', url: `${URL_BASE}/v1.2.4/ha-agent-core-1.2.4.tar`,
   })));
   verify.checkTransition(previous, next);
   for (const change of [
@@ -168,8 +166,9 @@ test('a digest mismatch is refused before the archive is opened', () => {
   refused(() => verify.inspectArchive(flipped, verify.parseLock(JSON.stringify(lockFor(archive)))), /digest mismatch/);
 });
 
-test('data that is not gzip is refused', () => {
-  refused(() => inspect(Buffer.from('not gzip at all')), /does not decompress/);
+test('data that is not a tar stream is refused', () => {
+  refused(() => inspect(Buffer.from('not a tar stream')), /whole number/);
+  refused(() => inspect(Buffer.alloc(512, 0x41)), /malformed number/);
 });
 
 test('escaping, absolute and unusual paths are refused', () => {
@@ -233,11 +232,11 @@ test('a damaged header, truncated body or stray data is refused', () => {
   const bad = (mutate) => [{ path: 'ha-agent-core/f', data: 'x', mutateHeader: mutate }];
   refused(() => inspect(craft(bad((h) => { h[0] ^= 1; }))), /checksum mismatch/);
   refused(() => inspect(craft(bad((h) => { h.write('gnutar', 257); }))), /checksum mismatch|not a ustar/);
-  const tar = zlib.gunzipSync(craft(GOOD));
-  refused(() => inspect(pack.gzip(tar.subarray(0, tar.length - 1))), /whole number/);
-  refused(() => inspect(pack.gzip(tar.subarray(0, 1024))), /truncated|end-of-archive/);
-  refused(() => inspect(pack.gzip(tar.subarray(0, tar.length - 1024))), /end-of-archive/);
-  refused(() => inspect(pack.gzip(tar.subarray(0, tar.length - 512))), /inside the end-of-archive/);
+  const tar = craft(GOOD);
+  refused(() => inspect(tar.subarray(0, tar.length - 1)), /whole number/);
+  refused(() => inspect(tar.subarray(0, 1024)), /truncated|end-of-archive/);
+  refused(() => inspect(tar.subarray(0, tar.length - 1024)), /end-of-archive/);
+  refused(() => inspect(tar.subarray(0, tar.length - 512)), /inside the end-of-archive/);
   const trailer = Buffer.alloc(512);
   trailer[5] = 1;
   refused(() => inspect(craft(GOOD, { trailer })), /after the end-of-archive/);
@@ -260,21 +259,21 @@ test('a size field that points past the end is refused', () => {
 });
 
 test('non-zero padding after a file is refused', () => {
-  const tar = zlib.gunzipSync(craft(GOOD));
+  const tar = craft(GOOD);
   const manifestSize = parseInt(tar.subarray(124, 135).toString(), 8);
   tar[512 + manifestSize] = 0x41;
-  refused(() => inspect(pack.gzip(tar)), /non-zero padding/);
+  refused(() => inspect(tar), /non-zero padding/);
 });
 
-test('an archive that expands past the limit is refused without unpacking it all', () => {
-  const huge = zlib.gzipSync(Buffer.alloc(verify.LIMITS.unpackedBytes + 4 * 1024 * 1024));
-  refused(() => inspect(huge), /does not decompress/);
+test('an archive past the size limit is refused before it is hashed', () => {
+  const huge = Buffer.alloc(verify.LIMITS.archiveBytes + 512);
+  refused(() => verify.inspectArchive(huge, verify.parseLock(JSON.stringify(lockFor(Buffer.from('x'))))), /size limit/);
 });
 
 test('a missing, malformed or disagreeing manifest is refused', () => {
   const noManifest = (() => {
     const header = pack.tarHeader({ name: 'ha-agent-core/f', mode: 0o644, size: 1, mtime: 0 });
-    return pack.gzip(Buffer.concat([header, Buffer.from('x'), Buffer.alloc(511 + 1024)]));
+    return Buffer.concat([header, Buffer.from('x'), Buffer.alloc(511 + 1024)]);
   })();
   refused(() => inspect(noManifest), /no ha-agent-core\/core-manifest\.json/);
   refused(() => inspect(craft(GOOD, { manifest: 'not json' })), /manifest is not valid JSON/);
@@ -308,7 +307,7 @@ test('a missing, malformed or disagreeing manifest is refused', () => {
 
 function fixture(t, archive, lockOverrides) {
   const dir = tempDir(t);
-  fs.writeFileSync(path.join(dir, 'archive.tar.gz'), archive);
+  fs.writeFileSync(path.join(dir, 'archive.tar'), archive);
   fs.writeFileSync(path.join(dir, 'core.lock.json'), JSON.stringify(lockFor(archive, lockOverrides)));
   return dir;
 }
@@ -318,7 +317,7 @@ function cli(...args) {
 }
 
 function installArgs(dir, dest = path.join(dir, 'core'), extra = []) {
-  return ['install', '--lock', path.join(dir, 'core.lock.json'), '--archive', path.join(dir, 'archive.tar.gz'),
+  return ['install', '--lock', path.join(dir, 'core.lock.json'), '--archive', path.join(dir, 'archive.tar'),
     '--dest', dest, '--adapter-api', '1', ...extra];
 }
 
@@ -333,7 +332,7 @@ test('install writes exactly the verified tree with its modes', (t) => {
   assert.equal(fs.statSync(path.join(core, 'package.json')).mode & 0o777, 0o644);
   assert.equal(fs.statSync(core).mode & 0o777, 0o755);
   assert.equal(fs.statSync(path.join(core, 'bin')).mode & 0o777, 0o755);
-  assert.deepEqual(fs.readdirSync(dir).sort(), ['archive.tar.gz', 'core', 'core.lock.json']);
+  assert.deepEqual(fs.readdirSync(dir).sort(), ['archive.tar', 'core', 'core.lock.json']);
 });
 
 test('install refuses an existing destination and leaves it untouched', (t) => {
@@ -358,13 +357,13 @@ test('a refused install writes nothing at all', (t) => {
   const result = cli(...installArgs(dir));
   assert.equal(result.status, 1);
   assert.match(result.stderr, /^refused: /);
-  assert.deepEqual(fs.readdirSync(dir).sort(), ['archive.tar.gz', 'core.lock.json']);
+  assert.deepEqual(fs.readdirSync(dir).sort(), ['archive.tar', 'core.lock.json']);
   assert.ok(!fs.existsSync(path.join(path.dirname(dir), 'escape')));
 });
 
 test('install refuses a replaced archive, a re-pointed version and a foreign adapter API', (t) => {
   const dir = fixture(t, craft(GOOD));
-  fs.writeFileSync(path.join(dir, 'archive.tar.gz'), craft([{ path: 'ha-agent-core/other', data: 'y' }]));
+  fs.writeFileSync(path.join(dir, 'archive.tar'), craft([{ path: 'ha-agent-core/other', data: 'y' }]));
   let result = cli(...installArgs(dir));
   assert.equal(result.status, 1);
   assert.match(result.stderr, /digest mismatch/);
@@ -389,7 +388,7 @@ test('check and url read only the lock', (t) => {
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, 'lock verified: ha-agent-core 1.2.3\n');
   result = cli('url', '--lock', lock);
-  assert.equal(result.stdout, `${URL_BASE}/v1.2.3/ha-agent-core-1.2.3.tar.gz\n`);
+  assert.equal(result.stdout, `${URL_BASE}/v1.2.3/ha-agent-core-1.2.3.tar\n`);
 
   const previous = path.join(dir, 'previous.lock.json');
   fs.writeFileSync(previous, JSON.stringify(lockFor(Buffer.from('other'))));
@@ -430,7 +429,7 @@ test('an archive built by the packer installs end to end', (t) => {
   pack.write(pack.build({ repo }), out);
   const dest = path.join(out, 'installed');
   const result = cli('install', '--lock', path.join(out, 'core.lock.json'),
-    '--archive', path.join(out, 'ha-agent-core-1.2.3.tar.gz'), '--dest', dest, '--adapter-api', '1');
+    '--archive', path.join(out, 'ha-agent-core-1.2.3.tar'), '--dest', dest, '--adapter-api', '1');
   assert.equal(result.status, 0, result.stderr);
   assert.equal(fs.readFileSync(path.join(dest, 'src', 'index.js'), 'utf8'), 'module.exports = 1;\n');
   assert.equal(fs.statSync(path.join(dest, 'src', 'deep', 'tool.sh')).mode & 0o777, 0o755);

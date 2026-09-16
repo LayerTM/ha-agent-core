@@ -13,11 +13,11 @@ A release `X.Y.Z` publishes three files:
 
 | file | content |
 |---|---|
-| `ha-agent-core-X.Y.Z.tar.gz` | the archive |
-| `ha-agent-core-X.Y.Z.tar.gz.sha256` | its SHA-256, for people |
+| `ha-agent-core-X.Y.Z.tar` | the archive |
+| `ha-agent-core-X.Y.Z.tar.sha256` | its SHA-256, for people |
 | `core.lock.json` | the lock a consumer copies into its repository |
 
-The archive is a plain ustar stream, gzip-compressed, with every entry under
+The archive is an uncompressed ustar stream with every entry under
 `ha-agent-core/`:
 
 - only regular files, with mode `644` or `755`; no links, directories or
@@ -28,9 +28,14 @@ The archive is a plain ustar stream, gzip-compressed, with every entry under
   other file, its `path`, `mode`, `size` and `sha256`.
 
 The archive depends on the commit alone: sorted entries, the commit time as every
-timestamp, zero owners, and no name, time or host in the gzip header. Packing the
-same commit with the same Node.js major produces identical bytes; CI builds every
-commit twice and compares them.
+timestamp and zero owners. It is deliberately not compressed, because compressed
+output differs between CPU architectures; packing a commit anywhere reproduces
+the published archive byte for byte, so its digest can be checked independently:
+
+```sh
+node tools/pack.js --commit vX.Y.Z --out /tmp/rebuild
+sha256sum /tmp/rebuild/ha-agent-core-X.Y.Z.tar   # equals "sha256" in the release's core.lock.json
+```
 
 A published version is never replaced. The release workflow refuses a tag whose
 release already exists, and the verifier refuses a lock that re-points a version
@@ -47,7 +52,7 @@ The verifier has no dependencies; it is never taken from the archive it checks.
   "lockVersion": 1,
   "version": "X.Y.Z",
   "commit": "<40-hex commit id>",
-  "url": "https://github.com/LayerTM/ha-agent-core/releases/download/vX.Y.Z/ha-agent-core-X.Y.Z.tar.gz",
+  "url": "https://github.com/LayerTM/ha-agent-core/releases/download/vX.Y.Z/ha-agent-core-X.Y.Z.tar",
   "sha256": "<64-hex digest>",
   "adapterApi": 1
 }
@@ -61,9 +66,9 @@ In an image build:
 ```dockerfile
 COPY core.lock.json verify-core.js /tmp/core/
 RUN url="$(node /tmp/core/verify-core.js url --lock /tmp/core/core.lock.json)" \
- && curl -fsSL --proto '=https' -o /tmp/core/core.tar.gz "$url" \
+ && curl -fsSL --proto '=https' -o /tmp/core/core.tar "$url" \
  && node /tmp/core/verify-core.js install --lock /tmp/core/core.lock.json \
-      --adapter-api 1 --archive /tmp/core/core.tar.gz --dest /opt/ha-agent-core \
+      --adapter-api 1 --archive /tmp/core/core.tar --dest /opt/ha-agent-core \
  && rm -rf /tmp/core
 ```
 
@@ -78,7 +83,7 @@ RUN url="$(node /tmp/core/verify-core.js url --lock /tmp/core/core.lock.json)" \
 5. the archive holds only regular files under `ha-agent-core/`, with no absolute,
    empty, `.` or `..` segments, no control characters or backslashes, NFC-normal
    names, no duplicates (also ignoring case), no file/directory collisions, zero
-   padding and nothing after the end marker, within the size limits;
+   padding and nothing after the end marker, within the size limit;
 6. the manifest names the pinned version, commit and adapter API, and lists
    exactly the files present with matching mode, size and digest;
 7. the destination does not exist.
