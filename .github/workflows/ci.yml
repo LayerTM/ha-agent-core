@@ -55,7 +55,7 @@ jobs:
         with:
           node-version: "26"
       - name: Install dependencies
-        run: npm ci
+        run: ../.github/scripts/npm-ci-local-headers.sh
       - name: Run tests
         run: npm test
       - name: Run alerts loop tests (bash + jq)
@@ -75,7 +75,7 @@ jobs:
         with:
           node-version: "26"
       - name: Install dependencies
-        run: npm ci
+        run: ../.github/scripts/npm-ci-local-headers.sh
       - name: Lint (eslint)
         run: npm run lint
       - name: Type-check (tsc --checkJs)
