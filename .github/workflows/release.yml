@@ -5,31 +5,42 @@ name: release
 # consumer verifier, and attached to a new release together with its SHA-256 and
 # the lock a consumer pins. A version is published once; an existing release is
 # never replaced.
+#
+# A pull request that touches the release path runs the same workflow as a dry
+# run: every step except the publishing job, for the version in package.json.
 
 on:
   push:
     tags: ["v*"]
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - ".github/workflows/ci.yml"
+      - "tools/**"
+      - "package.json"
+      - "package-lock.json"
+      - "CHANGELOG.md"
 
 permissions:
   contents: read
 
 concurrency:
-  group: release
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   gates:
     uses: ./.github/workflows/ci.yml
 
-  publish:
-    name: Publish
+  prepare:
+    name: Prepare
     needs: gates
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     env:
-      TAG: ${{ github.ref_name }}
+      PUBLISH: ${{ github.event_name == 'push' }}
       GH_TOKEN: ${{ github.token }}
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -38,13 +49,23 @@ jobs:
         with:
           node-version: "26"
       - name: The tag names the package version and a commit on main
+        id: version
         run: |
           version="$(node -p 'require("./package.json").version')"
-          test "$TAG" = "v$version" || { echo "::error::tag $TAG does not match package version $version"; exit 1; }
-          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "::error::$TAG is not on main"; exit 1; }
+          if [ "$PUBLISH" = true ]; then
+            tag="$GITHUB_REF_NAME"
+            test "$tag" = "v$version" || { echo "::error::tag $tag does not match package version $version"; exit 1; }
+            git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "::error::$tag is not on main"; exit 1; }
+          else
+            tag="v$version"
+            echo "::notice::dry run for $tag; the commit is not required to be on main yet"
+          fi
           awk -v v="$version" '$0 ~ "^## \\[" v "\\]" {on=1; next} on && /^## / {exit} on {print}' CHANGELOG.md > "$RUNNER_TEMP/notes.md"
           test -s "$RUNNER_TEMP/notes.md" || { echo "::error::CHANGELOG.md has no section for $version"; exit 1; }
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
       - name: The version has not been published
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
         run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "::error::release $TAG already exists; a published version is never replaced"
@@ -53,11 +74,44 @@ jobs:
       - name: Build and verify the archive
         run: |
           node tools/pack.js --out "$RUNNER_TEMP/dist"
+          cp "$RUNNER_TEMP/notes.md" "$RUNNER_TEMP/release-notes.md"
           lock="$RUNNER_TEMP/dist/core.lock.json"
           api="$(node -p 'require("./package.json").haAgentCore.adapterApi')"
           node tools/verify-core.js install --lock "$lock" --adapter-api "$api" \
             --archive "$(ls "$RUNNER_TEMP"/dist/*.tar)" --dest "$RUNNER_TEMP/installed"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release
+          path: |
+            ${{ runner.temp }}/dist/
+            ${{ runner.temp }}/release-notes.md
+          if-no-files-found: error
+      - name: What would be published
+        if: env.PUBLISH != 'true'
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          echo "dry run: release $TAG would carry:"
+          ls -l "$RUNNER_TEMP/dist"
+          cat "$RUNNER_TEMP/dist/core.lock.json"
+
+  publish:
+    name: Publish
+    needs: prepare
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.prepare.outputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: release
+          path: ${{ runner.temp }}/release
       - name: Publish the release
         run: |
-          gh release create "$TAG" --verify-tag --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md" \
-            "$RUNNER_TEMP"/dist/*.tar "$RUNNER_TEMP"/dist/*.tar.sha256 "$RUNNER_TEMP/dist/core.lock.json"
+          cd "$RUNNER_TEMP/release"
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$TAG" \
+            --notes-file release-notes.md dist/*.tar dist/*.tar.sha256 dist/core.lock.json
