@@ -6,10 +6,16 @@ name: Dependabot auto-merge
 # Safe use of pull_request_target: this job never checks out or executes the
 # PR's code — it only reads Dependabot's metadata and enables auto-merge, which
 # then waits for the branch-protection required checks before merging.
+#
+# A merge made with the workflow token raises no push event, so once the pull
+# request has merged this job starts the main-measured workflow, which runs CI
+# for the head of main unless it already has a run. Its schedule is the backstop
+# when this job gives up waiting.
 
 on: pull_request_target
 
 permissions:
+  actions: write
   contents: write
   pull-requests: write
 
@@ -17,6 +23,7 @@ jobs:
   auto-merge:
     if: ${{ github.actor == 'dependabot[bot]' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - name: Fetch Dependabot metadata
         id: metadata
@@ -26,6 +33,7 @@ jobs:
         uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
 
       - name: Enable auto-merge for known minor/patch updates
+        id: enable
         # Fail-closed allowlist: only explicitly-recognized minor/patch updates
         # auto-merge. Majors — and any PR whose update-type can't be determined —
         # fall through to manual review instead of merging by default.
@@ -33,4 +41,26 @@ jobs:
         run: gh pr merge --auto --squash "$PR_URL"
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Measure main once the pull request has merged
+        if: ${{ steps.enable.conclusion == 'success' }}
+        run: |
+          for _ in $(seq 1 80); do
+            state="$(gh pr view "$PR_URL" --json state --jq .state)"
+            case "$state" in
+              MERGED)
+                gh workflow run main-measured.yml --repo "$REPO" --ref main
+                echo "::notice::merged; main-measured dispatched"
+                exit 0 ;;
+              CLOSED)
+                echo "closed without a merge"
+                exit 0 ;;
+            esac
+            sleep 30
+          done
+          echo "::warning::not merged within 40 minutes; the main-measured schedule covers it"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          REPO: ${{ github.repository }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
