@@ -9,8 +9,9 @@ name: Dependabot auto-merge
 #
 # A merge made with the workflow token raises no push event, so once the pull
 # request has merged this job starts the main-measured workflow, which runs CI
-# for the head of main unless it already has a run. Its schedule is the backstop
-# when this job gives up waiting.
+# for the head of main unless it already has a run. That workflow also has a
+# schedule, but GitHub does not guarantee scheduled runs, so this dispatch is
+# what measures a bot merge.
 
 on: pull_request_target
 
@@ -46,8 +47,11 @@ jobs:
       - name: Measure main once the pull request has merged
         if: ${{ steps.enable.conclusion == 'success' }}
         run: |
+          answered=0
           for _ in $(seq 1 80); do
-            state="$(gh pr view "$PR_URL" --json state --jq .state)"
+            # A failed call counts as "not merged yet"; the next poll retries it.
+            state="$(gh pr view "$PR_URL" --json state --jq .state)" || state=""
+            [ -n "$state" ] && answered=1
             case "$state" in
               MERGED)
                 gh workflow run main-measured.yml --repo "$REPO" --ref main
@@ -59,7 +63,11 @@ jobs:
             esac
             sleep 30
           done
-          echo "::warning::not merged within 40 minutes; the main-measured schedule covers it"
+          if [ "$answered" = 0 ]; then
+            echo "::error::the pull request state could not be read"
+            exit 1
+          fi
+          echo "::warning::not merged within 40 minutes; main is not measured for this merge"
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           REPO: ${{ github.repository }}
