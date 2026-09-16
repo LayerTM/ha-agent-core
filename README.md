@@ -88,8 +88,12 @@ RUN url="$(node /tmp/core/verify-core.js url --lock /tmp/core/core.lock.json)" \
    exactly the files present with matching mode, size and digest;
 7. the destination does not exist.
 
-The tree is written into a fresh sibling directory and renamed into place, so the
-destination either does not exist or holds the complete verified tree.
+The destination is claimed with an exclusive `mkdir`, so anything that exists
+there — even if it appeared a moment earlier — is a refusal. The tree is written
+into a fresh sibling directory and renamed onto that empty claim; a rename never
+replaces a non-empty directory, so content someone else puts there is never
+overwritten. The destination is therefore absent, the empty claim, or the
+complete verified tree; a failed install removes its own claim.
 
 In the consumer's CI, a pin change can be checked against the previous lock:
 

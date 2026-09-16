@@ -330,25 +330,30 @@ function readFileBounded(file, limit, what) {
   return fs.readFileSync(file);
 }
 
-function exists(target) {
-  try {
-    fs.lstatSync(target);
-    return true;
-  } catch (err) {
-    if (err.code === 'ENOENT') return false;
-    throw err;
-  }
+function sameInode(a, b) {
+  return a.dev === b.dev && a.ino === b.ino;
 }
 
-// Written into a fresh sibling directory and renamed into place, so the
-// destination either does not exist or holds the complete, verified tree.
+// The destination is claimed first with an exclusive mkdir, which fails if
+// anything already exists there — however recently it appeared. The tree is
+// written into a fresh sibling directory and renamed onto that claim: rename
+// replaces a directory only while it is empty, so content that someone else put
+// at the destination is never replaced, and the destination is either the empty
+// claim or the complete, verified tree.
 function extract(entries, dest) {
   const target = path.resolve(dest);
-  if (exists(target)) refuse(`${target} already exists — an installed core is never overlaid`);
   const parent = path.dirname(target);
   if (!fs.statSync(parent).isDirectory()) refuse(`${parent} is not a directory`);
-  const staging = fs.mkdtempSync(path.join(parent, `.${ROOT}-staging-`));
   try {
+    fs.mkdirSync(target, { mode: 0o700 });
+  } catch (err) {
+    if (err.code === 'EEXIST') refuse(`${target} already exists — an installed core is never overlaid`);
+    throw err;
+  }
+  const claim = fs.lstatSync(target);
+  let staging;
+  try {
+    staging = fs.mkdtempSync(path.join(parent, `.${ROOT}-staging-`));
     // Directories are 755 whatever the umask or mkdtemp chose: the tree is read
     // by whichever user the consumer's service runs as.
     const dirs = new Set([staging]);
@@ -361,10 +366,23 @@ function extract(entries, dest) {
       fs.chmodSync(out, entry.mode);
     }
     for (const dir of dirs) fs.chmodSync(dir, 0o755);
-    if (exists(target)) refuse(`${target} appeared during installation — an installed core is never overlaid`);
-    fs.renameSync(staging, target);
+    try {
+      fs.renameSync(staging, target);
+    } catch (err) {
+      if (err.code === 'ENOTEMPTY' || err.code === 'EEXIST' || err.code === 'ENOTDIR') {
+        refuse(`${target} was filled by someone else during installation — an installed core is never overlaid`);
+      }
+      throw err;
+    }
+    staging = undefined;
   } catch (err) {
-    fs.rmSync(staging, { recursive: true, force: true });
+    if (staging !== undefined) fs.rmSync(staging, { recursive: true, force: true });
+    // Only our own, still-empty claim is removed; anything else stays as found.
+    try {
+      if (sameInode(fs.lstatSync(target), claim)) fs.rmdirSync(target);
+    } catch {
+      // Gone, replaced or no longer empty: not ours to remove.
+    }
     throw err;
   }
   return target;

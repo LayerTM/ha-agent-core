@@ -351,6 +351,76 @@ test('install refuses an existing destination and leaves it untouched', (t) => {
   assert.equal(cli(...installArgs(dir)).status, 1, 'a dangling or live symlink is an existing destination');
 });
 
+test('an empty directory at the destination is refused too', (t) => {
+  const dir = fixture(t, craft(GOOD));
+  fs.mkdirSync(path.join(dir, 'core'));
+  const result = cli(...installArgs(dir));
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /already exists/);
+  assert.deepEqual(fs.readdirSync(path.join(dir, 'core')), []);
+});
+
+// Runs install in-process with one fs function wrapped, to act inside the
+// window between the destination check and the final rename.
+function installWith(t, name, wrapper) {
+  const dir = fixture(t, craft(GOOD));
+  const original = fs[name];
+  fs[name] = wrapper(original, path.join(dir, 'core'));
+  t.after(() => { fs[name] = original; });
+  const run = () => verify.install({
+    lock: path.join(dir, 'core.lock.json'),
+    archive: path.join(dir, 'archive.tar'),
+    dest: path.join(dir, 'core'),
+    adapterApi: 1,
+    previousLock: undefined,
+  });
+  return { dir, run, restore: () => { fs[name] = original; } };
+}
+
+test('a destination cannot be created by someone else once installation has begun', (t) => {
+  let raced;
+  const { dir, run, restore } = installWith(t, 'mkdtempSync', (original, target) => (...args) => {
+    try {
+      fs.mkdirSync(target);
+      raced = 'created';
+    } catch (err) {
+      raced = err.code;
+    }
+    return original(...args);
+  });
+  const result = run();
+  restore();
+  assert.equal(raced, 'EEXIST');
+  assert.equal(result.files, 3);
+  assert.equal(fs.readFileSync(path.join(dir, 'core', 'package.json'), 'utf8'), '{}\n');
+});
+
+test('content placed at the destination during installation is never replaced', (t) => {
+  const { dir, run, restore } = installWith(t, 'renameSync', (original, target) => (from, to) => {
+    if (to === target) {
+      fs.rmdirSync(target);
+      fs.mkdirSync(target);
+      fs.writeFileSync(path.join(target, 'theirs'), 'kept\n');
+    }
+    return original(from, to);
+  });
+  refused(run, /filled by someone else/);
+  restore();
+  assert.deepEqual(fs.readdirSync(path.join(dir, 'core')), ['theirs']);
+  assert.equal(fs.readFileSync(path.join(dir, 'core', 'theirs'), 'utf8'), 'kept\n');
+  assert.deepEqual(fs.readdirSync(dir).sort(), ['archive.tar', 'core', 'core.lock.json']);
+});
+
+test('a failure while writing removes the claim and the staging directory', (t) => {
+  const { dir, run, restore } = installWith(t, 'writeFileSync', (original) => (file, ...rest) => {
+    if (String(file).includes('staging')) throw Object.assign(new Error('disk full'), { code: 'ENOSPC' });
+    return original(file, ...rest);
+  });
+  assert.throws(run, /disk full/);
+  restore();
+  assert.deepEqual(fs.readdirSync(dir).sort(), ['archive.tar', 'core.lock.json']);
+});
+
 test('a refused install writes nothing at all', (t) => {
   const archive = craft([...GOOD, { path: 'ha-agent-core/../escape', data: 'x' }]);
   const dir = fixture(t, archive);
