@@ -1,0 +1,105 @@
+== first run: exit 0
+-- log
+[T] HA skill pack synced to ~/.claude/skills
+[T] adding marketplace anthropics/claude-plugins-official
+[T]   ok anthropics/claude-plugins-official
+[T] adding marketplace anthropics/skills
+[T]   ok anthropics/skills
+[T] adding marketplace me/mp
+[T]   FAILED me/mp (will retry next start)
+[T] installing plugin superpowers@claude-plugins-official
+[T]   ok superpowers@claude-plugins-official
+[T] installing plugin frontend-design@claude-plugins-official
+[T]   ok frontend-design@claude-plugins-official
+[T] installing plugin skill-creator@claude-plugins-official
+[T]   ok skill-creator@claude-plugins-official
+[T] installing plugin security-guidance@claude-plugins-official
+[T]   ok security-guidance@claude-plugins-official
+[T] installing plugin context7@claude-plugins-official
+[T]   ok context7@claude-plugins-official
+[T] installing plugin code-review@claude-plugins-official
+[T]   ok code-review@claude-plugins-official
+[T] installing plugin code-simplifier@claude-plugins-official
+[T]   ok code-simplifier@claude-plugins-official
+[T] installing plugin feature-dev@claude-plugins-official
+[T]   ok feature-dev@claude-plugins-official
+[T] installing plugin commit-commands@claude-plugins-official
+[T]   ok commit-commands@claude-plugins-official
+[T] installing plugin claude-md-management@claude-plugins-official
+[T]   ok claude-md-management@claude-plugins-official
+[T] installing plugin hookify@claude-plugins-official
+[T]   ok hookify@claude-plugins-official
+[T] installing plugin document-skills@anthropic-agent-skills
+[T]   ok document-skills@anthropic-agent-skills
+[T] installing plugin x@me
+[T]   ok x@me
+[T] skills_git cloned
+[T] skills_git skills synced
+[T] registering playwright MCP
+[T]   ok playwright
+[T] registering hass-mcp (HA Token present)
+[T]   ok hass-mcp
+[T] provisioning complete
+-- claude
+plugin marketplace list | HOME=/data/home PATH=/data/home/.local/bin
+plugin marketplace add anthropics/claude-plugins-official | HOME=/data/home PATH=/data/home/.local/bin
+plugin marketplace add anthropics/skills | HOME=/data/home PATH=/data/home/.local/bin
+plugin marketplace add me/mp | HOME=/data/home PATH=/data/home/.local/bin
+plugin list | HOME=/data/home PATH=/data/home/.local/bin
+plugin install superpowers@claude-plugins-official | HOME=/data/home PATH=/data/home/.local/bin
+plugin install frontend-design@claude-plugins-official | HOME=/data/home PATH=/data/home/.local/bin
+plugin install skill-creator@claude-plugins-official | HOME=/data/home PATH=/data/home/.local/bin
+plugin install security-guidance@claude-plugins-official | HOME=/data/home PATH=/data/home/.local/bin
+plugin install context7@claude-plugins-official | HOME=/data/home PATH=/data/home/.local/bin
+plugin install code-review@claude-plugins-official | HOME=/data/home PATH=/data/home/.local/bin
+plugin install code-simplifier@claude-plugins-official | HOME=/data/home PATH=/data/home/.local/bin
+plugin install feature-dev@claude-plugins-official | HOME=/data/home PATH=/data/home/.local/bin
+plugin install commit-commands@claude-plugins-official | HOME=/data/home PATH=/data/home/.local/bin
+plugin install claude-md-management@claude-plugins-official | HOME=/data/home PATH=/data/home/.local/bin
+plugin install hookify@claude-plugins-official | HOME=/data/home PATH=/data/home/.local/bin
+plugin install document-skills@anthropic-agent-skills | HOME=/data/home PATH=/data/home/.local/bin
+plugin install x@me | HOME=/data/home PATH=/data/home/.local/bin
+mcp list | HOME=/data/home PATH=/data/home/.local/bin
+mcp add playwright -s user -- playwright-mcp --headless --no-sandbox --browser chromium --executable-path /usr/bin/chromium | HOME=/data/home PATH=/data/home/.local/bin
+mcp list | HOME=/data/home PATH=/data/home/.local/bin
+mcp add hass-mcp -s user -e HA_URL=http://homeassistant:8123 -e HA_TOKEN=tok -- hass-mcp | HOME=/data/home PATH=/data/home/.local/bin
+-- files
+./
+./.provision.lock: 
+./.skills-git-names: s1|s2|
+./skills/
+./skills/ha-one/
+./skills/ha-one/SKILL.md: ha-one bundled|
+./skills/ha-two/
+./skills/ha-two/SKILL.md: ha-two bundled|
+./skills/s1/
+./skills/s1/SKILL.md: s1 v1|
+./skills/s2/
+./skills/s2/SKILL.md: s2 v1|
+== second run: exit 0
+-- log
+[T] HA skill pack synced to ~/.claude/skills
+[T] skills_git pulled
+[T] skills_git: removed s2, which the repository no longer has
+[T] skills_git skills synced
+[T] provisioning complete
+-- claude
+plugin marketplace list | HOME=/data/home PATH=/data/home/.local/bin
+plugin list | HOME=/data/home PATH=/data/home/.local/bin
+mcp list | HOME=/data/home PATH=/data/home/.local/bin
+mcp list | HOME=/data/home PATH=/data/home/.local/bin
+-- files
+./
+./.provision.lock: 
+./.skills-git-names: s1|s3|
+./skills/
+./skills/ha-one/
+./skills/ha-one/SKILL.md: ha-one bundled|
+./skills/ha-two/
+./skills/ha-two/SKILL.md: ha-two bundled|
+./skills/own/
+./skills/own/SKILL.md: own|
+./skills/s1/
+./skills/s1/SKILL.md: s1 v2|
+./skills/s3/
+./skills/s3/SKILL.md: s3 v2|

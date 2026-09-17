@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # The add-on's shell scripts in the add-on base image, with its real bashio:
 # every image/*.sh runs in a fresh container (image/addon-run.sh: the start
-# script; image/notify.sh: the notification titles).
+# script; image/notify.sh: the notification titles; image/provision-extras.sh:
+# the provisioning of skills, plugins and MCP servers).
 #
 # Requires Docker. The image is image/Dockerfile.
 #

@@ -70,6 +70,12 @@ done
 for name in "${ENGINE_COMMANDS[@]}"; do
     [ -x "${name}" ] || missing+=("command ${name}")
 done
+# What provisioning needs from the engine is listed in provision-extras itself.
+provision_missing="$(/usr/local/bin/provision-extras --check)" \
+    || provision_missing="the check /usr/local/bin/provision-extras --check (exit status $?)"
+while IFS= read -r item; do
+    [ -z "${item}" ] || missing+=("${item}")
+done <<< "${provision_missing}"
 if [ "${#missing[@]}" -gt 0 ]; then
     bashio::log.error "The engine does not define: ${missing[*]}"
     exit 1
