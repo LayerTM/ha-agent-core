@@ -4,6 +4,21 @@ All notable changes to this project are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.0]
+
+### Added
+
+- `GET /api/status` publishes `engine`, `engine_version` and `request_fields`;
+  `request_fields` is the same list `POST /api/prompt` validates body fields
+  against. Existing fields keep their meaning.
+
+### Changed
+
+- Adapter API 2: the adapter declares `descriptor.engine` and
+  `descriptor.parseVersion`, and may declare `descriptor.versionAlias` to keep
+  an engine-named version key on `/api/status`. An adapter without a descriptor
+  is refused at startup. The console shows the version the adapter parses.
+
 ## [0.1.0]
 
 ### Added

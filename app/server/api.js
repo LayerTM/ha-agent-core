@@ -49,8 +49,9 @@ function exec(cmd, args, options = {}) {
 
 async function claudeVersion() {
   try {
-    const { stdout } = await exec(adapter().console.bin, ['--version'], { env: { ...process.env, HOME: '/data/home' } });
-    return stdout.trim().split(/\s+/)[0];
+    const { console: agent, descriptor } = adapter();
+    const { stdout } = await exec(agent.bin, ['--version'], { env: { ...process.env, HOME: '/data/home' } });
+    return descriptor.parseVersion(stdout.trim()) || null;
   } catch {
     return null;
   }

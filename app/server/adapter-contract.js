@@ -12,10 +12,12 @@
 // member or a member of the wrong type stops the add-on at startup instead of
 // failing on the first request that happens to need it.
 
-const API_VERSION = 1;
+const API_VERSION = 2;
 
 // member path -> expected typeof
 const REQUIRED = {
+  'descriptor.engine': 'string',
+  'descriptor.parseVersion': 'function',
   'runner.run': 'function',
   'runner.shutdown': 'function',
   'runner.safeLangTag': 'function',
@@ -38,7 +40,16 @@ const REQUIRED = {
 // Absent means the feature is off; present must have this type.
 const OPTIONAL = {
   'console.remoteWindow': 'function',
+  'descriptor.versionAlias': 'string',
 };
+
+// The engine name is published on /api/status and stored by clients, so it is a
+// stable token. A version alias is one more status key carrying the same value
+// as `engine_version`, for clients that predate it; it cannot shadow a key the
+// core already publishes.
+const ENGINE_RE = /^[a-z][a-z0-9_-]{0,31}$/;
+const VERSION_ALIAS_RE = /^[a-z][a-z0-9]*_version$/;
+const CORE_VERSION_KEYS = new Set(['engine_version']);
 
 function member(mod, dotted) {
   return dotted.split('.').reduce((value, key) => (
@@ -63,6 +74,14 @@ function validateAdapter(mod) {
   for (const [dotted, type] of Object.entries(OPTIONAL)) {
     const value = member(mod, dotted);
     if (value !== undefined && typeof value !== type) problems.push(`${dotted} must be a ${type} when present`);
+  }
+  const engine = member(mod, 'descriptor.engine');
+  if (typeof engine === 'string' && !ENGINE_RE.test(engine)) {
+    problems.push('descriptor.engine must be a lower-case token (a-z, 0-9, _ and -, at most 32)');
+  }
+  const alias = member(mod, 'descriptor.versionAlias');
+  if (typeof alias === 'string' && (!VERSION_ALIAS_RE.test(alias) || CORE_VERSION_KEYS.has(alias))) {
+    problems.push('descriptor.versionAlias must be a lower-case <name>_version key other than engine_version');
   }
   if (problems.length) throw new Error(`engine adapter: ${problems.join('; ')}`);
   return mod;

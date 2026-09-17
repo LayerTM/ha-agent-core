@@ -23,10 +23,13 @@ layout: its engine adapter goes to `app/adapter/`, its console frontend to
 Everything engine-specific comes from one module the add-on provides at
 `app/adapter/index.js`. The core loads it in one place,
 `app/server/adapter-contract.js`, and refuses to start if its `apiVersion` is not
-`1` or a member is missing or of the wrong type:
+`2` or a member is missing or of the wrong type:
 
 | member | type | used for |
 |---|---|---|
+| `descriptor.engine` | string | the engine's stable name (`a-z`, `0-9`, `_`, `-`; at most 32), published as `engine` on `/api/status` |
+| `descriptor.parseVersion(stdout)` | function | the version in the agent's `--version` output, or `null` |
+| `descriptor.versionAlias` | optional string | one more `<name>_version` status key carrying `engine_version`, for clients that predate it |
 | `runner.run(options)` | function | one prompt run; resolves to the run outcome |
 | `runner.shutdown()` | function | stop every running agent process |
 | `runner.safeLangTag(raw)` | function | the language tag a run may use, or `''` |
@@ -44,6 +47,12 @@ Everything engine-specific comes from one module the add-on provides at
 | `console.updateCommand` | string | the command behind the console's update button |
 | `console.windowName`, `console.launcher` | strings | the agent's terminal tab |
 | `console.remoteWindow(env)` | optional function | `{ name, argv }` of an extra tab, or `null` |
+
+`GET /api/status` identifies the engine with three fields: `engine`,
+`engine_version` (the parsed agent version, `""` when unknown; `version` is the
+add-on's own) and `request_fields`, the body fields `POST /api/prompt` accepts,
+taken from the same list the request is validated against. A client sends a
+field only when it is listed there.
 
 The adapter may require its own modules and `app/server/prompt/security.js`, and
 nothing else of the core; the core returns to the adapter only through these
@@ -104,7 +113,7 @@ The verifier has no dependencies; it is never taken from the archive it checks.
   "commit": "<40-hex commit id>",
   "url": "https://github.com/LayerTM/ha-agent-core/releases/download/vX.Y.Z/ha-agent-core-X.Y.Z.tar",
   "sha256": "<64-hex digest>",
-  "adapterApi": 1
+  "adapterApi": 2
 }
 ```
 

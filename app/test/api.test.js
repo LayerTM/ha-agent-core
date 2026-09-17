@@ -23,7 +23,8 @@ process.env.CC_ALERTS_STATE_PATH = STATE;
 delete process.env.SUPERVISOR_TOKEN;
 
 // The console reads its engine values from the adapter; a neutral one here.
-require('../server/adapter-contract').useAdapter(require('./fixtures/neutral-adapter').createNeutralAdapter().adapter);
+const { adapter: neutral } = require('./fixtures/neutral-adapter').createNeutralAdapter();
+require('../server/adapter-contract').useAdapter(neutral);
 
 const express = require('express');
 const { createRouter } = require('../server/api');
@@ -68,6 +69,20 @@ test('GET /status surfaces quick_prompts (trimmed, strings-only, capped)', async
   assert.equal(body.quickPrompts.length, 20, 'capped at 20');
   assert.ok(Array.isArray(body.tabs));
   assert.equal(body.claudeVersion, null, 'no claude binary in the test env');
+});
+
+test('GET /status shows the agent version as the adapter parses it', async () => {
+  const bin = path.join(TMP, 'neutral-agent');
+  const original = neutral.console.bin;
+  neutral.console.bin = bin;
+  try {
+    fs.writeFileSync(bin, "#!/bin/sh\nprintf 'neutral-agent 3.1.4 (build 1)\\n'\n", { mode: 0o755 });
+    assert.equal((await getJson('/status')).body.claudeVersion, '3.1.4');
+    fs.writeFileSync(bin, "#!/bin/sh\nprintf 'something else\\n'\n", { mode: 0o755 });
+    assert.equal((await getJson('/status')).body.claudeVersion, null, 'unparsable output is no version');
+  } finally {
+    neutral.console.bin = original;
+  }
 });
 
 test('GET /status with unreadable options → empty quickPrompts', async () => {

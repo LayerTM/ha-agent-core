@@ -21,10 +21,15 @@ const { run: runClaude, TIMEOUT_MS, safeLangTag } = adapter().runner;
 
 const MAX_PROMPT_BYTES = 8 * 1024;
 const MAX_CONCURRENT_RUNS = 2;
+// The body fields POST /api/prompt accepts. /api/status publishes this same set
+// as `request_fields`, so a client sends a field only where it is accepted.
 const BODY_KEYS = new Set([
   'prompt', 'mode', 'conversation_id', 'intents', 'confirmation', 'image_entity', 'stream', 'language',
   'surface', 'edit_automation',
 ]);
+
+// A version published on /api/status is a plain token, whatever the agent printed.
+const VERSION_RE = /^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$/;
 
 // When streaming, hold back this many trailing chars of the redacted text before
 // emitting, so a secret split across fragments is redacted before any of it ships.
@@ -545,12 +550,12 @@ function createPromptApp({
     50, stateDir ? fileStore(path.join(stateDir, 'chat-health.json')) : null,
   );
 
-  // Cached `claude --version` (refreshed lazily, at most every 5 minutes).
-  // A single in-flight refresh is shared by all concurrent callers, so a burst
-  // of /api/status requests forks at most ONE `claude` process, not one each.
+  // Cached agent `--version`, parsed by the adapter (refreshed lazily, at most
+  // every 5 minutes). A single in-flight refresh is shared by all concurrent
+  // callers, so a burst of /api/status requests forks at most ONE agent process.
   let versionCache = { value: null, stamp: 0 };
   let versionInFlight = null;
-  function claudeVersion() {
+  function engineVersion() {
     if (Date.now() - versionCache.stamp < 5 * 60 * 1000) {
       return Promise.resolve(versionCache.value);
     }
@@ -560,7 +565,15 @@ function createPromptApp({
         timeout: 15000,
         env: { PATH: process.env.PATH, HOME: process.env.HOME },
       }, (err, stdout) => {
-        const value = err ? null : String(stdout).trim().split(/\s+/)[0] || null;
+        let parsed = null;
+        // The adapter's parser runs in this callback, where a throw would end the
+        // process; a parser that fails means no version.
+        try {
+          if (!err) parsed = adapter().descriptor.parseVersion(String(stdout).trim());
+        } catch {
+          parsed = null;
+        }
+        const value = typeof parsed === 'string' && VERSION_RE.test(parsed) ? parsed : null;
         versionCache = { value, stamp: Date.now() };
         versionInFlight = null;
         resolve(value);
@@ -713,13 +726,19 @@ function createPromptApp({
   });
 
   app.get('/api/status', async (req, res) => {
-    const version = await claudeVersion();
+    const version = await engineVersion();
     const home = process.env.HOME || '/data/home';
-    const authConfigured = Boolean(adapter().prompt.authConfigured({ env: process.env, home }));
+    const { descriptor, prompt } = adapter();
+    const authConfigured = Boolean(prompt.authConfigured({ env: process.env, home }));
     res.json({
       ready: Boolean(version) && authConfigured,
+      // The add-on's own version; the agent's is engine_version.
       version: addonVersion,
-      claude_version: version || '',
+      engine: descriptor.engine,
+      engine_version: version || '',
+      // The same value under the key clients from before engine_version read.
+      ...(descriptor.versionAlias ? { [descriptor.versionAlias]: version || '' } : {}),
+      request_fields: [...BODY_KEYS],
       model: model || '',
       ha_mcp: Boolean(mcpConfigPath),
       ha_mcp_connected: mcpConfigPath ? lastMcpConnected : false,
