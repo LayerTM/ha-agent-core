@@ -231,6 +231,36 @@ test('the wall-clock limit, an abort and the stream cap each end the agent', asy
   assert.equal(cap.reason, 'stream-cap');
 });
 
+const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+async function gone(pid) {
+  for (let i = 0; i < 50 && alive(pid); i += 1) await new Promise((r) => setTimeout(r, 20));
+  return !alive(pid);
+}
+
+test('nothing the agent started outlives the run, however it ends', async () => {
+  const cases = [
+    ['a normal exit', [result(answer('done'))], 'ok', {}],
+    ['a model error', [{ emit: { type: 'result', isError: true } }], 'error', {}],
+    ['no result', [{ exit: 2 }], 'error', {}],
+    ['a timeout', [{ hang: true }], 'timeout', { timeoutMs: 1 }],
+  ];
+  for (const [label, tail, status, opts] of cases) {
+    const pidFile = path.join(TMP, `descendant-${label.replace(/\W/g, '-')}`);
+    const outcome = await runWith([{ descendant: pidFile }, ...tail], opts);
+    assert.equal(outcome.status, status, label);
+    const pid = Number(fs.readFileSync(pidFile, 'utf8'));
+    assert.ok(pid > 0, label);
+    assert.equal(await gone(pid), true, `${label}: the descendant ${pid} is still running`);
+  }
+  const abort = new AbortController();
+  const pidFile = path.join(TMP, 'descendant-abort');
+  const pending = runWith([{ descendant: pidFile }, { hang: true }], { signal: abort.signal });
+  for (let i = 0; i < 100 && !fs.existsSync(pidFile); i += 1) await new Promise((r) => setTimeout(r, 20));
+  abort.abort();
+  assert.equal((await pending).reason, 'aborted');
+  assert.equal(await gone(Number(fs.readFileSync(pidFile, 'utf8'))), true, 'abort');
+});
+
 test('shutdown ends every running agent', async () => {
   const pending = runWith([{ hang: true }]);
   await new Promise((r) => setTimeout(r, 200));

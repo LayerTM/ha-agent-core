@@ -486,7 +486,11 @@ function launch(spec, parentEnv) {
 // Live children, so shutdown can reap every spawned agent.
 const children = new Set();
 
+// The agent runs in its own process group; everything it started is in that
+// group unless it moved itself out. Killing the group ends all of it, whether
+// the agent itself is still running or has already exited.
 function killGroup(child) {
+  if (!child || !Number.isInteger(child.pid)) return;
   try {
     process.kill(-child.pid, 'SIGKILL');
   } catch {
@@ -603,11 +607,14 @@ function run({
       else signal.addEventListener('abort', onAbort, { once: true });
     }
 
+    // The one way a run ends, whatever ended it: nothing the agent started
+    // outlives the request.
     const finish = (outcome) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       if (signal) signal.removeEventListener('abort', onAbort);
+      killGroup(child);
       children.delete(child);
       resolve(outcome);
     };
