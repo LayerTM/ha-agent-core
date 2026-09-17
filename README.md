@@ -16,8 +16,9 @@ is unpacked or executed.
 | `tools/npm-ci-checked.sh`, `tools/check-install-scripts.js`, `tools/build-allowed-packages.js`, `tools/smoke-allowed-packages.js` | the dependency install an add-on runs in `app/` and `ha-tools/` |
 
 An add-on assembles its image from this tree plus its own files, in the same
-layout: its engine adapter goes to `app/adapter/`, its console frontend to
-`app/public/`, its own scripts next to the core's under `rootfs/`. The `app/`
+layout: its engine adapter goes to `app/adapter/`, its console pages to
+`app/templates/` and the rest of its console frontend to `app/public/`, its own
+scripts next to the core's under `rootfs/`. The `app/`
 tree is installed at `/opt/agent-console`.
 
 ## The engine adapter
@@ -75,11 +76,13 @@ All five are available to the console pages.
 
 ### Console pages
 
-The add-on's console frontend in `app/public/` may write the engine's names and
-colours as placeholders. The console fills them in once when it starts and
-serves the finished files; nothing is templated in the browser. These files are
-rendered: `index.html`, `starting.html`, `app.js`, `styles.css` and
-`manifest.webmanifest`. Everything else in `app/public/` is served as it is.
+The console pages live in `app/templates/`: `index.html`, `starting.html`,
+`app.js`, `styles.css` and `manifest.webmanifest`. They may write the engine's
+names and colours as placeholders. The console fills them in once when it
+starts and serves only the finished files; nothing serves `app/templates/`
+itself, and nothing is templated in the browser. Everything in `app/public/` is
+served as it is, and the console does not start if `app/public/` holds a file
+with a page's name.
 
 | placeholder | value |
 |---|---|

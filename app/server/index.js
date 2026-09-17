@@ -56,29 +56,12 @@ const ASSET_VERSION = process.env.ADDON_VERSION || String(Date.now());
 // The pages carry the engine's names and colours, filled in here once; the
 // icons are the add-on's. Either failing stops the start (console-assets.js).
 const consoleAssets = loadConsoleAssets({
+  templateDir: path.join(__dirname, '..', 'templates'),
   publicDir: PUBLIC_DIR,
   iconDir: path.join(__dirname, '..', 'adapter', 'icons'),
   values: pageValues({ branding: branding(), theme: theme(), console: adapter().console }),
 });
 mountConsoleAssets(app, consoleAssets, { assetVersion: ASSET_VERSION });
-
-app.use(express.static(PUBLIC_DIR, {
-  index: 'index.html',
-  maxAge: '1h',
-  setHeaders(res, filePath) {
-    // The HTML app-shell must never be cached behind HA ingress. Ingress serves
-    // it Content-Encoding: deflate WITHOUT Vary and adds X-Content-Type-Options:
-    // nosniff; if the browser replays a stale cached copy, Safari/WebKit can't
-    // re-inflate it and — with nosniff blocking any fallback — DOWNLOADS the
-    // document instead of rendering it, leaving the ingress iframe blank (endless
-    // spinner). A restart/auto-update just refreshes that poisoned entry, so a
-    // page reload never recovers. Assets keep their long cache; only the entry
-    // document is forced to revalidate every load.
-    if (filePath.endsWith('.html')) {
-      res.setHeader('Cache-Control', 'no-store');
-    }
-  },
-}));
 
 // Vendor assets served straight from installed packages
 const VENDOR = {

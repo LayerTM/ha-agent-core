@@ -33,8 +33,8 @@ async function placeholderPage(t, branding, { theme = undefined, page: pageFile 
     fs.writeFileSync(path.join(tree, 'adapter', 'theme.json'), typeof theme === 'string' ? theme : JSON.stringify(theme));
   }
   if (pageFile !== undefined) {
-    fs.mkdirSync(path.join(tree, 'public'));
-    fs.writeFileSync(path.join(tree, 'public', 'starting.html'), pageFile);
+    fs.mkdirSync(path.join(tree, 'templates'));
+    fs.writeFileSync(path.join(tree, 'templates', 'starting.html'), pageFile);
   }
   const child = spawn(process.execPath, [path.join(tree, 'server', 'starting.js')], {
     cwd: tree,

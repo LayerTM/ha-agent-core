@@ -7,6 +7,7 @@
 const { test, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
 const vm = require('node:vm');
@@ -96,21 +97,34 @@ test('in the manifest a value stays one JSON string', () => {
   assert.ok(!out.includes('</script') && !out.includes(LS));
 });
 
-// A console tree: public/ with the given files, and the adapter's icons.
-function consoleTree(files, icons = ICONS) {
+// A console tree: templates/ and public/ with the given files, and the
+// adapter's icons.
+function consoleTree(templates, { files = {}, icons = ICONS } = {}) {
   const dir = fs.mkdtempSync(path.join(TMP, 'tree-'));
+  const templateDir = path.join(dir, 'templates');
   const publicDir = path.join(dir, 'public');
-  const iconDir = path.join(dir, 'icons');
-  fs.mkdirSync(publicDir);
-  fs.mkdirSync(iconDir);
-  for (const [name, text] of Object.entries(files)) fs.writeFileSync(path.join(publicDir, name), text);
+  const iconDir = path.join(dir, 'adapter', 'icons');
+  for (const d of [templateDir, publicDir, iconDir]) fs.mkdirSync(d, { recursive: true });
+  for (const [name, text] of Object.entries(templates)) fs.writeFileSync(path.join(templateDir, name), text);
+  for (const [name, text] of Object.entries(files)) {
+    fs.mkdirSync(path.dirname(path.join(publicDir, name)), { recursive: true });
+    fs.writeFileSync(path.join(publicDir, name), text);
+  }
   for (const name of icons) fs.writeFileSync(path.join(iconDir, name), `icon ${name}`);
-  return { publicDir, iconDir, values: VALUES };
+  return { templateDir, publicDir, iconDir, values: VALUES };
 }
+
+const TEMPLATES = {
+  'index.html': '<title>{{productName}}</title><script src="app.js"></script><link href="styles.css">',
+  'starting.html': '<title>{{productName}} — starting</title>',
+  'app.js': "const glyph = '{{tabGlyph}}';",
+  'styles.css': ':root { --bg: {{theme.ui.bg}}; }',
+  'manifest.webmanifest': '{ "name": "{{productName}}" }',
+};
 
 test('every icon is required from the adapter, as a file', () => {
   assert.deepEqual(ICONS, ['apple-touch-icon.png', 'favicon-32.png', 'favicon.svg', 'pwa-192.png', 'pwa-512.png']);
-  const tree = consoleTree({}, ICONS.filter((n) => n !== 'favicon.svg' && n !== 'pwa-512.png'));
+  const tree = consoleTree({}, { icons: ICONS.filter((n) => n !== 'favicon.svg' && n !== 'pwa-512.png') });
   assert.throws(() => loadConsoleAssets(tree), /icons lacks favicon\.svg, pwa-512\.png/);
   fs.mkdirSync(path.join(tree.iconDir, 'favicon.svg'));
   fs.writeFileSync(path.join(tree.iconDir, 'pwa-512.png'), '');
@@ -125,24 +139,40 @@ test('a page that does not render stops the load; a missing page is left out', (
   assert.deepEqual([...icons.keys()], ICONS);
 });
 
-async function serve(t, tree, { withStatic = true } = {}) {
+test('a page in the served directory stops the load, even one that has no placeholders', () => {
+  for (const name of Object.keys(PAGES)) {
+    const tree = consoleTree(TEMPLATES, { files: { [name]: 'as it is' } });
+    assert.throws(() => loadConsoleAssets(tree), new RegExp(`public holds ${name.replace('.', '\\.')}; a page belongs in .*templates`), name);
+  }
+  const tree = consoleTree(TEMPLATES, { files: { 'app.js': 'x', 'styles.css': 'y' } });
+  assert.throws(() => loadConsoleAssets(tree), /holds app\.js, styles\.css;/);
+});
+
+async function serve(t, tree) {
   const app = express();
   mountConsoleAssets(app, loadConsoleAssets(tree), { assetVersion: '9.9.9' });
-  if (withStatic) app.use(express.static(tree.publicDir));
   const server = await new Promise((resolve) => { const s = app.listen(0, '127.0.0.1', () => resolve(s)); });
   t.after(() => new Promise((resolve) => server.close(resolve)));
   return `http://127.0.0.1:${server.address().port}`;
 }
 
-test('the rendered pages are served in place of the templates, with their types and cache rules', async (t) => {
-  const tree = consoleTree({
-    'index.html': '<title>{{productName}}</title><script src="app.js"></script><link href="styles.css">',
-    'starting.html': '<title>{{productName}} — starting</title>',
-    'app.js': "const glyph = '{{tabGlyph}}';",
-    'styles.css': ':root { --bg: {{theme.ui.bg}}; }',
-    'manifest.webmanifest': '{ "name": "{{productName}}" }',
-    'other.txt': 'served as it is {{productName}}',
+// A raw request, so the path reaches the server exactly as written here.
+function rawGet(base, target) {
+  const { hostname, port } = new URL(base);
+  return new Promise((resolve, reject) => {
+    const req = http.request({ hostname, port, path: target, method: 'GET' }, (res) => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => { body += chunk; });
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body }));
+    });
+    req.on('error', reject);
+    req.end();
   });
+}
+
+test('the rendered pages are served, with their types and cache rules; public/ is served as it is', async (t) => {
+  const tree = consoleTree(TEMPLATES, { files: { 'other.txt': 'served as it is', 'help.html': '<p>help</p>' } });
   const base = await serve(t, tree);
   const cases = [
     ['/', /^text\/html/, 'no-store', '<title>Neutral Agent</title><script src="app.js?v=9.9.9"></script><link href="styles.css?v=9.9.9">'],
@@ -151,36 +181,69 @@ test('the rendered pages are served in place of the templates, with their types 
     ['/app.js', /^(text|application)\/javascript/, 'public, max-age=3600', "const glyph = '◆';"],
     ['/styles.css', /^text\/css/, 'public, max-age=3600', `:root { --bg: ${NEUTRAL.ui.bg}; }`],
     ['/manifest.webmanifest', /^application\/manifest\+json/, 'public, max-age=3600', '{ "name": "Neutral Agent" }'],
+    ['/other.txt', /^text\/plain/, 'public, max-age=3600', 'served as it is'],
+    ['/help.html', /^text\/html/, 'no-store', '<p>help</p>'],
   ];
   for (const [route, type, cache, body] of cases) {
-    const r = await fetch(`${base}${route}`);
+    const r = await rawGet(base, route);
     assert.equal(r.status, 200, route);
-    assert.match(r.headers.get('content-type'), type, route);
-    assert.equal(r.headers.get('cache-control'), cache, route);
-    assert.equal(await r.text(), body, route);
+    assert.match(r.headers['content-type'], type, route);
+    assert.equal(r.headers['cache-control'], cache, route);
+    assert.equal(r.body, body, route);
   }
-  assert.equal(await (await fetch(`${base}/other.txt`)).text(), 'served as it is {{productName}}');
 });
 
-test('the icons come from the adapter; other paths under icons/ fall through', async (t) => {
-  const tree = consoleTree({});
-  fs.mkdirSync(path.join(tree.publicDir, 'icons'));
-  fs.writeFileSync(path.join(tree.publicDir, 'icons', 'favicon.svg'), 'shipped in public');
-  fs.writeFileSync(path.join(tree.publicDir, 'icons', 'extra.png'), 'extra');
+// Every spelling a client might use to reach a page's file, including the ones
+// a static server decodes or normalises.
+function pathForms(name) {
+  const [first, ...rest] = name;
+  const hex = (c) => `%${c.charCodeAt(0).toString(16)}`;
+  return [
+    `/${name}`, `//${name}`, `/./${name}`, `/${hex(first)}${rest.join('')}`, `/${hex(first).toUpperCase()}${rest.join('')}`,
+    `/${[...name].map(hex).join('')}`, `/${name}/`, `/${name}?x=1`, `/${name.toUpperCase()}`,
+    `/templates/${name}`, `/../templates/${name}`, `/%2e%2e/templates/${name}`, `/..%2Ftemplates%2F${name}`,
+    `/icons/..%2F${name}`, `/icons/%2e%2e%2f${name}`, `/icons/..%2F..%2Ftemplates%2F${name}`,
+    `/icons/${name}`, `/public/${name}`, `/%2e/${name}`,
+  ];
+}
+
+test('no spelling of a path returns a template as shipped', async (t) => {
+  const tree = consoleTree(TEMPLATES, { files: { 'other.txt': 'plain' } });
+  const base = await serve(t, tree);
+  let tried = 0;
+  for (const name of Object.keys(PAGES)) {
+    for (const target of pathForms(name)) {
+      const r = await rawGet(base, target);
+      tried += 1;
+      assert.ok(!r.body.includes('{{'), `${target} -> ${r.status} ${r.body.slice(0, 80)}`);
+    }
+    // The spellings a static server decodes to the page's own path answer 404
+    // now, instead of the file.
+    for (const target of [`/%${name.charCodeAt(0).toString(16)}${name.slice(1)}`, `/icons/..%2F${name}`, `/icons/%2e%2e%2f${name}`]) {
+      assert.equal((await rawGet(base, target)).status, 404, target);
+    }
+  }
+  assert.equal(tried, Object.keys(PAGES).length * pathForms('x').length);
+});
+
+test('the icons come from the adapter; any other path under icons/ is a 404', async (t) => {
+  const tree = consoleTree({}, { files: { 'icons/favicon.svg': 'shipped in public', 'icons/extra.png': 'extra' } });
   const base = await serve(t, tree);
   for (const name of ICONS) {
-    const r = await fetch(`${base}/icons/${name}`);
+    const r = await rawGet(base, `/icons/${name}`);
     assert.equal(r.status, 200, name);
-    assert.equal(await r.text(), `icon ${name}`, name);
-    assert.equal(r.headers.get('cache-control'), 'public, max-age=3600', name);
+    assert.equal(r.body, `icon ${name}`, name);
+    assert.equal(r.headers['cache-control'], 'public, max-age=3600', name);
   }
-  assert.equal(await (await fetch(`${base}/icons/extra.png`)).text(), 'extra');
-  assert.equal((await fetch(`${base}/icons/..%2F..%2Fpublic%2Fapp.js`)).status, 404);
+  for (const target of ['/icons/extra.png', '/icons/..%2Ficons%2Ffavicon.svg', '/icons/%66avicon.svg%00', '/icons/']) {
+    const r = await rawGet(base, target);
+    assert.ok(r.status === 404 && !r.body.includes('shipped in public') && !r.body.includes('extra'), `${target} -> ${r.status}`);
+  }
 });
 
 test('without an index page the entry document is a 500, as before', async (t) => {
-  const base = await serve(t, consoleTree({}), { withStatic: false });
-  const r = await fetch(`${base}/`);
+  const base = await serve(t, consoleTree({}));
+  const r = await rawGet(base, '/');
   assert.equal(r.status, 500);
-  assert.equal(await r.text(), 'index unavailable');
+  assert.equal(r.body, 'index unavailable');
 });

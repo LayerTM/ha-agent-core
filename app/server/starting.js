@@ -29,7 +29,7 @@ const { pageValues, renderPage } = require('./pages');
 
 const PORT = Number(process.env.CLAUDE_CONSOLE_PORT || 8099);
 const DEV = process.env.CLAUDE_CONSOLE_DEV === '1';
-const PAGE_FILE = path.join(__dirname, '..', 'public', 'starting.html');
+const PAGE_FILE = path.join(__dirname, '..', 'templates', 'starting.html');
 
 // Read and rendered once, at boot. If that fails the placeholder still answers —
 // a plain sentence beats an unexplained blank panel, which is the whole point.
