@@ -272,7 +272,8 @@ async function start() {
   // Keep a persistent error handler so a post-bind socket error is logged, not
   // thrown as an uncaught exception that would take the shared console down.
   server.on('error', (err) => log(`server error: ${err.message}`));
-  log(`prompt server listening on :${PORT} (ha_mcp: ${mcpConfigPath ? 'configured' : 'absent'})`);
+  const { port } = /** @type {import('node:net').AddressInfo} */ (server.address());
+  log(`prompt server listening on :${port} (ha_mcp: ${mcpConfigPath ? 'configured' : 'absent'})`);
 
   announceDiscovery(token).catch((err) => log(`discovery error: ${err.message}`));
 

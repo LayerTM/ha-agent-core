@@ -6,6 +6,8 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.0]
+
 ### Added
 
 - The loopback relay to Home Assistant's MCP server lets only `initialize`,
