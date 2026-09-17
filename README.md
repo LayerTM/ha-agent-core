@@ -123,6 +123,33 @@ the answer is nullable there, and a `null` for it is treated as absent.
   - audit lines say `cost=unknown`;
   - a non-zero `chat_daily_budget_usd` keeps the prompt API from starting instead of pretending to enforce it.
 
+### Home Assistant MCP access
+
+An agent reaches Home Assistant's MCP server only through the prompt server's
+loopback relay (`app/server/prompt/core-relay.js`):
+- the relay holds the Home Assistant token;
+- the agent gets a per-boot relay token instead;
+- the relay decides which JSON-RPC methods pass (`app/server/prompt/mcp-filter.js`).
+
+From the agent, only these pass:
+- `initialize`, `ping`, `notifications/*`;
+- `tools/list`, `tools/call`.
+
+Every other method, `resources/*`, `prompts/*` and `completion/*` included, is
+answered by the relay with `-32601` ("method not found") and never reaches Home
+Assistant. Home Assistant publishes its whole live context as a resource, so this
+keeps it within the tools the run's allowlist names.
+- A request body with a refused method is not forwarded at all.
+- A body that is not JSON-RPC 2.0 is refused with 400.
+- A body over 1 MiB is refused with 413.
+- Only `POST /api/mcp` carries a body to Home Assistant. A `GET` or `DELETE`
+  (the event stream, the end of a session, a camera snapshot) is sent without
+  one, and one that comes with a body is refused with 400.
+
+From Home Assistant, answers and notifications pass, in JSON and in
+server-sent-event streams. A request the server makes of the agent (sampling,
+elicitation, roots) is dropped.
+
 ### Error answers
 
 Every error answer of the prompt API is `{ "error": "<message>", "code": "<code>" }`, plus:
