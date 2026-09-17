@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Proactive anomaly alerts (opt-in, DETERMINISTIC — no Claude/LLM call, no plan
+# Proactive anomaly alerts (opt-in, DETERMINISTIC — no agent/LLM call, no plan
 # usage). Every proactive_alerts_interval_minutes we fetch all HA states from the
 # Supervisor API ourselves and run a handful of fixed, rule-based checks (low
 # battery, water leak, door/window open at night, temperature out of band, high
@@ -27,6 +27,9 @@ export HOME=/data/home
 export PATH="/data/home/.local/bin:/usr/local/bin:/usr/bin:/bin:${PATH}"
 
 NOTIFY_CMD="${CC_ALERTS_NOTIFY_CMD:-ha-notify}"
+# shellcheck source-path=SCRIPTDIR source=../lib/addon-branding.sh
+source "${BASH_SOURCE[0]%/*}/../lib/addon-branding.sh"
+
 
 DATA_DIR="${CC_ALERTS_DATA_DIR:-/data}"
 OPTIONS="${DATA_DIR}/options.json"
@@ -216,7 +219,7 @@ run_cycle() {
     # One batched notification for everything new this cycle.
     msg="$(printf '%s' "${result}" | jq -r 'if (.notify | length) > 0 then (.notify | join("\n")) else empty end' 2>/dev/null)"
     if [ -n "${msg}" ]; then
-        "${NOTIFY_CMD}" "${msg}" "Claude · Home alert" >/dev/null 2>&1 || true
+        "${NOTIFY_CMD}" "${msg}" "$(branding_name_or_fallback agentName) · Home alert" >/dev/null 2>&1 || true
     fi
 }
 
