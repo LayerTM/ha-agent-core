@@ -26,7 +26,9 @@
     "rootfs/",
     "tools/verify-core.js",
     "tools/check-adapter-graph.js",
-    "tools/check-install-scripts.js"
+    "tools/check-install-scripts.js",
+    "tools/npm-ci-checked.sh",
+    "tools/smoke-allowed-packages.js"
   ],
   "scripts": {
     "test": "node --test \"test/**/*.test.js\"",

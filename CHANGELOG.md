@@ -8,20 +8,22 @@ uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- `tools/check-install-scripts.js` and `app/install-scripts.json`: the code an
-  allowed install script runs — its scripts, gyp files and every module they
-  load, including other packages — is checked against a reviewed fingerprint
-  before any of it runs.
+- `tools/check-install-scripts.js` and `app/install-scripts.json`: the packages
+  whose install scripts npm may run, together with everything they depend on,
+  are pinned by registry tarball and integrity and checked from the lockfile
+  before anything is unpacked.
+- `tools/npm-ci-checked.sh` and `tools/smoke-allowed-packages.js`, shipped in the
+  release archive: the check, `npm ci --ignore-scripts`,
+  `npm rebuild --strict-allow-scripts` and a load and terminal smoke test.
 
 ### Changed
 
 - `app/package.json` allows `node-pty`'s install scripts by name, which npm 12
-  needs to build the terminal's native module. The app is installed with
-  scripts disabled, checked, then built with `npm rebuild --strict-allow-scripts`
-  and smoke-tested; node-gyp takes the local Node headers through its own
-  `npm_package_config_node_gyp_*` settings.
-- A Dependabot update that changes install code is labelled `needs review`
-  instead of being merged automatically.
+  needs to build the terminal's native module. node-gyp takes the local Node.js
+  headers through its own `npm_package_config_node_gyp_*` settings.
+- A Dependabot update is merged automatically only when its lockfiles pass the
+  check, and only at the head commit that was checked; otherwise it is labelled
+  `needs review`.
 
 ## [0.2.0]
 

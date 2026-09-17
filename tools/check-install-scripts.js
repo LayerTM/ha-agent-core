@@ -2,281 +2,272 @@
 'use strict';
 
 /*
- * Verifies, before any of it runs, the code an allowed install script will run.
+ * Decides from the lockfile alone whether the install scripts npm would run are
+ * the reviewed ones. It reads JSON and executes nothing, so it can judge a
+ * dependency tree before a single file of it is unpacked, or a lockfile fetched
+ * as plain data.
  *
  * npm runs a dependency's install scripts only for packages named in the
- * `allowScripts` field of package.json. An entry by name lets every future
- * version run, so this check pins what that means. Run it after
- * `npm ci --ignore-scripts` (nothing of the packages has executed yet) and build
- * only when it passes. For each allowed package it fingerprints:
+ * `allowScripts` field of package.json. What such a script can run is the
+ * package itself and the packages it depends on, so the reviewed unit is that
+ * closure: for each allowed package, every package reachable through its
+ * declared dependencies, each pinned by its registry tarball URL and integrity
+ * hash (the digest of every file in the tarball). The reviewed closures live in
+ * install-scripts.json next to package.json.
  *
- *   - the install-time lifecycle scripts (preinstall, install, postinstall),
- *     or npm's implicit `node-gyp rebuild` when there are none but a
- *     binding.gyp exists;
- *   - every file those scripts run with `node <file>`;
- *   - every .gyp and .gypi file of the package when node-gyp runs, and every
- *     file those name with `node <file>`;
- *   - every module any of these files loads with require(), transitively:
- *     relative files, and other installed packages (their entry module and
- *     everything it loads, plus their .gyp/.gypi files, which a gyp build may
- *     include) — node-pty's binding.gyp, for one, runs require('node-addon-api').
+ * Not reviewed, and reported, is anything that differs from the record or that
+ * this data cannot vouch for:
+ *   - a package added to, removed from or changed in a closure;
+ *   - a closure package without an integrity hash, or not from the npm registry;
+ *   - any package with an install script that allowScripts does not name
+ *     (an explicit `false` entry is fine: npm never runs it);
+ *   - an allowScripts entry that is not a bare package name, or an allowed
+ *     package the lockfile does not have, or a record for a package that is no
+ *     longer allowed.
  *
- * and compares the fingerprint with the reviewed one in install-scripts.json next
- * to package.json. Any difference is reported with the file to review. A module
- * the scan cannot resolve is part of the fingerprint too, by name.
+ * The toolchain the scripts use (node, npm and its node-gyp, python, make, the
+ * C/C++ compiler) is not in the lockfile; the image that runs the install pins it.
  *
- *   node check-install-scripts.js <dir>                  check
- *   node check-install-scripts.js <dir> --write          record the current fingerprints
- *   node check-install-scripts.js <dir> --verdict FILE   check, and also write
- *                                                        {"reviewed": bool, "findings": [...]}
+ *   check-install-scripts.js <dir>
+ *   check-install-scripts.js <dir> --write
+ *   check-install-scripts.js --package FILE --lock FILE --record FILE
  *
- * <dir> holds package.json, install-scripts.json and the installed node_modules.
- * Dependency-free. Exit: 0 as reviewed, 1 findings, 2 usage error.
+ * <dir> holds package.json, package-lock.json and, when anything is allowed,
+ * install-scripts.json. The explicit form reads the three files from anywhere
+ * (a missing record file means nothing is reviewed).
+ * Dependency-free. Exit: 0 as reviewed, 1 not reviewed, 2 usage error.
  */
 
-const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 
 const RECORD = 'install-scripts.json';
-const LIFECYCLE = ['preinstall', 'install', 'postinstall'];
-const IMPLICIT_INSTALL = 'node-gyp rebuild';
-const NODE_FILE_RE = /(?:^|[\s;&|(])node\s+(?:-{1,2}[\w-]+\s+)*([^\s;&|()'"\\]+)/g;
-// require('x'), also inside a quoted gyp command: require(\'x\')
-const REQUIRE_RE = /\brequire\s*\(\s*\\?(['"])([^'"\\]+)\\?\1\s*\)/g;
-const GYP_EXT = new Set(['.gyp', '.gypi']);
-const BUILTINS = new Set(require('node:module').builtinModules);
-
-function sha256(file) {
-  return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
-}
+const REGISTRY = 'https://registry.npmjs.org/';
+const NAME_RE = /^(?:@[a-z0-9._-]+\/)?[a-z0-9._-]+$/;
+const INTEGRITY_RE = /^sha512-[A-Za-z0-9+/]{86}==$/;
+const DEP_FIELDS = ['dependencies', 'optionalDependencies', 'peerDependencies'];
+const TOOLCHAIN = 'node, npm and its node-gyp, python, make and the C/C++ compiler come from the image that runs the install';
 
 function readJson(file) {
   return JSON.parse(fs.readFileSync(file, 'utf8'));
 }
 
-function within(root, abs) {
-  return abs === root || abs.startsWith(root + path.sep);
-}
-
-function resolveFile(abs) {
-  for (const candidate of [abs, `${abs}.js`, `${abs}.cjs`, `${abs}.json`, path.join(abs, 'index.js')]) {
-    if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) return candidate;
-  }
-  return null;
-}
-
-// node-gyp writes its output, including a generated config.gypi, to build/.
-function gypFiles(pkgRoot, dir = pkgRoot, out = []) {
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    if (entry.name === 'node_modules' || (dir === pkgRoot && entry.name === 'build')) continue;
-    const abs = path.join(dir, entry.name);
-    if (entry.isDirectory()) gypFiles(pkgRoot, abs, out);
-    else if (entry.isFile() && GYP_EXT.has(path.extname(entry.name))) out.push(abs);
-  }
-  return out.sort();
-}
-
-// The installed package a bare specifier names, looked up the way node does,
-// never above the project.
-function packageRoot(project, fromDir, name) {
-  for (let dir = fromDir; within(project, dir); dir = path.dirname(dir)) {
-    const root = path.join(dir, 'node_modules', name);
-    if (fs.existsSync(path.join(root, 'package.json'))) return root;
-    if (dir === project) break;
-  }
-  return null;
-}
-
-function fingerprint(project, pkgRoot) {
-  const manifest = readJson(path.join(pkgRoot, 'package.json'));
-  const scripts = {};
-  for (const name of LIFECYCLE) {
-    if (typeof manifest.scripts?.[name] === 'string') scripts[name] = manifest.scripts[name];
-  }
-  if (!scripts.preinstall && !scripts.install && fs.existsSync(path.join(pkgRoot, 'binding.gyp'))) {
-    scripts.install = IMPLICIT_INSTALL;
-  }
-
-  const files = new Map(); // absolute path -> key
-  const unresolved = new Set();
-  const packages = new Set();
-  const nodeModules = path.join(project, 'node_modules') + path.sep;
-  const keyOf = (abs) => (within(pkgRoot, abs)
-    ? path.relative(pkgRoot, abs)
-    : `node_modules/${path.relative(nodeModules, abs)}`).split(path.sep).join('/');
-
-  // A file that runs, or is read by what runs: record it and follow what it loads.
-  const visit = (abs) => {
-    if (!abs || !within(project, abs) || files.has(abs)) return;
-    files.set(abs, keyOf(abs));
-    const ext = path.extname(abs);
-    if (ext === '.json') return;
-    const text = fs.readFileSync(abs, 'utf8');
-    if (GYP_EXT.has(ext)) {
-      // node-gyp runs a gyp file's commands in that file's directory.
-      for (const match of text.matchAll(NODE_FILE_RE)) visit(resolveFile(path.resolve(path.dirname(abs), match[1])));
-    }
-    for (const match of text.matchAll(REQUIRE_RE)) {
-      const spec = match[2];
-      if (spec.startsWith('.')) {
-        visit(resolveFile(path.resolve(path.dirname(abs), spec)));
-        continue;
-      }
-      const parts = spec.split('/');
-      const name = spec.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0];
-      if (spec.startsWith('node:') || BUILTINS.has(name)) continue;
-      const root = packageRoot(project, path.dirname(abs), name);
-      if (!root) { unresolved.add(spec); continue; }
-      const sub = parts.slice(name.startsWith('@') ? 2 : 1).join('/');
-      if (sub) {
-        visit(resolveFile(path.join(root, sub)));
-      } else {
-        const entry = readJson(path.join(root, 'package.json')).main || 'index.js';
-        visit(resolveFile(path.join(root, entry)));
-      }
-      if (!packages.has(root)) {
-        packages.add(root);
-        gypFiles(root).forEach(visit);
-      }
-    }
-  };
-
-  for (const command of Object.values(scripts)) {
-    for (const match of command.matchAll(NODE_FILE_RE)) {
-      const abs = path.resolve(pkgRoot, match[1]);
-      if (within(pkgRoot, abs)) visit(resolveFile(abs));
-    }
-    if (/\bnode-gyp\b/.test(command)) gypFiles(pkgRoot).forEach(visit);
-  }
-
-  const hashes = {};
-  for (const [abs, key] of [...files].sort((a, b) => a[1].localeCompare(b[1]))) hashes[key] = sha256(abs);
-  for (const spec of [...unresolved].sort()) hashes[`unresolved:${spec}`] = 'unresolved';
-  return { version: manifest.version, scripts, files: hashes };
-}
-
-// Every installed copy of a package, from the lockfile npm installed from.
-function installedCopies(dir, name) {
-  const lock = readJson(path.join(dir, 'package-lock.json'));
-  return Object.keys(lock.packages || {})
-    .filter((key) => key === `node_modules/${name}` || key.endsWith(`/node_modules/${name}`))
-    .sort()
-    .map((key) => path.join(dir, key));
-}
-
-function allowedNames(pkg) {
+function allowed(pkg) {
   const problems = [];
   const names = [];
-  for (const [key, value] of Object.entries(pkg.allowScripts || {})) {
-    if (value !== true) continue;
-    if (!/^(?:@[a-z0-9._-]+\/)?[a-z0-9._-]+$/.test(key)) {
-      problems.push(`allowScripts entry "${key}" is not a bare package name; name the package, the fingerprint pins the version-independent part`);
-      continue;
-    }
-    names.push(key);
+  const denied = new Set();
+  const entries = pkg.allowScripts === undefined ? {} : pkg.allowScripts;
+  if (entries === null || typeof entries !== 'object' || Array.isArray(entries)) {
+    return { names, denied, problems: ['allowScripts is not an object'] };
   }
-  return { names: names.sort(), problems };
+  for (const [key, value] of Object.entries(entries)) {
+    if (!NAME_RE.test(key)) {
+      problems.push(`allowScripts entry "${key}" is not a bare package name; the record pins the versions`);
+    } else if (value === true) {
+      names.push(key);
+    } else if (value === false) {
+      denied.add(key);
+    } else {
+      problems.push(`allowScripts entry "${key}" is neither true nor false`);
+    }
+  }
+  return { names: names.sort(), denied, problems };
 }
 
-function current(dir) {
-  const pkg = readJson(path.join(dir, 'package.json'));
-  const { names, problems } = allowedNames(pkg);
-  const packages = {};
+// The lockfile path a dependency of the package at `from` resolves to, the way
+// npm lays out node_modules: the nearest node_modules/<name> up the tree.
+function resolveIn(packages, from, name) {
+  let base = from;
+  for (;;) {
+    const key = `${base ? `${base}/` : ''}node_modules/${name}`;
+    if (packages[key]) return key;
+    if (!base) return null;
+    const cut = base.lastIndexOf('/node_modules/');
+    base = cut === -1 ? '' : base.slice(0, cut);
+  }
+}
+
+// Every lockfile entry reachable from `root` through declared dependencies.
+function closure(packages, root, problems, label) {
+  const seen = new Set();
+  const queue = [root];
+  while (queue.length) {
+    const key = queue.shift();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const entry = packages[key];
+    for (const field of DEP_FIELDS) {
+      for (const dep of Object.keys(entry[field] || {})) {
+        const target = resolveIn(packages, key, dep);
+        if (target) queue.push(target);
+        else if (field === 'dependencies') {
+          problems.push(`${label}: ${key} depends on ${dep}, which the lockfile does not have`);
+        }
+      }
+    }
+  }
+  return [...seen].sort();
+}
+
+function pin(key, entry, problems, label) {
+  if (entry.link) {
+    problems.push(`${label}: ${key} is a link, not a registry package`);
+  } else if (typeof entry.resolved !== 'string' || !entry.resolved.startsWith(REGISTRY)) {
+    problems.push(`${label}: ${key} does not come from the npm registry (${JSON.stringify(entry.resolved ?? null)})`);
+  } else if (typeof entry.integrity !== 'string' || !INTEGRITY_RE.test(entry.integrity)) {
+    problems.push(`${label}: ${key} has no sha512 integrity`);
+  }
+  return { version: entry.version ?? null, resolved: entry.resolved ?? null, integrity: entry.integrity ?? null };
+}
+
+// The closures of the allowed packages as the lockfile states them.
+function current(pkg, lock) {
+  const { names, denied, problems } = allowed(pkg);
+  const packages = lock && lock.packages && typeof lock.packages === 'object' ? lock.packages : null;
+  if (!packages || !(lock.lockfileVersion >= 2)) {
+    return { closures: {}, problems: [...problems, 'package-lock.json has no "packages" map (lockfile version 2 or later)'] };
+  }
+
+  const closures = {};
   for (const name of names) {
-    const copies = installedCopies(dir, name);
-    if (copies.length === 0) {
+    const roots = Object.keys(packages)
+      .filter((k) => k === `node_modules/${name}` || k.endsWith(`/node_modules/${name}`))
+      .sort();
+    if (roots.length === 0) {
       problems.push(`${name}: allowed in allowScripts but not in package-lock.json`);
       continue;
     }
-    for (const copy of copies) {
-      if (!fs.existsSync(path.join(copy, 'package.json'))) {
-        problems.push(`${name}: ${path.relative(dir, copy)} is not installed`);
-        continue;
+    const pinned = {};
+    for (const root of roots) {
+      for (const key of closure(packages, root, problems, name)) {
+        pinned[key] = pin(key, packages[key], problems, name);
       }
-      const print = fingerprint(dir, copy);
-      const previous = packages[name];
-      if (previous && JSON.stringify({ ...previous, version: '' }) !== JSON.stringify({ ...print, version: '' })) {
-        problems.push(`${name}: installed copies run different install scripts`);
-      }
-      packages[name] = print;
+    }
+    closures[name] = pinned;
+  }
+
+  for (const [key, entry] of Object.entries(packages)) {
+    if (!key || !entry || !entry.hasInstallScript) continue;
+    const name = key.slice(key.lastIndexOf('node_modules/') + 'node_modules/'.length);
+    if (!names.includes(name) && !denied.has(name)) {
+      problems.push(`${key} has an install script that allowScripts does not name`);
     }
   }
-  return { packages, problems };
+  return { closures, problems };
 }
 
-function compare(recorded, actual) {
+function compare(recorded, closures) {
   const problems = [];
   for (const name of Object.keys(recorded)) {
-    if (!(name in actual)) problems.push(`${name}: recorded in ${RECORD} but not allowed in allowScripts`);
+    if (!(name in closures)) problems.push(`${name}: reviewed in ${RECORD} but not allowed in allowScripts`);
   }
-  for (const [name, now] of Object.entries(actual)) {
+  for (const [name, now] of Object.entries(closures)) {
     const was = recorded[name];
     if (!was) {
       problems.push(`${name}: allowed in allowScripts but not reviewed in ${RECORD}`);
       continue;
     }
-    for (const hook of new Set([...Object.keys(was.scripts), ...Object.keys(now.scripts)])) {
-      if (was.scripts[hook] !== now.scripts[hook]) {
-        problems.push(`${name}@${now.version}: the ${hook} script changed: ${JSON.stringify(was.scripts[hook] ?? null)} -> ${JSON.stringify(now.scripts[hook] ?? null)}`);
+    for (const key of [...new Set([...Object.keys(was), ...Object.keys(now)])].sort()) {
+      const a = was[key];
+      const b = now[key];
+      if (!b) problems.push(`${name}: ${key} left the reviewed closure`);
+      else if (!a) problems.push(`${name}: review ${key}@${b.version}, new in the closure`);
+      else if (a.resolved !== b.resolved || a.integrity !== b.integrity) {
+        problems.push(`${name}: review ${key}, ${a.version} -> ${b.version}${a.version === b.version ? ' (different bytes)' : ''}`);
       }
-    }
-    for (const file of new Set([...Object.keys(was.files), ...Object.keys(now.files)])) {
-      if (!(file in now.files)) problems.push(`${name}@${now.version}: ${file} is no longer run`);
-      else if (!(file in was.files)) problems.push(`${name}@${now.version}: review ${file}, newly run at install`);
-      else if (was.files[file] !== now.files[file]) problems.push(`${name}@${now.version}: review ${file}, changed since ${was.version}`);
     }
   }
   return problems;
 }
 
-function check(dir) {
-  const { packages, problems } = current(dir);
-  const recordFile = path.join(dir, RECORD);
-  const recorded = fs.existsSync(recordFile) ? readJson(recordFile) : {};
-  return { packages, problems: [...problems, ...compare(recorded, packages)] };
+function readRecord(file) {
+  if (!fs.existsSync(file)) return {};
+  const record = readJson(file);
+  return record && record.packages && typeof record.packages === 'object' ? record.packages : {};
+}
+
+function check({ pkg, lock, record }) {
+  const { closures, problems } = current(pkg, lock);
+  return { closures, problems: [...problems, ...compare(record, closures)] };
+}
+
+function checkDir(dir) {
+  return check({
+    pkg: readJson(path.join(dir, 'package.json')),
+    lock: readJson(path.join(dir, 'package-lock.json')),
+    record: readRecord(path.join(dir, RECORD)),
+  });
 }
 
 function write(dir) {
-  const { packages, problems } = current(dir);
-  if (problems.length === 0) {
-    fs.writeFileSync(path.join(dir, RECORD), `${JSON.stringify(packages, null, 2)}\n`);
+  const result = current(readJson(path.join(dir, 'package.json')), readJson(path.join(dir, 'package-lock.json')));
+  if (result.problems.length === 0) {
+    const doc = {
+      about: 'The reviewed dependency closures of the packages allowScripts lets npm run install scripts for;'
+        + ' written by tools/check-install-scripts.js --write after a review.',
+      toolchain: TOOLCHAIN,
+      packages: result.closures,
+    };
+    fs.writeFileSync(path.join(dir, RECORD), `${JSON.stringify(doc, null, 2)}\n`);
   }
-  return { packages, problems };
+  return result;
+}
+
+function parseArgs(argv) {
+  const opts = { files: {}, write: false, dir: null };
+  const rest = [];
+  for (let i = 0; i < argv.length; i += 1) {
+    const a = argv[i];
+    if (a === '--write') {
+      opts.write = true;
+    } else if (a === '--package' || a === '--lock' || a === '--record') {
+      if (argv[i + 1] === undefined) return null;
+      opts.files[a.slice(2)] = argv[i + 1];
+      i += 1;
+    } else {
+      rest.push(a);
+    }
+  }
+  const explicit = Object.keys(opts.files).length;
+  if (explicit) return explicit === 3 && rest.length === 0 && !opts.write ? opts : null;
+  if (rest.length !== 1 || !fs.existsSync(path.join(rest[0], 'package.json'))) return null;
+  opts.dir = rest[0];
+  return opts;
 }
 
 function main(argv) {
-  const args = [...argv];
-  const writing = args.includes('--write');
-  let verdictFile = null;
-  const at = args.indexOf('--verdict');
-  if (at !== -1) {
-    verdictFile = args[at + 1];
-    args.splice(at, 2);
-  }
-  const dirs = args.filter((a) => a !== '--write');
-  if (dirs.length !== 1 || args.length - dirs.length > 1 || (writing && at !== -1) || (at !== -1 && !verdictFile)
-      || !fs.existsSync(path.join(dirs[0], 'package.json'))) {
-    process.stderr.write('usage: check-install-scripts.js <dir with package.json> [--write | --verdict FILE]\n');
+  const opts = parseArgs(argv);
+  if (!opts) {
+    process.stderr.write('usage: check-install-scripts.js <dir> [--write]\n'
+      + '       check-install-scripts.js --package FILE --lock FILE --record FILE\n');
     return 2;
   }
-  const dir = path.resolve(dirs[0]);
-  const { packages, problems } = writing ? write(dir) : check(dir);
-  if (verdictFile) {
-    fs.writeFileSync(verdictFile, `${JSON.stringify({ reviewed: problems.length === 0, findings: problems })}\n`);
+  let result;
+  try {
+    if (opts.write) result = write(opts.dir);
+    else if (opts.dir) result = checkDir(opts.dir);
+    else {
+      result = check({
+        pkg: readJson(opts.files.package),
+        lock: readJson(opts.files.lock),
+        record: readRecord(opts.files.record),
+      });
+    }
+  } catch (err) {
+    result = { closures: {}, problems: [`cannot read the manifests: ${err.message}`] };
   }
-  if (problems.length) {
-    for (const problem of problems) process.stderr.write(`install scripts: ${problem}\n`);
-    if (!writing) {
-      process.stderr.write(`After reviewing, record the new state with: node ${path.relative(process.cwd(), __filename)} ${dirs[0]} --write\n`);
+  if (result.problems.length) {
+    for (const problem of result.problems) process.stderr.write(`install scripts: ${problem}\n`);
+    if (!opts.write) {
+      process.stderr.write('After reviewing the packages named, record them with: check-install-scripts.js <dir> --write\n');
     }
     return 1;
   }
-  const names = Object.keys(packages);
-  process.stdout.write(`install scripts: ${writing ? 'recorded' : 'as reviewed'} (${names.length ? names.join(', ') : 'none allowed'})\n`);
+  const names = Object.keys(result.closures);
+  process.stdout.write(`install scripts: ${opts.write ? 'recorded' : 'as reviewed'} (${names.length ? names.join(', ') : 'none allowed'})\n`);
   return 0;
 }
 
 if (require.main === module) process.exitCode = main(process.argv.slice(2));
 
-module.exports = { check, write, fingerprint, RECORD };
+module.exports = { check, checkDir, write, RECORD };

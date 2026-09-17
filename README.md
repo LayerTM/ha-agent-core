@@ -9,10 +9,11 @@ is unpacked or executed.
 | path | what |
 |---|---|
 | `app/server/` | the web console (terminal, tabs, uploads, restart) and the prompt API server |
-| `app/package.json`, `app/package-lock.json`, `app/install-scripts.json` | their dependencies, installed by the add-on with `npm ci --strict-allow-scripts`, and the reviewed install scripts |
+| `app/package.json`, `app/package-lock.json`, `app/install-scripts.json` | their dependencies and the reviewed install-script dependencies, installed by the add-on with `tools/npm-ci-checked.sh` |
 | `ha-tools/` | the dashboard screenshot helper |
 | `rootfs/` | shared scripts: alerts, audit and backup hooks, Home Assistant helpers, shell configuration |
-| `tools/verify-core.js`, `tools/check-adapter-graph.js`, `tools/check-install-scripts.js` | the checks an add-on runs when it assembles its image |
+| `tools/verify-core.js`, `tools/check-adapter-graph.js` | the checks an add-on runs when it assembles its image |
+| `tools/npm-ci-checked.sh`, `tools/check-install-scripts.js`, `tools/smoke-allowed-packages.js` | the dependency install an add-on runs in `app/` and `ha-tools/` |
 
 An add-on assembles its image from this tree plus its own files, in the same
 layout: its engine adapter goes to `app/adapter/`, its console frontend to
@@ -67,33 +68,37 @@ directories), and reports cycles.
 ## Install scripts
 
 npm runs a dependency's install scripts only for the packages named in the
-`allowScripts` field of `app/package.json` (currently `node-pty`, which compiles
-its native module). An entry names the package, not a version; what that allows
-is pinned by `tools/check-install-scripts.js`, which fingerprints the code the
-allowed install step runs:
-- the lifecycle scripts, and the files they run with `node`;
-- the package's `.gyp`/`.gypi` files;
-- every module those load, transitively, including other packages (node-pty's
-  build loads `node-addon-api`).
+`allowScripts` field of a `package.json` (in `app/`, `node-pty`, which compiles
+the terminal's native module). An entry names a package, not a version. What it
+allows is pinned in `install-scripts.json` beside it: for every allowed package,
+the whole closure of packages it depends on, each by its registry tarball and
+its sha512 integrity. That digest covers every file of the package.
 
-It compares that fingerprint with the reviewed one in `install-scripts.json`
-and names every file that differs; after a review,
-`tools/check-install-scripts.js <dir> --write` records it.
+`tools/check-install-scripts.js` compares a lockfile with that record. It reads
+JSON only and runs nothing. The following are all reported as not reviewed:
+- a changed, added or removed package in a closure;
+- a package from outside the npm registry, or one without an integrity hash;
+- any package with an install script that `allowScripts` does not name.
 
-The app is installed in this order, so none of that code runs before it is
-checked (`.github/scripts/npm-ci-local-headers.sh`):
-1. `npm ci --ignore-scripts`;
-2. the check;
+After a review, `tools/check-install-scripts.js <dir> --write` records the new
+state. The toolchain the scripts use (Node.js, npm and its node-gyp, Python, make,
+the compiler) comes from the image that runs the install.
+
+Dependencies are installed with `tools/npm-ci-checked.sh`, run in the directory
+that holds the lockfile:
+1. the check, before anything is unpacked;
+2. `npm ci --ignore-scripts`;
 3. `npm rebuild --strict-allow-scripts`, which also fails on any other package
    with an install script;
-4. loading each allowed package and starting a terminal through node-pty.
+4. loading each allowed package, and starting a terminal through node-pty.
 
-node-gyp compiles against the headers of the Node that runs it
+node-gyp compiles against the headers of the Node.js that runs it
 (`npm_package_config_node_gyp_nodedir`), so nothing is downloaded.
 
-A Dependabot update that changes the fingerprint is not merged automatically:
-its pull request is labelled `needs review` until the new install code has been
-reviewed and recorded.
+A Dependabot update is merged automatically only when the base branch's checker
+and records accept the update's lockfiles, which are read as data and never run,
+and only for the head commit that was judged. Otherwise auto-merge is turned off
+and the pull request is labelled `needs review`.
 
 ## The release archive
 
@@ -219,18 +224,18 @@ node tools/pack.js --out dist
 
 ## Development
 
-Requires Node.js 22 or later (CI uses Node.js 26), Python 3, bash and jq.
+Requires Node.js 22 or later (CI uses Node.js 26), Python 3, bash, jq and a C/C++ toolchain for node-gyp where node-pty has no prebuild.
 
 The tests in `app/test/contract/` run the prompt API and the console against a
 neutral test adapter (`app/test/fixtures/neutral-adapter.js`) that records what
 the core dispatches; it is never packed.
 
 ```sh
-npm ci
+tools/npm-ci-checked.sh
 npm test
 npm run lint
 npm run typecheck
-(cd app && npm ci && npm test && npm run test:alerts && npm run test:config && npm run lint && npm run typecheck)
+(cd app && ../tools/npm-ci-checked.sh && npm test && npm run test:alerts && npm run test:config && npm run lint && npm run typecheck)
 python .github/scripts/secret_scan.py .
 python .github/scripts/hygiene_scan.py .
 ```

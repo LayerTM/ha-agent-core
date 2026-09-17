@@ -1,22 +1,18 @@
 {
-  "node-pty": {
-    "version": "1.1.0",
-    "scripts": {
-      "install": "node scripts/prebuild.js || node-gyp rebuild",
-      "postinstall": "node scripts/post-install.js"
-    },
-    "files": {
-      "binding.gyp": "2e6fdfd713f8b3485dd4e2f4efe93bf5436a5ff4eec4deb45533b09b6932efff",
-      "deps/winpty/src/configurations.gypi": "f39946ce3b57a5518b917f2e7c854c38b37b9fa7e042ce2d447de9182035bbad",
-      "deps/winpty/src/winpty.gyp": "c67cd1b1d1e5aad4ac8795dccdb94df3bd43fd5f268cdeb7d4ce183bf6ce6315",
-      "node_modules/node-addon-api/common.gypi": "60083ca8544cfee3b47ce2ae1faf394da40bf24722ad4fb7828eb9598e8101d6",
-      "node_modules/node-addon-api/except.gypi": "ddbc09f5b66fe24dd898fbe659085a6ff72e9575025004fc3762271dba781e8b",
-      "node_modules/node-addon-api/index.js": "be71328f325cf541f37704a644e53cd04af1b69bc119b39733d64589e64dffdb",
-      "node_modules/node-addon-api/node_addon_api.gyp": "a1f080ca22f191902d118bc2a169984a9e761af091ca6d0ea456197bf7b6543c",
-      "node_modules/node-addon-api/node_api.gyp": "3cd2c44fb0974f016376b676d46bbebbca7c89d4383b09ece30e4cb4122a1499",
-      "node_modules/node-addon-api/noexcept.gypi": "494060b87197c489497a038504147c435b1d09306152048add42ba0d7d16e747",
-      "scripts/post-install.js": "b15bb24cd3388b05392eeb200aa805e2827356818d111b93847e1b0f6a6ada46",
-      "scripts/prebuild.js": "7e604b10f7769d7dc95947d3481c00513b9e3bb6c561d5264506350a16a0381a"
+  "about": "The reviewed dependency closures of the packages allowScripts lets npm run install scripts for; written by tools/check-install-scripts.js --write after a review.",
+  "toolchain": "node, npm and its node-gyp, python, make and the C/C++ compiler come from the image that runs the install",
+  "packages": {
+    "node-pty": {
+      "node_modules/node-addon-api": {
+        "version": "7.1.1",
+        "resolved": "https://registry.npmjs.org/node-addon-api/-/node-addon-api-7.1.1.tgz",
+        "integrity": "sha512-5m3bsyrjFWE1xf7nz7YXdN4udnVtXK6/Yfgn5qnahL6bCkf2yKt4k3nuTKAtT4r3IG8JNR2ncsIMdZuAzJjHQQ=="
+      },
+      "node_modules/node-pty": {
+        "version": "1.1.0",
+        "resolved": "https://registry.npmjs.org/node-pty/-/node-pty-1.1.0.tgz",
+        "integrity": "sha512-20JqtutY6JPXTUnL0ij1uad7Qe1baT46lyolh2sSENDd4sTzKZ4nmAFkeAARDKwmlLjPx6XKRlwRUxwjOy+lUg=="
+      }
     }
   }
 }
