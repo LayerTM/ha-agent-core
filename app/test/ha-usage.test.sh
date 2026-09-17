@@ -372,6 +372,8 @@ def crash(a, b):
     # Every rename but the last one, which puts the new generation in place.
     calls.append(b)
     if b == cache_file:
+        # A reader without the lock looks here at exactly this moment.
+        calls.append(os.path.exists(cache_file))
         raise RuntimeError("crash")
     return real(a, b)
 g["os"].replace = crash
@@ -381,14 +383,15 @@ except RuntimeError:
     pass
 g["os"].replace = real
 after = m["_load"]()
-print(json.dumps([after["_from"], after["retired"]["console"]["days"] != {}, after["history_reset"]], separators=(",", ":")))
+print(json.dumps([after["_from"], after["retired"]["console"]["days"] != {}, after["history_reset"], calls[-1]],
+                 separators=(",", ":")))
 PY
 rm -f "${fd_}"/usage-cache.json*
 check "a crash while saving a recovered cache keeps the previous generation" \
-    "$(CC_AUDIT_DATA_DIR="${fd_}" python3 "${work}/crash.py" "${bin}" "${fd_}" recovered)" '["previous",true,true]'
+    "$(CC_AUDIT_DATA_DIR="${fd_}" python3 "${work}/crash.py" "${bin}" "${fd_}" recovered)" '["previous",true,true,true]'
 rm -f "${fd_}"/usage-cache.json*
-check "a crash between the two renames leaves the previous generation to load" \
-    "$(CC_AUDIT_DATA_DIR="${fd_}" python3 "${work}/crash.py" "${bin}" "${fd_}" current)" '["previous",true,true]'
+check "a crash while saving a current cache leaves it in place, with no reset and never a moment without it" \
+    "$(CC_AUDIT_DATA_DIR="${fd_}" python3 "${work}/crash.py" "${bin}" "${fd_}" current)" '["current",true,false,true]'
 
 rm -f "${fd_}"/usage-cache.json*
 rec 3 > "${F}"
@@ -564,8 +567,228 @@ check "it runs the upkeep at once and then every interval, with the sweep days" 
 check "more than once" "$(( $(wc -l < "${work}/upkeep-calls") >= 2 ))" 1
 check "a sweep that is not a number stops it" "$(USAGE_SWEEP_DAYS=x bash "${upkeep}" 2>/dev/null; echo $?)" 64
 
-if [ "${ran}" -lt 95 ]; then
-    echo "FAIL: only ${ran} ha-usage assertions ran — expected at least 95"
+echo "ha-usage --maintain — what a crash and a swapped path must not cost"
+# A mutant is the same script with one part of a fix taken out. It proves the
+# check below fails without that part; a replacement that matches nothing is a
+# dead instrument and fails here, not silently.
+mutant() { # <out> <old> <new>
+    python3 -c '
+import sys
+src, old, new, out = (open(p).read() if i < 3 else p for i, p in enumerate(sys.argv[1:5]))
+if old not in src:
+    sys.exit("the mutant changes nothing: what it removes is not in the script")
+open(out, "w").write(src.replace(old, new, 1))
+' "${bin}" "$2" "$3" "$1" || return 1
+    chmod +x "$1"
+}
+
+cat > "${work}/rotate-crash.py" <<'PY'
+import json, os, runpy, sys
+
+ha, data, case = sys.argv[1:4]
+os.environ["CC_AUDIT_DATA_DIR"] = data
+m = runpy.run_path(ha)
+g = m["maintain"].__globals__
+g["AUDIT_ROTATE_BYTES"] = 10
+
+
+def counted(cache):
+    """Every audit token the cache holds, wherever it keeps it."""
+    total = 0
+    for src in [*cache["sources"].values(), *cache["parked"].values(), cache["retired"]["audit"]]:
+        if src.get("kind", "audit") == "audit":
+            for models in src["days"].values():
+                for row in models.values():
+                    total += row[0]
+    return total
+
+
+real = os.replace
+if case == "move":
+    # The crash is the moment after the move: the log is .1 on disk and every
+    # line it holds is counted in this process's memory and nowhere else.
+    def crashing(a, b):
+        real(a, b)
+        raise SystemExit(0)
+    cache = m["_load"]()
+    cache["last_read_bytes"] = 0
+    m["_read_audit"](cache, 1e18)
+    g["os"].replace = crashing
+    try:
+        m["_rotate_audit"](cache, 1e18)
+    except SystemExit:
+        pass
+    g["os"].replace = real
+else:
+    # The crash is inside the console read, the minutes after the rotation.
+    def gone(cache, deadline):
+        raise SystemExit(0)
+    g["_read_console"] = gone
+    try:
+        m["maintain"](0)
+    except SystemExit:
+        pass
+    with open(g["CACHE_FILE"], encoding="utf-8") as fh:
+        print(counted(json.load(fh)))
+PY
+
+rd_="${work}/rot"; mkdir -p "${rd_}/s"
+rlog="${rd_}/claude-audit.log"
+rtr="${rd_}/s/r.jsonl"
+rlines() { for _ in $(seq 1 "$1"); do
+    printf '%s 10:00:00  prompt[chat] caller=a status=200 tokens=r:100:0:0:0 cost=$0.0000\n' "${today}"; done; }
+rmaintain() { CC_USAGE_AGENT_CMD="${work}/agent-usage" USAGE_CALLS="${work}/calls" USAGE_STATES="${work}/states" \
+    USAGE_LINES="${rtr}" USAGE_MORE="" USAGE_SOURCE=x CC_AUDIT_DATA_DIR="${rd_}" \
+    CC_USAGE_AUDIT_ROTATE_BYTES=16777216 python3 "${1:-${bin}}" --maintain "${2:-0}"; }
+rinput() { CC_USAGE_AGENT_CMD="${work}/agent-usage" USAGE_CALLS="${work}/calls" USAGE_STATES="${work}/states" \
+    USAGE_LINES="${rtr}" USAGE_MORE="" USAGE_SOURCE=x CC_AUDIT_DATA_DIR="${rd_}" \
+    python3 "${bin}" --json 1 | jq -r '.tokens.all_time.input'; }
+
+: > "${rtr}"
+rlines 5 > "${rlog}"
+rmaintain > /dev/null
+check "five audit lines are counted and saved" "$(rinput)" 500
+rlines 5 >> "${rlog}"
+python3 "${work}/rotate-crash.py" "${bin}" "${rd_}" move
+[ -e "${rlog}.1" ] && pass "the crash leaves the rotated log on disk" || fail "the crash leaves the rotated log on disk" absent present
+rmaintain > /dev/null
+check "the next upkeep counts what the lost run had only in memory, once" "$(rinput)" 1000
+rmaintain > /dev/null
+check "and not again on the run after that" "$(rinput)" 1000
+
+cat > "${work}/mut-old-a" <<'PY'
+            if os.path.exists(AUDIT_LOG + ".1"):
+                cache["last_read_bytes"] = _read_audit(cache, deadline, AUDIT_LOG + ".1")
+            cache["last_read_bytes"] += _read_audit(cache, deadline)
+PY
+cat > "${work}/mut-new-a" <<'PY'
+            cache["last_read_bytes"] = _read_audit(cache, deadline)
+PY
+mut_a="${work}/ha-usage-no-recovery"
+if mutant "${mut_a}" "${work}/mut-old-a" "${work}/mut-new-a"; then
+    rm -f "${rd_}"/usage-cache.json* "${rlog}" "${rlog}.1"
+    rlines 5 > "${rlog}"; rmaintain > /dev/null; rlines 5 >> "${rlog}"
+    python3 "${work}/rotate-crash.py" "${bin}" "${rd_}" move
+    rmaintain "${mut_a}" > /dev/null
+    check "without reading .1 first, those lines are lost for good (the mutant)" "$(rinput)" 500
+else
+    fail "the mutant for the rotated log still applies" "no match" "a match"
+fi
+
+rm -f "${rd_}"/usage-cache.json* "${rlog}" "${rlog}.1"
+rlines 5 > "${rlog}"; rmaintain > /dev/null; rlines 5 >> "${rlog}"
+check "a rotation is on disk before the console read, not only in memory" \
+    "$(python3 "${work}/rotate-crash.py" "${bin}" "${rd_}" console)" 1000
+cat > "${work}/mut-old-b" <<'PY'
+            if rotated:
+                # The move is on disk; what it counted must be too, before the
+                # console read (minutes) can be cut off.
+                _save(cache)
+PY
+printf '            pass\n' > "${work}/mut-new-b"
+mut_b="${work}/ha-usage-no-save"
+if mutant "${mut_b}" "${work}/mut-old-b" "${work}/mut-new-b"; then
+    rm -f "${rd_}"/usage-cache.json* "${rlog}" "${rlog}.1"
+    rlines 5 > "${rlog}"; rmaintain > /dev/null; rlines 5 >> "${rlog}"
+    check "without that save, the cache still says five (the mutant)" \
+        "$(python3 "${work}/rotate-crash.py" "${mut_b}" "${rd_}" console)" 500
+else
+    fail "the mutant for the save after the rotation still applies" "no match" "a match"
+fi
+
+cat > "${work}/handover.py" <<'PYH'
+import json, os, runpy, sys
+
+ha, data, path = sys.argv[1:4]
+os.environ["CC_AUDIT_DATA_DIR"] = data
+m = runpy.run_path(ha)
+cache = m["_fresh"]()
+sid, src, size = m["_track"](cache, "console", path)
+src["offset"], src["days"] = size, {"2026-09-17": {"kept": [30, 0, 0, 0, 1, 0]}}
+src["fingerprint"], src["state"] = m["_fingerprint"](path, size), "s"
+# The same path, a new file starting as the old one did and carrying on.
+with open(path, "rb") as fh:
+    was = fh.read()
+# Written beside it and renamed over, so the new file cannot be handed the
+# inode the old one had — the successor must be a different identity.
+with open(path + ".new", "wb") as fh:
+    fh.write(was + b'{"day":"2026-09-17","model":"added","input":7}\n')
+os.rename(path + ".new", path)
+new_sid, new_src, _ = m["_track"](cache, "console", path)
+m["_retire"](cache, "console", {new_sid})
+# What the successor will read, and the days that are its own before it does.
+print(json.dumps([new_sid != sid, new_src["offset"] == size, new_src["state"],
+                  new_src["days"], cache["retired"]["console"]["days"]], separators=(",", ":")))
+PYH
+
+hd_="${work}/hand"; mkdir -p "${hd_}"
+usage 30 0 0 0 kept > "${hd_}/h.jsonl"
+check "a file replaced by one that starts as it did hands over its days and its place" \
+    "$(CC_AUDIT_DATA_DIR="${hd_}" python3 "${work}/handover.py" "${bin}" "${hd_}" "${hd_}/h.jsonl")" \
+    '[true,true,"s",{"2026-09-17":{"kept":[30,0,0,0,1,0]}},{}]'
+
+cat > "${work}/sweep-race.py" <<'PY'
+import os, runpy, sys, time
+
+ha, data, listed, intruder = sys.argv[1:5]
+os.environ["CC_AUDIT_DATA_DIR"] = data
+m = runpy.run_path(ha)
+g = m["maintain"].__globals__
+real = m["_read_console"]
+
+
+def swapping(cache, deadline):
+    counted = real(cache, deadline)
+    # The window the sweep must survive: another file takes the counted path,
+    # with a mtime old enough to be swept, after this call read a byte of it.
+    os.rename(intruder, listed)
+    old = time.time() - 400 * 86400
+    os.utime(listed, (old, old))
+    return counted
+
+
+g["_read_console"] = swapping
+sys.exit(m["maintain"](1))
+PY
+
+sd_="${work}/swp"; mkdir -p "${sd_}/s"
+: > "${sd_}/claude-audit.log"
+SEEN="${sd_}/s/seen.jsonl"; UNSEEN="${sd_}/s/unseen.jsonl"
+smaintain() { CC_USAGE_AGENT_CMD="${work}/agent-usage" USAGE_CALLS="${work}/calls" USAGE_STATES="${work}/states" \
+    USAGE_LINES="${SEEN}" USAGE_MORE="" USAGE_SOURCE=x CC_AUDIT_DATA_DIR="${sd_}" \
+    python3 "${work}/sweep-race.py" "${1:-${bin}}" "${sd_}" "${SEEN}" "${UNSEEN}"; }
+sreport() { CC_USAGE_AGENT_CMD="${work}/agent-usage" USAGE_CALLS="${work}/calls" USAGE_STATES="${work}/states" \
+    USAGE_LINES="${SEEN}" USAGE_MORE="" USAGE_SOURCE=x CC_AUDIT_DATA_DIR="${sd_}" \
+    python3 "${bin}" --json 1; }
+race_setup() { rm -f "${sd_}"/usage-cache.json*
+    usage 5 0 0 0 seen > "${SEEN}"; aged "${SEEN}" 400
+    usage 999 0 0 0 unseen > "${UNSEEN}"; aged "${UNSEEN}" 400; }
+
+race_setup
+smaintain > /dev/null
+[ -e "${SEEN}" ] && pass "a file that takes a counted path after the count is not deleted" \
+    || fail "a file that takes a counted path after the count is not deleted" deleted kept
+check "and the next call counts it, instead of its usage going with the file" "$(input "$(sreport)")" 1004
+
+cat > "${work}/mut-old-c" <<'PY'
+            if (stat.S_ISREG(st.st_mode) and st.st_mtime < cutoff
+                    and sid.endswith(f":{st.st_dev}:{st.st_ino}")):
+PY
+cat > "${work}/mut-new-c" <<'PY'
+            if stat.S_ISREG(st.st_mode) and st.st_mtime < cutoff:
+PY
+mut_c="${work}/ha-usage-path-sweep"
+if mutant "${mut_c}" "${work}/mut-old-c" "${work}/mut-new-c"; then
+    race_setup
+    smaintain "${mut_c}" > /dev/null
+    [ -e "${SEEN}" ] && fail "deleting by path alone loses it unread (the mutant)" kept deleted \
+        || pass "deleting by path alone loses it unread (the mutant)"
+else
+    fail "the mutant for the identity the sweep checks still applies" "no match" "a match"
+fi
+
+if [ "${ran}" -lt 117 ]; then
+    echo "FAIL: only ${ran} ha-usage assertions ran — expected at least 117"
     exit 1
 fi
 if [ "${fails}" -eq 0 ]; then

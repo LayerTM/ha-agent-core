@@ -360,8 +360,10 @@ and then once a day:
    replaces the previous one, and counts any line written in between.
 3. When `engine_transcript_retention` printed `core`, it deletes the files
    `agent-usage --files` lists that were not written to for
-   `transcript_retention_days` days. It deletes only regular files, never a
-   link, and nothing at all if any file, or the audit log, could not be read.
+   `transcript_retention_days` days. It deletes only a file it has just counted
+   and is still the same file (device and inode), so never a link and never one
+   that took a listed path since — and nothing at all if any file, or the audit
+   log, could not be read.
 
 Their usage stays counted either way. Its output goes to
 `/data/usage-upkeep.log`.
