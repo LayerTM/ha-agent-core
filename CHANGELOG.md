@@ -8,6 +8,10 @@ uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- The loopback relay to Home Assistant's MCP server lets only `initialize`,
+  `ping`, `notifications/*`, `tools/list` and `tools/call` through from the
+  agent, answering every other method itself, and drops requests the server
+  makes of the agent.
 - Every error answer of the prompt API carries a stable `code` next to its
   `error` message, and `field` or `limit_bytes` where they apply.
   `GET /api/status` publishes `prompt_max_bytes` and `body_max_bytes`.
