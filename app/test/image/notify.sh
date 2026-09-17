@@ -95,6 +95,26 @@ run CC_ALERTS_DATA_DIR="${work}" CC_ALERTS_NOTIFY_CMD="${REC}/ha-notify" CC_ALER
     CC_ALERTS_NOW=23:30 cc-alerts --once > /dev/null 2>&1
 eq "the alert is titled with the agent's name" "$(tail -n1 "${P}/notify.args" | awk -F'|' '{print $NF}')" "Neutral · Home alert"
 
+echo "5. the Claude Code add-on's names give the titles it has always sent"
+branding '{"productName":"Claude Code","consoleName":"Claude Console","agentName":"Claude"}'
+rm -f "${REC}/ha-notify"
+fresh
+run ha-notify "done" > /dev/null
+eq "ha-notify" "$(jq -r .title "${P}/curl.body")" "Claude Code"
+record_notify
+fresh
+printf '{}' | run HA_NOTIFY_SERVICE=notify.phone cc-hook-notify
+eq "cc-hook-notify" "$(cat "${P}/notify.args")" "Claude Code needs your attention|Claude Code"
+fresh
+printf '{"tool_name":"Edit","tool_input":{"file_path":"/homeassistant/configuration.yaml"}}' | run cc-hook-backup
+eq "cc-hook-backup" "$(cut -d'|' -f2 "${P}/notify.args")" "Claude · backup"
+fresh
+work="$(mktemp -d)"
+printf '{"proactive_alerts": true}\n' > "${work}/options.json"
+run CC_ALERTS_DATA_DIR="${work}" CC_ALERTS_NOTIFY_CMD="${REC}/ha-notify" CC_ALERTS_STATES_FILE=/src/app/test/fixtures/alerts-anomalies.json \
+    CC_ALERTS_NOW=23:30 cc-alerts --once > /dev/null 2>&1
+eq "cc-alerts" "$(tail -n1 "${P}/notify.args" | awk -F'|' '{print $NF}')" "Claude · Home alert"
+
 if [ "${fails}" -ne 0 ]; then
     echo "${fails} failed"
     exit 1
