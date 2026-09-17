@@ -137,12 +137,36 @@ test('a staging directory under a node_modules parent is refused', (t) => {
   assert.equal(fs.existsSync(path.join(dir, 'node_modules/native/gyp-version.txt')), false);
 });
 
-test('an allowed package the install left out is skipped, by the build and by the smoke test', (t) => {
+const smoke = (dir, env = {}) => spawnSync(process.execPath, [path.join(__dirname, '..', 'tools', 'smoke-allowed-packages.js')], {
+  cwd: dir, encoding: 'utf8', env: { ...process.env, ...env },
+});
+
+test('an allowed package the lockfile says was omitted is skipped', (t) => {
+  const { dir } = installed(t);
+  const lockFile = path.join(dir, 'package-lock.json');
+  const lock = JSON.parse(fs.readFileSync(lockFile, 'utf8'));
+  lock.packages['node_modules/native'].dev = true;
+  lock.packages['node_modules/helper'].dev = true;
+  fs.writeFileSync(lockFile, JSON.stringify(lock));
+  assert.deepEqual(write(dir).problems, []);
+  fs.rmSync(path.join(dir, 'node_modules', 'native'), { recursive: true });
+  assert.equal(build(dir, { INSTALL_OMIT: 'dev' }).status, 0);
+  assert.equal(smoke(dir, { INSTALL_OMIT: 'dev' }).status, 0);
+  // The same absence without that omit is an error.
+  const r = build(dir, { INSTALL_OMIT: 'optional' });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /native should be installed and is not/);
+});
+
+test('an allowed package that should be installed and is missing fails the build and the smoke test', (t) => {
   const { dir } = installed(t);
   fs.rmSync(path.join(dir, 'node_modules', 'native'), { recursive: true });
-  assert.equal(build(dir).status, 0);
-  const smoke = spawnSync(process.execPath, [path.join(__dirname, '..', 'tools', 'smoke-allowed-packages.js')], { cwd: dir, encoding: 'utf8' });
-  assert.equal(smoke.status, 0, smoke.stderr);
+  for (const omit of ['', 'dev', 'dev,optional,peer']) {
+    const r = build(dir, { INSTALL_OMIT: omit });
+    assert.equal(r.status, 1, omit);
+    assert.match(r.stderr, /native should be installed and is not/, omit);
+    assert.notEqual(smoke(dir, { INSTALL_OMIT: omit }).status, 0, omit);
+  }
 });
 
 test('nothing allowed means nothing to build', (t) => {

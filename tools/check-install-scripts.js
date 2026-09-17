@@ -270,4 +270,18 @@ function main(argv) {
 
 if (require.main === module) process.exitCode = main(process.argv.slice(2));
 
-module.exports = { check, checkDir, write, RECORD };
+// Whether `npm ci --omit=<omit…>` leaves out the package at a lockfile path, by
+// the flags npm wrote there. `omitList` is the comma-separated INSTALL_OMIT the
+// install wrapper sets (dev, optional, peer). A devOptional package is left out
+// only when both dev and optional are.
+function omittedByInstall(lock, key, omitList = '') {
+  const omit = new Set(String(omitList).split(',').filter(Boolean));
+  const entry = lock && lock.packages && lock.packages[key];
+  if (!entry) return false;
+  return Boolean((entry.dev && omit.has('dev'))
+    || (entry.optional && omit.has('optional'))
+    || (entry.peer && omit.has('peer'))
+    || (entry.devOptional && omit.has('dev') && omit.has('optional')));
+}
+
+module.exports = { check, checkDir, write, omittedByInstall, RECORD };

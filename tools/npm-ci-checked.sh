@@ -38,6 +38,12 @@ for arg in "$@"; do
   esac
 done
 
+# What was left out, for the build and the smoke test: they skip an allowed
+# package only when the lockfile says one of these removed it.
+INSTALL_OMIT=""
+for arg in ${omit[@]+"${omit[@]}"}; do INSTALL_OMIT="${INSTALL_OMIT:+$INSTALL_OMIT,}${arg#--omit=}"; done
+export INSTALL_OMIT
+
 tools="$(cd "$(dirname "$0")" && pwd)"
 
 # The image's node and npm, found before anything is installed and used by
