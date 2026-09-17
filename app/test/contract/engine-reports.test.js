@@ -15,8 +15,8 @@ process.env.CLAUDE_PROMPT_TIMEOUT_MS = '10000';
 const contract = require('../../server/adapter-contract');
 const { createNeutralAdapter, okOutcome } = require('../fixtures/neutral-adapter');
 
-const { adapter, state, run } = createNeutralAdapter();
-contract.useAdapter(adapter);
+const { adapter, state, run, branding } = createNeutralAdapter();
+contract.useAdapter(adapter, branding);
 
 const { createPromptApp } = require('../../server/prompt/server');
 const { buildRedactor } = require('../../server/prompt/security');
@@ -182,6 +182,33 @@ test('an engine that reports cost publishes the budget and bills every run', asy
     assert.equal(res.status, 200);
     assert.match(auditLines.at(-1), / cost=\$0\.2500$/);
     assert.deepEqual((await get('/api/status', url)).body.budget, { limit: 5, spent: 0.25 });
+  } finally {
+    s.close();
+  }
+});
+
+test('a spent budget answers a read with the notice that names the engine', async () => {
+  adapter.descriptor.reportsCost = true;
+  const app = createPromptApp({
+    token: TOKEN, claudeBin: path.join(TMP, 'no-agent'), usageBin: path.join(TMP, 'no-usage'), mcpConfigPath: null,
+    model: '', workDir: TMP, addonVersion: 'reports', redact: (s) => s, audit: (l) => auditLines.push(l),
+    dailyBudgetUsd: 0.2, runAgent: run, stateDir: path.join(TMP, 'spent-budget'),
+  });
+  const s = await new Promise((resolve) => { const x = app.listen(0, '127.0.0.1', () => resolve(x)); });
+  try {
+    const url = `http://127.0.0.1:${s.address().port}`;
+    const ask = () => fetch(`${url}/api/prompt`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: 'hi', language: 'de' }),
+    });
+    state.script.push(() => okOutcome({ costUsd: 0.25 }));
+    assert.equal((await ask()).status, 200);
+    const runs = state.runs.length;
+    const res = await ask();
+    assert.equal(res.status, 200);
+    assert.match((await res.json()).text, /^Ich habe das heutige Neutral-Nutzungsbudget \(\$0\.2\) erreicht/);
+    assert.equal(state.runs.length, runs, 'no run was started');
   } finally {
     s.close();
   }

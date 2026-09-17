@@ -25,7 +25,8 @@ tree is installed at `/opt/agent-console`.
 Everything engine-specific comes from one module the add-on provides at
 `app/adapter/index.js`. The core loads it in one place,
 `app/server/adapter-contract.js`, and refuses to start if its `apiVersion` is not
-`3` or a member is missing or of the wrong type:
+`4`, a member is missing or of the wrong type, or its names are not valid (see
+[Names](#names)):
 
 | member | type | used for |
 |---|---|---|
@@ -50,6 +51,22 @@ Everything engine-specific comes from one module the add-on provides at
 | `console.updateCommand` | string | the command behind the console's update button |
 | `console.windowName`, `console.launcher` | strings | the agent's terminal tab |
 | `console.remoteWindow(env)` | optional function | `{ name, argv }` of an extra tab, or `null` |
+
+### Names
+
+The add-on names its engine in `app/adapter/branding.json`, a JSON object with
+exactly these keys:
+
+| key | used for | Claude Code add-on |
+|---|---|---|
+| `productName` | the first line the start script logs; the startup page title when the page file is missing | `Claude Code` |
+| `consoleName` | the last line the start script logs; the console's listening line | `Claude Console` |
+| `agentName` | the daily budget notice; the error for closing the agent's tab | `Claude` |
+
+Every value is 1 to 64 characters, without surrounding spaces, control
+characters, quotes, `<`, `>`, `&`, `\` or `` ` ``, so it is used as it is in pages,
+log lines and shell strings. The file is data: the startup placeholder and the
+start script read it without loading the adapter's code.
 
 ### Prompt runs
 
@@ -142,8 +159,9 @@ add-on's own) and `request_fields`, the body fields `POST /api/prompt` accepts,
 taken from the same list the request is validated against. A client sends a
 field only when it is listed there.
 
-The adapter may require its own modules and `app/server/prompt/security.js`, and
-nothing else of the core; the core returns to the adapter only through these
+The adapter may require its own modules and the core's leaf modules
+`app/server/prompt/security.js` and `app/server/branding.js`, and nothing else
+of the core; the core returns to the adapter only through these
 members. `tools/check-adapter-graph.js <app dir>` checks that on an assembled
 tree: it reads every file under `server/` and `adapter/`, follows only
 `require('<string literal>')`, refuses every other way to load or evaluate code

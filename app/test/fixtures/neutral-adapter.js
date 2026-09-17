@@ -14,6 +14,8 @@ const os = require('node:os');
 const path = require('node:path');
 
 const AGENT = path.join(__dirname, 'neutral-agent.js');
+// The names the neutral adapter's branding.json would carry.
+const NEUTRAL_BRANDING = Object.freeze({ productName: 'Neutral Agent', consoleName: 'Neutral Console', agentName: 'Neutral' });
 const HA_PREFIX = 'ha.';
 const NEUTRAL_EVENTS = new Set(['init', 'fragment-start', 'fragment', 'tool-use', 'tool-result', 'result']);
 
@@ -82,7 +84,7 @@ function createNeutralAdapter() {
     return step ? step(opts) : okOutcome();
   }
   const adapter = {
-    apiVersion: 3,
+    apiVersion: 4,
     descriptor: {
       engine: 'neutral',
       // `neutral-agent 1.2.3 (build)` → `1.2.3`
@@ -170,7 +172,7 @@ function createNeutralAdapter() {
       launcher: '/nonexistent/neutral-agent-launch',
     },
   };
-  return { adapter, state, run };
+  return { adapter, state, run, branding: NEUTRAL_BRANDING };
 }
 
-module.exports = { createNeutralAdapter, okOutcome, errorOutcome, waitForAbort, okTape, AGENT };
+module.exports = { createNeutralAdapter, okOutcome, errorOutcome, waitForAbort, okTape, AGENT, NEUTRAL_BRANDING };
