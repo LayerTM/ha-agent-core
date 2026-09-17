@@ -8,6 +8,13 @@ uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `transcript_retention_days` (default 30, 0 = keep) and the engine hook
+  `engine_transcript_retention`, which the start script requires: the engine
+  either sweeps its transcripts itself or leaves it to the core.
+- `usage-upkeep`, started by the start script: once a day, `ha-usage
+  --maintain` counts what is new, moves an audit log above 16 MB to
+  `claude-audit.log.1` and, when the engine leaves it to the core, deletes
+  transcripts not written to for that many days. Their usage stays counted.
 - The console pages (`app/templates/`): the terminal page, the startup page,
   its script, style sheet and web app manifest, with the engine's names and
   colours as placeholders. An add-on no longer ships them.
@@ -26,8 +33,9 @@ uses [Semantic Versioning](https://semver.org/).
   no longer prints all usage at once. `ha-usage` and `/api/usage` read only what
   was appended since the last call, from the transcripts and from the audit
   log. The totals are kept in `/data/usage-cache.json`, so the usage of a
-  deleted transcript stays counted. When the cache is lost, the report says so
-  with `history_reset` and `history_since`.
+  deleted transcript stays counted, and so does the usage of one that is no
+  longer listed but still there. When the cache is lost, the report says so
+  with `history_reset` and `history_since`, from then on.
 - Adapter API 5: the console pages move to `app/templates/` and carry the
   engine's names and colours as placeholders, filled in once when the console
   starts; only the rendered pages are served. `app/public/` may no longer hold

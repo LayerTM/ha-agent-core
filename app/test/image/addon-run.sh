@@ -33,6 +33,12 @@ cat > /usr/local/bin/provision-extras <<'EOF'
 [ "${1:-}" = --check ] && exit 0
 echo "plugins=${CC_USER_PLUGINS} skills=${CC_SKILLS_GIT} ha_url=${HA_URL}" > /pins/provision.out
 EOF
+# usage-upkeep is a recorder: the sweep it was given.
+cat > /usr/local/bin/usage-upkeep <<'EOF'
+#!/bin/bash
+echo "sweep_days=${USAGE_SWEEP_DAYS}" > /pins/upkeep.out
+EOF
+chmod +x /usr/local/bin/usage-upkeep
 printf '#!/bin/bash\ncat\n' > /usr/local/bin/agent-ask
 printf '#!/bin/bash\nexit 3\n' > /usr/local/bin/agent-usage
 chmod +x /usr/local/bin/node /usr/local/bin/provision-extras /usr/local/bin/agent-ask /usr/local/bin/agent-usage
@@ -57,6 +63,8 @@ engine_hooks() {
         for hook in engine_provision_plugins engine_mcp_has engine_mcp_add; do
             [ "${hook}" = "${omit}" ] || printf '%s() { :; }\n' "${hook}"
         done
+        [ "${omit}" = engine_transcript_retention ] \
+            || printf '%s\n' 'engine_transcript_retention() { echo "engine_transcript_retention $*" >> /pins/hooks.log; printf "%s" "${NEUTRAL_RETENTION_BY}"; }'
         [ "${omit}" = engine_prompt_settings ] \
             || printf '%s\n' 'engine_prompt_settings() { echo engine_prompt_settings >> /pins/hooks.log; printf "%s" "${NEUTRAL_SETTINGS_VALUE}"; }'
     } > /usr/local/lib/engine-hooks.sh
@@ -81,7 +89,7 @@ options() {
 }
 
 run_service() {
-    env -i PATH="${BASE_PATH}" HOME=/root NEUTRAL_SETTINGS_VALUE="${SETTINGS_VALUE-}" \
+    env -i PATH="${BASE_PATH}" HOME=/root NEUTRAL_SETTINGS_VALUE="${SETTINGS_VALUE-}" NEUTRAL_RETENTION_BY="${RETENTION_BY-core}" \
         timeout 30 bashio /usr/local/bin/addon-run > "${P}/run.out" 2>&1
     STATUS=$?
     sleep 0.3  # the background provisioning writes its file
@@ -106,7 +114,7 @@ mkdir -p /homeassistant
 run_service
 eq "exits 0 (the console's exec)" "${STATUS}" 0
 eq "hooks run once each, in order" "$(awk '{print $1}' "${P}/hooks.log" | paste -sd' ')" \
-    "engine_prepare_home engine_env engine_sync_from_image engine_auth engine_model engine_update engine_provision engine_console_env engine_prompt_settings"
+    "engine_prepare_home engine_env engine_sync_from_image engine_auth engine_model engine_update engine_provision engine_console_env engine_prompt_settings engine_transcript_retention"
 contains "engine_prepare_home runs after /data/home exists, before HOME moves" "${P}/hooks.log" "engine_prepare_home home=/root data_home=y workdir="
 contains "engine_env runs with HOME=/data/home" "${P}/hooks.log" "engine_env home=/data/home"
 contains "engine_provision runs after /data/workdir exists" "${P}/hooks.log" "engine_provision home=/data/home data_home=y workdir=y"
@@ -140,25 +148,52 @@ for line in "Initializing Neutral Agent add-on..." "Home Assistant Core at http:
     contains "logs: ${line}" "${P}/run.out" "${line}"
 done
 [ -d /data/uploads ] && ok "/data/uploads exists" || bad "/data/uploads exists"
+contains "the retention hook gets the default 30 days" "${P}/hooks.log" "engine_transcript_retention 30"
+contains "the engine leaves the sweep to the core: the upkeep deletes after 30 days" "${P}/upkeep.out" "sweep_days=30"
+contains "logs the retention" "${P}/run.out" "Transcripts kept 30 days (0 = forever), swept by the core side"
 
 echo "2. auto_update off, an empty prompt setting, existing /homeassistant instructions"
 SETTINGS_VALUE=''
+RETENTION_BY=native
 # The add-on declares custom_instructions with the default "", so it is always present.
-options '{"auto_update":false,"proactive_alerts":false,"custom_instructions":"","environment_vars":[],"init_commands":[],"monitoring_interval_hours":0,"daily_digest_time":""}'
+options '{"auto_update":false,"proactive_alerts":false,"custom_instructions":"","environment_vars":[],"init_commands":[],"monitoring_interval_hours":0,"daily_digest_time":"","transcript_retention_days":7}'
 mkdir -p /homeassistant && printf 'mine\n' > /homeassistant/AGENTS.md
 printf '{}' > /data/alerts-state.json
 run_service
 eq "exits 0" "${STATUS}" 0
 contains "engine_update_disabled is called" "${P}/hooks.log" "engine_update_disabled"
+contains "the retention hook gets the option" "${P}/hooks.log" "engine_transcript_retention 7"
 lacks "engine_update is not" "${P}/hooks.log" "engine_update "
 settings="$(env_of CLAUDE_PROMPT_SETTINGS)"
 eq "an empty prompt setting is passed on as set and empty" "$?:${settings}" "0:"
 eq "the user's /homeassistant file is kept" "$(cat /homeassistant/AGENTS.md)" mine
 eq "no custom block without custom_instructions" "$(cat /data/workdir/AGENTS.md)" "Neutral instructions."
+contains "an engine that sweeps itself: the upkeep deletes nothing" "${P}/upkeep.out" "sweep_days=0"
 [ -e /data/alerts-state.json ] && bad "alerts off drops the alerts state" || ok "alerts off drops the alerts state"
 
+RETENTION_BY=core
+
+echo "2b. the retention option and the hook's answer"
+engine_hooks
+options '{"transcript_retention_days":"soon"}'
+run_service
+eq "a retention that is not a whole number: starts" "${STATUS}" 0
+contains "and keeps 30 days" "${P}/hooks.log" "engine_transcript_retention 30"
+contains "and says so" "${P}/run.out" "transcript_retention_days is not a whole number (soon); keeping 30"
+options '{"transcript_retention_days":0}'
+run_service
+contains "0 is passed as 0" "${P}/hooks.log" "engine_transcript_retention 0"
+contains "and the core deletes nothing" "${P}/upkeep.out" "sweep_days=0"
+RETENTION_BY=maybe
+options '{}'
+run_service
+eq "a hook that answers neither native nor core: exits 1" "${STATUS}" 1
+contains "and says what it printed" "${P}/run.out" "engine_transcript_retention printed 'maybe', not 'native' or 'core'"
+[ -e "${P}/console.env" ] && bad "and no console" || ok "and no console"
+RETENTION_BY=core
+
 echo "3. an incomplete engine-hooks.sh is refused before anything starts"
-for omit in engine_provision engine_prompt_settings ENGINE_PROMPT_BIN ENGINE_INSTRUCTIONS_FILE productName consoleName emptyConsoleName numberConsoleName branding.json; do
+for omit in engine_provision engine_prompt_settings engine_transcript_retention ENGINE_PROMPT_BIN ENGINE_INSTRUCTIONS_FILE productName consoleName emptyConsoleName numberConsoleName branding.json; do
     engine_hooks "${omit}"
     options '{}'
     run_service

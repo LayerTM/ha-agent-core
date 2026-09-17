@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# The daily usage upkeep, started in the background by addon-run: counts what is
+# new, rotates the audit log above 16 MB and, when the engine leaves transcript
+# retention to the core, deletes transcripts not written to for
+# USAGE_SWEEP_DAYS days (0 = none). See `ha-usage --maintain`.
+#
+# The first run waits USAGE_UPKEEP_FIRST_S (default 10 minutes) so a start is not
+# slowed down; then once every USAGE_UPKEEP_INTERVAL_S (default a day).
+set -uo pipefail
+
+days="${USAGE_SWEEP_DAYS:-0}"
+# Overridable so the loop can be tested.
+ha_usage="${CC_USAGE_CMD:-/usr/local/bin/ha-usage}"
+first="${USAGE_UPKEEP_FIRST_S:-600}"
+interval="${USAGE_UPKEEP_INTERVAL_S:-86400}"
+case "${days}${first}${interval}" in
+    *[!0-9]*|'') echo "usage-upkeep: USAGE_SWEEP_DAYS, USAGE_UPKEEP_FIRST_S and USAGE_UPKEEP_INTERVAL_S must be whole numbers" >&2; exit 64 ;;
+esac
+
+sleep "${first}"
+while :; do
+    printf '%s ' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    "${ha_usage}" --maintain "${days}" || true
+    sleep "${interval}"
+done

@@ -277,6 +277,7 @@ The functions are called in this order; each may log and export variables.
 | `engine_provision` | after `environment_vars`, once `/data/workdir` and `/data/uploads` exist |
 | `engine_console_env` | with the console's environment |
 | `engine_prompt_settings` | prints `CLAUDE_PROMPT_SETTINGS`; an engine that restricts prompt runs on its command line prints nothing |
+| `engine_transcript_retention DAYS` | with the `transcript_retention_days` option (default 30; 0 = keep); prints `native` after setting the engine's own sweep of its transcripts to `DAYS`, or `core` to have the core delete them (see [Retention](#retention)); anything else stops the start |
 
 The engine also installs two commands, which the start script requires to be
 executable.
@@ -316,15 +317,18 @@ inode), with a fingerprint of the bytes it has counted (their first and last
   start; a change elsewhere in counted bytes is not seen;
 - a line longer than 32 MB stops the reading of that file with an error, and
   the file is not read past it;
-- a file that is gone keeps its days, so usage history outlives the transcripts.
+- a file that is gone keeps its days, so usage history outlives the transcripts;
+- a file that is still there but no longer listed keeps its days and is read
+  on from where it stopped if it is listed again.
 
 The prompt server's audit log is read the same way. If the current cache
 cannot be read, the core continues from the previous version; a new version
 never replaces the last readable one before it is written. Whenever the current
 version is lost, the report carries `"history_reset": true` and
-`"history_since"`, the first day it still has: what the lost version counted
-since cannot be known. If it fails or
-takes longer than its budget (20 of the 30 seconds the prompt server gives
+`"history_since"`, the first day it still has, from then on: what the lost
+version counted since cannot be known.
+
+If `agent-usage` fails or takes longer than its budget (20 of the 30 seconds the prompt server gives
 `ha-usage`), the report carries `"available": false` and a one-line `"error"`,
 and still reports the prompt API usage. Model names and the source are kept to
 one line. Prompt API runs are
@@ -332,7 +336,7 @@ counted by the core from its audit log, so an engine runs them without leaving
 a session file that `agent-usage` reads (each add-on's tests check this against
 its real engine); every run is counted once.
 
-`/usr/local/bin/agent-ask` It reads a prompt on stdin, runs the agent once with
+`/usr/local/bin/agent-ask` reads a prompt on stdin, runs the agent once with
 no tools and no permission bypass, and prints the answer; it exits non-zero when
 the agent gives none. The health check (`cc-monitor`, every
 `monitoring_interval_hours`) and the morning briefing (`cc-digest`, at
@@ -344,6 +348,37 @@ answer that fails, is empty or cannot be delivered is logged (`[cc-monitor]`,
 `[cc-digest]` on stderr) rather than passed over. Log records listed in
 `rootfs/usr/share/agent-core/monitor-known-noise.tsv` are left out of the health
 check.
+
+### Retention
+
+Each store the core keeps has a bound (table below). The start script starts
+`usage-upkeep`, which runs `ha-usage --maintain` ten minutes after the start
+and then once a day:
+
+1. It counts everything new, as a report does.
+2. It moves an audit log larger than 16 MB to `claude-audit.log.1`, which
+   replaces the previous one, and counts any line written in between.
+3. When `engine_transcript_retention` printed `core`, it deletes the files
+   `agent-usage --files` lists that were not written to for
+   `transcript_retention_days` days. It deletes only a file it has just counted
+   and is still the same file (device and inode), so never a link and never one
+   that took a listed path since — and nothing at all if any file, or the audit
+   log, could not be read.
+
+Their usage stays counted either way. Its output goes to
+`/data/usage-upkeep.log`.
+
+| store | bound |
+|---|---|
+| the engine's transcripts | `transcript_retention_days`: the engine's own sweep, or the core's |
+| `/data/claude-audit.log` | 16 MB, then one previous file |
+| `/data/usage-cache.json` | one entry per transcript that exists, plus totals per day and model |
+| `/data/uploads` | `upload_retention_days` (default 14) |
+| automatic backups before a destructive command | the newest 3 |
+| `/data/alerts-state.json` | the alerts that are active now |
+| `/data/*.log` of the background loops | overwritten at every start; in between, a few lines per run of a loop |
+
+An engine keeps its other stores bounded itself and says how in its add-on.
 
 ### Provisioning
 
