@@ -235,6 +235,18 @@ The functions are called in this order; each may log and export variables.
 | `engine_console_env` | with the console's environment |
 | `engine_prompt_settings` | prints `CLAUDE_PROMPT_SETTINGS`; an engine that restricts prompt runs on its command line prints nothing |
 
+The engine also installs `/usr/local/bin/agent-ask`, which the start script
+requires to be executable. It reads a prompt on stdin, runs the agent once with
+no tools and no permission bypass, and prints the answer; it exits non-zero when
+the agent gives none. The health check (`cc-monitor`, every
+`monitoring_interval_hours`) and the morning briefing (`cc-digest`, at
+`daily_digest_time`) ask it about Home Assistant data they gather themselves,
+with the Home Assistant and Supervisor tokens removed from its environment, and
+notify the answer under `<agentName> · HA health check` and
+`<agentName> · Morning briefing`. Log records listed in
+`rootfs/usr/share/agent-core/monitor-known-noise.tsv` are left out of the health
+check.
+
 The script runs with `errexit`, `nounset` and `pipefail`, inherited by
 command substitutions, and calls every hook as a plain command: a failing step
 anywhere in a hook ends the start, the log names the hook, and the placeholder
@@ -423,7 +435,7 @@ tools/npm-ci-checked.sh
 npm test
 npm run lint
 npm run typecheck
-(cd app && ../tools/npm-ci-checked.sh && npm test && npm run test:alerts && npm run test:config && npm run test:image && npm run lint && npm run typecheck)
+(cd app && ../tools/npm-ci-checked.sh && npm test && npm run test:alerts && npm run test:config && npm run test:monitor && npm run test:digest && npm run test:image && npm run lint && npm run typecheck)
 python .github/scripts/secret_scan.py .
 python .github/scripts/hygiene_scan.py .
 ```

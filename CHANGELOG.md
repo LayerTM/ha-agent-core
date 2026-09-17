@@ -14,6 +14,9 @@ uses [Semantic Versioning](https://semver.org/).
   defined before it starts anything.
   An empty `engine_prompt_settings` is valid. The console runs from
   `/opt/agent-console`.
+- `cc-monitor` and `cc-digest`, the health check and the morning briefing,
+  which ask the engine's `/usr/local/bin/agent-ask` with the prompt on stdin.
+  The start script requires `agent-ask` to be executable.
 
 ### Changed
 

@@ -95,6 +95,34 @@ run CC_ALERTS_DATA_DIR="${work}" CC_ALERTS_NOTIFY_CMD="${REC}/ha-notify" CC_ALER
     CC_ALERTS_NOW=23:30 cc-alerts --once > /dev/null 2>&1
 eq "the alert is titled with the agent's name" "$(tail -n1 "${P}/notify.args" | awk -F'|' '{print $NF}')" "Neutral · Home alert"
 
+echo "4b. the monitor and the digest"
+cat > "${REC}/agent-ask" <<'EOF'
+#!/bin/bash
+cat > /dev/null
+echo "A finding."
+EOF
+chmod +x "${REC}/agent-ask"
+printf '#!/bin/bash\necho "Configuration valid"\n' > "${REC}/ha-check"
+printf '#!/bin/bash\nprintf "2026-09-17 06:00:00.000 ERROR boom\\n200"\n' > "${REC}/logcurl"
+printf '#!/bin/bash\necho "[]"\n' > "${REC}/statescurl"
+chmod +x "${REC}/ha-check" "${REC}/logcurl" "${REC}/statescurl"
+monitor_title() {
+    fresh
+    run CC_MONITOR_DATA_DIR="$(mktemp -d)" CC_MONITOR_NOTIFY_CMD="${REC}/ha-notify" CC_MONITOR_CURL="${REC}/logcurl" \
+        CC_MONITOR_CHECK_CMD="${REC}/ha-check" CC_MONITOR_AGENT_CMD="${REC}/agent-ask" cc-monitor --once > /dev/null 2>&1
+    cut -d'|' -f2 "${P}/notify.args"
+}
+digest_title() {
+    fresh
+    run CC_DIGEST_NOTIFY_CMD="${REC}/ha-notify" CC_DIGEST_CURL="${REC}/statescurl" \
+        CC_DIGEST_AGENT_CMD="${REC}/agent-ask" cc-digest --once > /dev/null 2>&1
+    cut -d'|' -f2 "${P}/notify.args"
+}
+eq "a monitor finding is titled with the agent's name" "$(monitor_title)" "Neutral · HA health check"
+eq "the briefing too" "$(digest_title)" "Neutral · Morning briefing"
+eq "the monitor finds agent-ask on PATH by default" "$(fresh; run CC_MONITOR_DATA_DIR="$(mktemp -d)" CC_MONITOR_NOTIFY_CMD="${REC}/ha-notify" \
+    CC_MONITOR_CURL="${REC}/logcurl" CC_MONITOR_CHECK_CMD="${REC}/ha-check" cc-monitor --once > /dev/null 2>&1; cut -d'|' -f1 "${P}/notify.args")" "A finding."
+
 echo "5. the Claude Code add-on's names give the titles it has always sent"
 branding '{"productName":"Claude Code","consoleName":"Claude Console","agentName":"Claude"}'
 rm -f "${REC}/ha-notify"
@@ -114,6 +142,8 @@ printf '{"proactive_alerts": true}\n' > "${work}/options.json"
 run CC_ALERTS_DATA_DIR="${work}" CC_ALERTS_NOTIFY_CMD="${REC}/ha-notify" CC_ALERTS_STATES_FILE=/src/app/test/fixtures/alerts-anomalies.json \
     CC_ALERTS_NOW=23:30 cc-alerts --once > /dev/null 2>&1
 eq "cc-alerts" "$(tail -n1 "${P}/notify.args" | awk -F'|' '{print $NF}')" "Claude · Home alert"
+eq "cc-monitor" "$(monitor_title)" "Claude · HA health check"
+eq "cc-digest" "$(digest_title)" "Claude · Morning briefing"
 
 if [ "${fails}" -ne 0 ]; then
     echo "${fails} failed"

@@ -25,6 +25,10 @@ ENGINE_VARIABLES=(
     ENGINE_INSTRUCTIONS_SOURCE  # the bundled instructions file
     ENGINE_INSTRUCTIONS_FILE    # its name in /data/workdir and /homeassistant
 )
+# Executables the engine installs, which the core's scripts run.
+ENGINE_COMMANDS=(
+    /usr/local/bin/agent-ask  # the prompt on stdin, the answer on stdout; no tools
+)
 ENGINE_HOOKS=(
     engine_prepare_home     # after /data/home exists: seed the engine's files
     engine_env              # the engine's own environment
@@ -61,6 +65,9 @@ for name in "${ENGINE_VARIABLES[@]}"; do
 done
 for name in "${ENGINE_HOOKS[@]}"; do
     [ "$(type -t "${name}")" = function ] || missing+=("function ${name}")
+done
+for name in "${ENGINE_COMMANDS[@]}"; do
+    [ -x "${name}" ] || missing+=("command ${name}")
 done
 if [ "${#missing[@]}" -gt 0 ]; then
     bashio::log.error "The engine does not define: ${missing[*]}"
