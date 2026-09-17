@@ -17,6 +17,10 @@ uses [Semantic Versioning](https://semver.org/).
 - `cc-monitor` and `cc-digest`, the health check and the morning briefing,
   which ask the engine's `/usr/local/bin/agent-ask` with the prompt on stdin.
   The start script requires `agent-ask` to be executable.
+- `ha-usage` and `/api/usage` take the agent's console usage from the engine's
+  `/usr/local/bin/agent-usage`, which the start script requires, and prompt API
+  runs from the audit log as before. The report adds `available`, false when
+  the engine does not report usage.
 
 ### Changed
 
