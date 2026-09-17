@@ -104,10 +104,10 @@ test('GET /status reports how many browsers share the session', async () => {
   // warning before a restart must never be skipped because a default said zero.
   const app = express();
   app.use('/api', createRouter({ uploadDir: TMP, viewerCount: () => 3 }));
-  const wired = await new Promise((resolve) => { const s = app.listen(0, () => resolve(s)); });
+  const wired = await new Promise((resolve) => { const s = app.listen(0, '127.0.0.1', () => resolve(s)); });
   const bare = express();
   bare.use('/api', createRouter({ uploadDir: TMP }));
-  const unwired = await new Promise((resolve) => { const s = bare.listen(0, () => resolve(s)); });
+  const unwired = await new Promise((resolve) => { const s = bare.listen(0, '127.0.0.1', () => resolve(s)); });
   try {
     const withCount = await (await fetch(`http://127.0.0.1:${wired.address().port}/api/status`)).json();
     assert.equal(withCount.viewers, 3);

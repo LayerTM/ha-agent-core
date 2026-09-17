@@ -14,6 +14,8 @@ const sources = require('./sources');
 const { adapter, branding } = require('./adapter-contract');
 
 const PORT = Number(process.env.CLAUDE_CONSOLE_PORT || 8099);
+// Every interface unless one address is named, as for the startup placeholder.
+const HOST = process.env.CLAUDE_CONSOLE_HOST || undefined;
 const UPLOAD_DIR = process.env.UPLOAD_DIR || '/data/uploads';
 const RETENTION_DAYS = Number(process.env.UPLOAD_RETENTION_DAYS || 14);
 const DEV = process.env.CLAUDE_CONSOLE_DEV === '1';
@@ -157,7 +159,7 @@ async function main() {
   cleanupUploads();
   setInterval(cleanupUploads, 6 * 3600 * 1000).unref();
 
-  server.listen(PORT, () => {
+  server.listen(PORT, HOST, () => {
     const { port } = /** @type {import('node:net').AddressInfo} */ (server.address());
     console.log(`${branding().consoleName} listening on :${port}`);
   });

@@ -19,6 +19,8 @@ const { resolveCoreTarget } = require('./core-target');
 const { startCoreRelay } = require('./core-relay');
 
 const PORT = Number(process.env.CLAUDE_PROMPT_PORT || 8126);
+// Every IPv4 interface unless one address is named (the tests name the one they use).
+const HOST = process.env.CLAUDE_PROMPT_HOST || '0.0.0.0';
 const DEV = process.env.CLAUDE_PROMPT_DEV === '1';
 const DATA_DIR = process.env.CLAUDE_PROMPT_DATA || '/data';
 const OPTIONS_FILE = process.env.CLAUDE_PROMPT_OPTIONS || '/data/options.json';
@@ -264,7 +266,7 @@ async function start() {
   const server = http.createServer(app);
   await /** @type {Promise<void>} */ (new Promise((resolve, reject) => {
     server.once('error', reject);
-    server.listen(PORT, '0.0.0.0', () => {
+    server.listen(PORT, HOST, () => {
       server.removeListener('error', reject);
       resolve();
     });
