@@ -178,6 +178,12 @@ test('a write whose intents are not acceptable is refused before anything runs',
   assert.ok(auditLines.some((line) => line.includes('reason=503-no-mcp')));
 });
 
+test('a server built without saying whether Home Assistant is configured refuses to start, loudly', () => {
+  // Silently falsy would mean every write refused and nothing said; the start's
+  // own gates refuse AND name the reason, and so does this.
+  assert.throws(() => makeApp({ haConfigured: undefined }), /haConfigured must be true or false/);
+});
+
 test('whether Home Assistant is configured is a fact of its own, not the presence of a config file', async () => {
   // The config file is written per run, so between runs there is none while Home
   // Assistant is configured all the same. Nothing may read the path to answer this.

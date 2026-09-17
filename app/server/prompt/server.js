@@ -541,6 +541,14 @@ function createPromptApp({
   // HTTP layer replaces it to script outcomes.
   runAgent = run,
 }) {
+  // Whether Home Assistant is configured is a fact the caller states; there is no
+  // default, because deriving it from the config path is exactly the coupling that
+  // was removed. A caller who omits it would get `undefined` — falsy, so writes
+  // would be refused with no Home Assistant and no word about why. Fail loudly
+  // instead, as the start's own gates do.
+  if (typeof haConfigured !== 'boolean') {
+    throw new TypeError('createPromptApp: haConfigured must be true or false — whether there is a relay to Home Assistant');
+  }
   const app = express();
   app.disable('x-powered-by');
 
