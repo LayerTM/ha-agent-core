@@ -366,8 +366,81 @@ test('status reports readiness from the version check and the adapter auth answe
   assert.equal(res.status, 200);
   const body = await res.json();
   assert.equal(body.version, 'contract');
-  assert.equal(body.claude_version, '', 'no agent binary → no version');
+  assert.equal(body.engine, 'neutral');
+  assert.equal(body.engine_version, '', 'no agent binary → no version');
+  assert.equal('claude_version' in body, false, 'no alias declared → no alias key');
   assert.equal(body.ready, false);
   assert.equal(body.prompt_timeout_ms, TIMEOUT_MS);
   assert.equal(state.runs.length, 0);
+});
+
+function fakeAgent(name, output) {
+  const bin = path.join(TMP, name);
+  fs.writeFileSync(bin, `#!/bin/sh\nprintf '%s\\n' '${output}'\n`, { mode: 0o755 });
+  return bin;
+}
+
+async function statusOf(app) {
+  const s = await listen(app);
+  try {
+    const res = await fetch(`http://127.0.0.1:${s.address().port}/api/status`, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+    assert.equal(res.status, 200);
+    return await res.json();
+  } finally {
+    await new Promise((resolve) => s.close(resolve));
+  }
+}
+
+test('status reports the engine version the adapter parses from the agent binary', async () => {
+  const body = await statusOf(makeApp({ claudeBin: fakeAgent('neutral-ok', 'neutral-agent 4.5.6 (build 7)') }));
+  assert.equal(body.engine, 'neutral');
+  assert.equal(body.engine_version, '4.5.6');
+  assert.equal(body.version, 'contract', 'version stays the add-on version');
+  assert.equal(body.ready, true);
+});
+
+test('output the adapter cannot parse, or an unsafe token, is no version', async () => {
+  for (const [name, output] of [['neutral-other', 'other-agent 1.0.0'], ['neutral-odd', 'neutral-agent 1.0<script>']]) {
+    const body = await statusOf(makeApp({ claudeBin: fakeAgent(name, output) }));
+    assert.equal(body.engine_version, '', output);
+    assert.equal(body.ready, false, output);
+  }
+});
+
+test('a declared version alias carries the same value under its own key', async () => {
+  const { descriptor } = adapter;
+  descriptor.versionAlias = 'neutral_version';
+  try {
+    const body = await statusOf(makeApp({ claudeBin: fakeAgent('neutral-alias', 'neutral-agent 2.0.1') }));
+    assert.equal(body.neutral_version, '2.0.1');
+    assert.equal(body.engine_version, '2.0.1');
+    const missing = await statusOf(makeApp());
+    assert.equal(missing.neutral_version, '');
+  } finally {
+    delete descriptor.versionAlias;
+  }
+});
+
+test('request_fields lists exactly the body fields POST /api/prompt accepts', async () => {
+  const { request_fields: fields } = await statusOf(makeApp());
+  assert.ok(Array.isArray(fields) && fields.length > 0);
+  assert.equal(new Set(fields).size, fields.length, 'no duplicates');
+  // Every listed field gets past the allowlist: whatever else is wrong with the
+  // value, the refusal is never "unknown field".
+  for (const field of fields) {
+    const res = await post({ prompt: 'hello', [field]: { probe: true } });
+    const text = await res.text();
+    assert.doesNotMatch(text, /unknown field/, field);
+  }
+  // Fields that are not listed are refused as unknown, before anything runs.
+  const runs = state.runs.length;
+  for (const field of ['model', 'engine', 'tools', 'request_fields', 'Prompt']) {
+    assert.equal(fields.includes(field), false);
+    const res = await post({ prompt: 'hello', [field]: true });
+    assert.equal(res.status, 400, field);
+    assert.match((await res.json()).error, /unknown field/, field);
+  }
+  assert.equal(state.runs.length, runs);
 });

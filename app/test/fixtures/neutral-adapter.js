@@ -50,7 +50,15 @@ function createNeutralAdapter({ timeoutMs = 5000 } = {}) {
     removedSessions: [],
   };
   const adapter = {
-    apiVersion: 1,
+    apiVersion: 2,
+    descriptor: {
+      engine: 'neutral',
+      // `neutral-agent 1.2.3 (build)` → `1.2.3`
+      parseVersion(stdout) {
+        const match = /^neutral-agent (\S+)/.exec(stdout);
+        return match ? match[1] : null;
+      },
+    },
     runner: {
       TIMEOUT_MS: timeoutMs,
       async run(opts) {
