@@ -32,6 +32,9 @@
     "node-pty": "1.1.0",
     "ws": "8.21.3"
   },
+  "allowScripts": {
+    "node-pty": true
+  },
   "devDependencies": {
     "@eslint/js": "10.0.1",
     "@types/busboy": "1.5.4",
