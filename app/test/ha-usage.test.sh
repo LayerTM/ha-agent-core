@@ -341,6 +341,13 @@ out="$(freport)"
 check "back on the previous generation with a counted file gone: its days are kept and the possible loss is said" \
     "$(printf '%s' "${out}" | jq -c '[.tokens.all_time.input, .history_reset, .history_since]')" "[10,true,\"${today}\"]"
 
+rm -f "${fd_}"/usage-cache.json*
+rm -f "${F}"; freport > /dev/null
+rec 50 > "${F}"
+check "a file born after the previous generation is counted" "$(input "$(freport)")" 50
+rm "${F}"; printf '{broken' > "${fd_}/usage-cache.json"
+check "lost with the current generation, it cannot be counted, and the report says history may be lost" \
+    "$(freport | jq -c '[.tokens.all_time.input, .history_reset]')" '[0,true]'
 cat > "${work}/crash.py" <<'PY'
 import json, os, runpy, sys
 ha, data, case = sys.argv[1:4]
@@ -378,10 +385,10 @@ print(json.dumps([after["_from"], after["retired"]["console"]["days"] != {}, aft
 PY
 rm -f "${fd_}"/usage-cache.json*
 check "a crash while saving a recovered cache keeps the previous generation" \
-    "$(CC_AUDIT_DATA_DIR="${fd_}" python3 "${work}/crash.py" "${bin}" "${fd_}" recovered)" '["previous",true,false]'
+    "$(CC_AUDIT_DATA_DIR="${fd_}" python3 "${work}/crash.py" "${bin}" "${fd_}" recovered)" '["previous",true,true]'
 rm -f "${fd_}"/usage-cache.json*
 check "a crash between the two renames leaves the previous generation to load" \
-    "$(CC_AUDIT_DATA_DIR="${fd_}" python3 "${work}/crash.py" "${bin}" "${fd_}" current)" '["previous",true,false]'
+    "$(CC_AUDIT_DATA_DIR="${fd_}" python3 "${work}/crash.py" "${bin}" "${fd_}" current)" '["previous",true,true]'
 
 rm -f "${fd_}"/usage-cache.json*
 rec 3 > "${F}"

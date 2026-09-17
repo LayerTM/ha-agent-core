@@ -320,10 +320,10 @@ inode), with a fingerprint of the bytes it has counted (their first and last
 
 The prompt server's audit log is read the same way. If the current cache
 cannot be read, the core continues from the previous version; a new version
-never replaces the last readable one before it is written. If a file counted
-since the previous version is gone, or neither version can be read, the report
-carries `"history_reset": true` and `"history_since"`, the first day it still
-has. If it fails or
+never replaces the last readable one before it is written. Whenever the current
+version is lost, the report carries `"history_reset": true` and
+`"history_since"`, the first day it still has: what the lost version counted
+since cannot be known. If it fails or
 takes longer than its budget (20 of the 30 seconds the prompt server gives
 `ha-usage`), the report carries `"available": false` and a one-line `"error"`,
 and still reports the prompt API usage. Model names and the source are kept to

@@ -21,9 +21,9 @@ A call reads only what was appended since, and only whole lines. A file that
 shrank, or whose fingerprint changed, is counted again from the start; a change
 elsewhere in counted bytes breaks the append-only rule and is not seen. A file
 that is gone keeps its days, so the history outlives the files. A cache that
-cannot be read falls back to the previous generation; the report then says
-``"history_reset": true`` with ``"history_since"`` (the first day it still has)
-if a file counted since is gone, and so it does when no generation can be read.
+cannot be read falls back to the previous generation, and the report then says
+``"history_reset": true`` with ``"history_since"`` (the first day it still has),
+as it does when no generation can be read.
 A line longer than 32 MB stops the reading of its file with an error.
 
 ``agent-usage --parse`` reads one JSON array per line:
@@ -242,6 +242,11 @@ def _load() -> dict:
             continue
         if _valid(cache):
             cache["_from"] = origin
+            if origin == "previous":
+                # What the lost generation counted since cannot be told apart
+                # from what was never there: a file born and gone in between
+                # leaves no trace. So a fallback always says history may be lost.
+                cache["history_reset"] = True
             return cache
     cache = _fresh()
     cache["history_reset"] = existed
@@ -358,9 +363,6 @@ def _retire(cache: dict, kind: str, listed: set[str]) -> None:
             except OSError:
                 pass
         retired = cache["retired"][kind]
-        if cache.get("_from") == "previous":
-            # The lost current generation may have counted more of this file.
-            cache["history_reset"] = True
         _merge(retired["days"], src["days"])
         retired["cost_seen"] = retired["cost_seen"] or src["cost_seen"]
 
