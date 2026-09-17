@@ -200,7 +200,13 @@ async function start() {
     log(`core relay on 127.0.0.1:${relay.port}`);
   }
 
-  const mcpConfigPath = relay
+  // Two facts, deliberately two names. `haConfigured` is a boot fact: is there a
+  // way to Home Assistant at all (a relay, hence an MCP server to point at)?
+  // `mcpConfigPath` is the file one run reads. They coincide today, because the
+  // config is written once at the start, and they will not once it is written
+  // per run — so nothing may read the path to learn whether HA is configured.
+  const haConfigured = Boolean(relay);
+  const mcpConfigPath = haConfigured
     ? await writeMcpConfig(HA_MCP_URL_OVERRIDE || `${relay.url}/api/mcp`, relay.token)
     : await writeMcpConfig('', '');
   const workDir = await ensureWorkDir();
@@ -229,6 +235,7 @@ async function start() {
     claudeBin: process.env.CLAUDE_PROMPT_BIN || adapter().runner.bin,
     claudeSettings,
     usageBin: USAGE_BIN,
+    haConfigured,
     mcpConfigPath,
     // A dedicated chat model (e.g. a faster/cheaper one) is preferred; fall back
     // to the console's model override, then the Claude default.
@@ -275,7 +282,7 @@ async function start() {
   // Keep a persistent error handler so a post-bind socket error is logged, not
   // thrown as an uncaught exception that would take the shared console down.
   server.on('error', (err) => log(`server error: ${err.message}`));
-  log(`prompt server listening on ${boundAddress(server)} (ha_mcp: ${mcpConfigPath ? 'configured' : 'absent'})`);
+  log(`prompt server listening on ${boundAddress(server)} (ha_mcp: ${haConfigured ? 'configured' : 'absent'})`);
 
   announceDiscovery(token).catch((err) => log(`discovery error: ${err.message}`));
 
