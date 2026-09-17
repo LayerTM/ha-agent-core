@@ -243,7 +243,9 @@ the agent gives none. The health check (`cc-monitor`, every
 `daily_digest_time`) ask it about Home Assistant data they gather themselves,
 with the Home Assistant and Supervisor tokens removed from its environment, and
 notify the answer under `<agentName> · HA health check` and
-`<agentName> · Morning briefing`. Log records listed in
+`<agentName> · Morning briefing`. Each call is limited to 300 seconds; an
+answer that fails, is empty or cannot be delivered is logged (`[cc-monitor]`,
+`[cc-digest]` on stderr) rather than passed over. Log records listed in
 `rootfs/usr/share/agent-core/monitor-known-noise.tsv` are left out of the health
 check.
 

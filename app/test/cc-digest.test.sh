@@ -5,7 +5,8 @@
 #   1. the home snapshot reaches agent-ask on STDIN, with no arguments and no
 #      Home Assistant credentials in its environment;
 #   2. the answer is notified, titled with the agent's name;
-#   3. an empty answer notifies nothing;
+#   3. an empty answer, a failed agent-ask or an undelivered briefing notifies
+#      nothing and is logged; the call is time-limited;
 #   4. without --once, a missing or malformed time disables the loop at once.
 #
 # Requires: bash and jq.
@@ -39,27 +40,43 @@ printf '%s' "\$#" > "${work}/agent.argc"
 leaked=''; for v in SUPERVISOR_TOKEN SUPERVISOR_API_TOKEN HA_TOKEN HASS_TOKEN; do [ -n "\${!v:-}" ] && leaked="\${leaked}\${v} "; done
 printf '%s' "\${leaked}" > "${work}/agent.env"
 [ -n "\${AGENT_ANSWER:-}" ] && printf '%s\n' "\${AGENT_ANSWER}"
-exit 0
+echo "agent stderr: \${AGENT_ERR:-}" >&2
+exit "\${AGENT_RC:-0}"
+STUB
+
+cat > "${work}/notify-broken" <<'STUB'
+#!/usr/bin/env bash
+exit 1
+STUB
+
+cat > "${work}/timeout" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$1" >> "${work}/timeout.used"
+shift
+exec "\$@"
 STUB
 
 cat > "${work}/notify" <<STUB
 #!/usr/bin/env bash
 printf '%s|%s\n' "\$1" "\$2" >> "${work}/notified"
 STUB
-chmod +x "${work}/curl" "${work}/agent" "${work}/notify"
+chmod +x "${work}/curl" "${work}/agent" "${work}/notify" "${work}/notify-broken" "${work}/timeout"
 
 fails=0
 ok()   { printf 'PASS  %s\n' "$1"; }
 bad()  { printf 'FAIL  %s\n' "$1"; fails=$((fails + 1)); }
 check(){ if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (want '$3', got '$2')"; fi; }
 
+# $1 = answer, $2 = agent-ask exit status; NOTIFIER picks the notifier.
 run() {
-    rm -f "${work}"/agent.* "${work}/notified"
-    CC_DIGEST_CURL="${work}/curl" CC_DIGEST_AGENT_CMD="${work}/agent" CC_DIGEST_NOTIFY_CMD="${work}/notify" \
+    rm -f "${work}"/agent.* "${work}/notified" "${work}/timeout.used" "${work}/stderr"
+    CC_DIGEST_CURL="${work}/curl" CC_DIGEST_AGENT_CMD="${work}/agent" \
+    CC_DIGEST_NOTIFY_CMD="${work}/${NOTIFIER:-notify}" CC_DIGEST_TIMEOUT_CMD="${work}/timeout" \
     SUPERVISOR_TOKEN="tok-supervisor" SUPERVISOR_API_TOKEN="tok-api" HA_TOKEN="tok-ha" HASS_TOKEN="tok-hass" \
-    AGENT_ANSWER="$1" \
-        bash "${script}" --once >/dev/null 2>&1
+    AGENT_ANSWER="$1" AGENT_RC="${2:-0}" AGENT_ERR="not logged in" \
+        bash "${script}" --once >/dev/null 2>"${work}/stderr"
 }
+logged() { [[ "$(cat "${work}/stderr" 2>/dev/null)" == *"$1"* ]]; }
 
 echo "cc-digest --once tests"
 
@@ -80,10 +97,33 @@ if [[ "${seen}" != *"tok-"* ]]; then ok "and none is pasted into the prompt"; el
 check "the briefing is notified with the agent's name in the title" \
       "$(cat "${work}/notified" 2>/dev/null)" "Good morning: sunny, the porch light is on.|Agent · Morning briefing"
 
-# --- 3. an empty answer notifies nothing -------------------------------------------
+check "agent-ask is limited to 300 s" "$(cat "${work}/timeout.used" 2>/dev/null)" "300"
+if [ -s "${work}/stderr" ]; then bad "a delivered briefing logged: $(cat "${work}/stderr")"; else ok "a delivered briefing logs nothing"; fi
+
+# --- 3. no answer, a failure or no delivery: nothing notified, and logged ----------
 run ""
 if [ -e "${work}/agent.stdin" ]; then ok "agent-ask was asked"; else bad "agent-ask was never run"; fi
 if [ -e "${work}/notified" ]; then bad "an empty answer was notified"; else ok "an empty answer notifies nothing"; fi
+if logged "[cc-digest] the briefing produced nothing (exit 0): agent stderr: not logged in"; then
+    ok "and is logged with agent-ask's stderr"
+else
+    bad "an empty answer is not logged: $(cat "${work}/stderr")"
+fi
+
+run "Partial answer" 1
+if [ -e "${work}/notified" ]; then bad "a failed agent-ask was notified"; else ok "a failed agent-ask notifies nothing, even with output"; fi
+if logged "[cc-digest] the briefing produced nothing (exit 1): agent stderr: not logged in"; then
+    ok "and is logged with its exit status"
+else
+    bad "a failed agent-ask is not logged: $(cat "${work}/stderr")"
+fi
+
+NOTIFIER=notify-broken run "Good morning."
+if logged "[cc-digest] could not deliver the briefing"; then
+    ok "an undelivered briefing is logged"
+else
+    bad "an undelivered briefing is not logged: $(cat "${work}/stderr")"
+fi
 
 # --- 4. a missing or malformed time disables the loop at once ----------------------
 # Bounded without `timeout`, which not every development machine has.

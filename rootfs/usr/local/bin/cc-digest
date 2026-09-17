@@ -14,6 +14,7 @@
 #   CC_DIGEST_CURL=cmd            override curl
 #   CC_DIGEST_NOTIFY_CMD=cmd      override the notifier (default ha-notify)
 #   CC_DIGEST_AGENT_CMD=cmd       override the briefing command (default agent-ask)
+#   CC_DIGEST_TIMEOUT_CMD=cmd     override the time limiter (default timeout)
 set -o pipefail
 export HOME=/data/home
 export PATH="/usr/local/bin:/usr/bin:/bin:${PATH}"
@@ -25,6 +26,9 @@ ONCE=0
 CURL_CMD="${CC_DIGEST_CURL:-curl}"
 NOTIFY_CMD="${CC_DIGEST_NOTIFY_CMD:-ha-notify}"
 AGENT_CMD="${CC_DIGEST_AGENT_CMD:-agent-ask}"
+# Found once, like cc-monitor's: every agent call is bounded.
+TIMEOUT_CMD="${CC_DIGEST_TIMEOUT_CMD-$(command -v timeout || true)}"
+log() { printf '[cc-digest] %s\n' "$1" >&2; }
 
 target="${CLAUDE_DIGEST_TIME:-}"
 # HH:MM (00:00–23:59) only; anything else disables the loop.
@@ -78,13 +82,20 @@ ${data}
 
     # The prompt goes in on STDIN (agent-ask's contract). No tools, no permission
     # bypass, no HA creds in the child env.
-    out="$(printf '%s' "${prompt}" | env -u SUPERVISOR_TOKEN -u SUPERVISOR_API_TOKEN -u HA_TOKEN -u HASS_TOKEN \
-        "${AGENT_CMD}" 2>/dev/null | tail -c 1500)"
-
+    local err out rc trimmed
+    err="$(mktemp)"
+    out="$(printf '%s' "${prompt}" | ${TIMEOUT_CMD:+${TIMEOUT_CMD} 300} \
+        env -u SUPERVISOR_TOKEN -u SUPERVISOR_API_TOKEN -u HA_TOKEN -u HASS_TOKEN \
+        "${AGENT_CMD}" 2>"${err}" | tail -c 1500)"
+    # The status of the agent call, not of `tail`: `set -o pipefail` above.
+    rc=$?
     trimmed="$(printf '%s' "${out}" | tr -d '[:space:]')"
-    if [ -n "${trimmed}" ]; then
-        "${NOTIFY_CMD}" "${out}" "$(branding_name_or_fallback agentName) · Morning briefing" >/dev/null 2>&1 || true
+    if [ "${rc}" -ne 0 ] || [ -z "${trimmed}" ]; then
+        log "the briefing produced nothing (exit ${rc}): $(tail -c 300 "${err}" 2>/dev/null | tr '\n' ' ')"
+    elif ! "${NOTIFY_CMD}" "${out}" "$(branding_name_or_fallback agentName) · Morning briefing" >/dev/null 2>&1; then
+        log "could not deliver the briefing"
     fi
+    rm -f "${err}"
 }
 
 if [ "${ONCE}" -eq 1 ]; then
