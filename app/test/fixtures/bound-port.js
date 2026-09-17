@@ -31,14 +31,41 @@ async function captureLog(start) {
 }
 
 /**
- * The port a `... listening on :<port>` line reports, or null when no line does.
+ * The address and port a `... listening on <address>:<port>` line reports
+ * (server/listen.js), or null when no line does.
  * @param {string} text
- * @param {string} prefix the text before ` listening on :`
+ * @param {string} prefix the text before ` listening on `
+ * @returns {{ host: string, port: number } | null}
+ */
+function reportedListen(text, prefix) {
+  const match = text.match(new RegExp(`${prefix} listening on (\\[[^\\]]*\\]|[^\\s:]+):(\\d+)\\b`));
+  return match ? { host: match[1].replace(/^\[(.*)\]$/, '$1'), port: Number(match[2]) } : null;
+}
+
+/**
+ * The port such a line reports, or null.
+ * @param {string} text
+ * @param {string} prefix
  * @returns {number | null}
  */
 function reportedPort(text, prefix) {
-  const match = text.match(new RegExp(`${prefix} listening on :(\\d+)\\b`));
-  return match ? Number(match[1]) : null;
+  const listen = reportedListen(text, prefix);
+  return listen ? listen.port : null;
+}
+
+/**
+ * Asserts that the line says the server listens on TEST_HOST — on every
+ * system, whatever it allows beside a wildcard listener — and returns the port.
+ * @param {import('node:assert')} assert
+ * @param {string} text
+ * @param {string} prefix
+ * @returns {number}
+ */
+function assertListensOnTestHost(assert, text, prefix) {
+  const listen = reportedListen(text, prefix);
+  assert.ok(listen, `no "${prefix} listening on" line in: ${text}`);
+  assert.equal(listen.host, TEST_HOST, `the server listens on ${listen.host}, the test talks to ${TEST_HOST}`);
+  return listen.port;
 }
 
 /**
@@ -67,4 +94,4 @@ async function assertPortHeld(assert, port) {
   assert.equal(close, null, `another server could listen on ${TEST_HOST}:${port} beside the server under test`);
 }
 
-module.exports = { TEST_HOST, captureLog, reportedPort, foreignServerOn, assertPortHeld };
+module.exports = { TEST_HOST, captureLog, reportedListen, reportedPort, assertListensOnTestHost, foreignServerOn, assertPortHeld };

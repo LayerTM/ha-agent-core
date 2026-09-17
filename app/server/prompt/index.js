@@ -17,6 +17,7 @@ const { buildRedactor } = require('./security');
 const { adapter } = require('../adapter-contract');
 const { resolveCoreTarget } = require('./core-target');
 const { startCoreRelay } = require('./core-relay');
+const { boundAddress } = require('../listen');
 
 const PORT = Number(process.env.CLAUDE_PROMPT_PORT || 8126);
 // Every IPv4 interface unless one address is named (the tests name the one they use).
@@ -274,8 +275,7 @@ async function start() {
   // Keep a persistent error handler so a post-bind socket error is logged, not
   // thrown as an uncaught exception that would take the shared console down.
   server.on('error', (err) => log(`server error: ${err.message}`));
-  const { port } = /** @type {import('node:net').AddressInfo} */ (server.address());
-  log(`prompt server listening on :${port} (ha_mcp: ${mcpConfigPath ? 'configured' : 'absent'})`);
+  log(`prompt server listening on ${boundAddress(server)} (ha_mcp: ${mcpConfigPath ? 'configured' : 'absent'})`);
 
   announceDiscovery(token).catch((err) => log(`discovery error: ${err.message}`));
 

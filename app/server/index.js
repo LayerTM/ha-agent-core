@@ -12,6 +12,7 @@ const promptServer = require('./prompt');
 const { pageValues } = require('./pages');
 const { loadConsoleAssets, mountConsoleAssets } = require('./console-assets');
 const sources = require('./sources');
+const { boundAddress } = require('./listen');
 const { adapter, branding, theme } = require('./adapter-contract');
 
 const PORT = Number(process.env.CLAUDE_CONSOLE_PORT || 8099);
@@ -138,8 +139,7 @@ async function main() {
   setInterval(cleanupUploads, 6 * 3600 * 1000).unref();
 
   server.listen(PORT, HOST, () => {
-    const { port } = /** @type {import('node:net').AddressInfo} */ (server.address());
-    console.log(`${branding().consoleName} listening on :${port}`);
+    console.log(`${branding().consoleName} listening on ${boundAddress(server)}`);
   });
 
   // Companion prompt API for the claude_ha integration (separate listener,

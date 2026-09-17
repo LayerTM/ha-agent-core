@@ -9,7 +9,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { TEST_HOST, captureLog, reportedPort, assertPortHeld } = require('../fixtures/bound-port');
+const { TEST_HOST, captureLog, reportedPort, assertListensOnTestHost, assertPortHeld } = require('../fixtures/bound-port');
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'core-startup-'));
 const OPTIONS = path.join(TMP, 'options.json');
@@ -56,6 +56,7 @@ test('the bootstrap refuses to start without the audit hook, then starts with it
   const port = reportedPort(started.logged.join('\n'), 'prompt server');
   try {
     assert.ok(port, started.logged.join('\n'));
+    assertListensOnTestHost(assert, started.logged.join('\n'), 'prompt server');
     await assertPortHeld(assert, port);
     // No Home Assistant token → no relay → the adapter is told to remove its config.
     assert.deepEqual(state.mcpConfigs, [{ dir: path.join(TMP, 'claude-prompt'), url: '', bearer: '' }]);
