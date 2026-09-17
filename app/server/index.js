@@ -158,7 +158,8 @@ async function main() {
   setInterval(cleanupUploads, 6 * 3600 * 1000).unref();
 
   server.listen(PORT, () => {
-    console.log(`Claude Console listening on :${PORT}`);
+    const { port } = /** @type {import('node:net').AddressInfo} */ (server.address());
+    console.log(`Claude Console listening on :${port}`);
   });
 
   // Companion prompt API for the claude_ha integration (separate listener,
