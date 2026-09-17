@@ -45,13 +45,14 @@ jobs:
     steps:
       - name: Turn auto-merge off until this head is judged
         run: |
-          if ! gh pr merge --disable-auto "$PR_URL"; then
-            armed="$(gh pr view "$PR_URL" --json autoMergeRequest --jq '.autoMergeRequest != null')"
-            if [ "$armed" != false ]; then
-              echo "::error::auto-merge could not be turned off"
-              exit 1
-            fi
-          fi
+          for attempt in 1 2 3; do
+            gh pr merge --disable-auto "$PR_URL" && exit 0
+            armed="$(gh pr view "$PR_URL" --json autoMergeRequest --jq '.autoMergeRequest != null')" || armed=unknown
+            [ "$armed" = false ] && exit 0
+            [ "$attempt" = 3 ] || sleep 5
+          done
+          echo "::error::auto-merge could not be turned off"
+          exit 1
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

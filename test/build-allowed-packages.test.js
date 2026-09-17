@@ -124,6 +124,19 @@ test('without an absolute npm-cli.js the builder refuses to start', (t) => {
   }
 });
 
+test('a staging directory under a node_modules parent is refused', (t) => {
+  const { dir, marker } = installed(t);
+  // TMPDIR inside the install: the stage's parents include the project, whose
+  // node_modules/.bin npm would search.
+  const tmp = path.join(dir, 'tmp');
+  fs.mkdirSync(tmp);
+  const r = build(dir, { TMPDIR: tmp });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /holds a node_modules; set TMPDIR to a directory outside any project/);
+  assert.equal(fs.existsSync(marker), false);
+  assert.equal(fs.existsSync(path.join(dir, 'node_modules/native/gyp-version.txt')), false);
+});
+
 test('nothing allowed means nothing to build', (t) => {
   const dir = tempDir(t);
   put(dir, 'package.json', { name: 'plain' });

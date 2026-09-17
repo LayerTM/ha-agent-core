@@ -25,7 +25,50 @@
 set -euo pipefail
 
 tools="$(cd "$(dirname "$0")" && pwd)"
-nodedir="$(node -p 'path.dirname(path.dirname(process.execPath))')"
+
+# The image's node and npm, found before anything is installed and used by
+# absolute path from here on. A command that resolves inside a node_modules
+# directory, or inside this project, is a package's bin and not the image's.
+resolve_tool() {
+  local name="$1" found
+  found="$(command -v "$name")" || { echo "npm-ci-checked: no $name on PATH" >&2; exit 1; }
+  case "/$found" in
+    */node_modules/*) echo "npm-ci-checked: $name resolves inside node_modules ($found); put the image's $name first on PATH" >&2; exit 1 ;;
+  esac
+  case "$found" in
+    "$project"/*) echo "npm-ci-checked: $name resolves inside $project ($found)" >&2; exit 1 ;;
+    /*) ;;
+    *) echo "npm-ci-checked: $name resolves to a relative path ($found)" >&2; exit 1 ;;
+  esac
+  printf '%s\n' "$found"
+}
+inside_bad_place() {
+  case "$1" in
+    "$project"/*|*/node_modules/*) return 0 ;;
+  esac
+  return 1
+}
+project="$(pwd -P)"
+node_found="$(resolve_tool node)"
+NODE="$("$node_found" -p 'require("fs").realpathSync(process.execPath)')"
+if inside_bad_place "$NODE"; then
+  echo "npm-ci-checked: node is not the image's ($NODE)" >&2
+  exit 1
+fi
+if [ -z "${NPM_CLI:-}" ]; then
+  NPM_CLI="$("$NODE" -p 'require("fs").realpathSync(process.argv[1])' "$(resolve_tool npm)")"
+fi
+case "$NPM_CLI" in
+  "$project"/*) echo "npm-ci-checked: npm is inside $project ($NPM_CLI)" >&2; exit 1 ;;
+  /*/node_modules/npm/bin/npm-cli.js) ;;
+  *) echo "npm-ci-checked: npm is not an installed npm-cli.js ($NPM_CLI)" >&2; exit 1 ;;
+esac
+case "${NPM_CLI%/node_modules/npm/bin/npm-cli.js}" in
+  */node_modules/*) echo "npm-ci-checked: npm is inside another package ($NPM_CLI)" >&2; exit 1 ;;
+esac
+export NPM_CLI
+
+nodedir="$("$NODE" -p 'path.dirname(path.dirname(process.execPath))')"
 test -f "$nodedir/include/node/common.gypi" || {
   echo "no Node headers under $nodedir/include/node" >&2
   exit 1
@@ -34,26 +77,19 @@ devdir="$(mktemp -d)/node-gyp"
 export npm_package_config_node_gyp_nodedir="$nodedir"
 export npm_package_config_node_gyp_devdir="$devdir"
 
-if ! node "$tools/check-install-scripts.js" .; then
+if ! "$NODE" "$tools/check-install-scripts.js" .; then
   if [ "${INSTALL_SCRIPTS_UNREVIEWED:-}" != build ]; then
     exit 1
   fi
   echo "::notice::building packages whose install code has not been reviewed, as an untrusted test"
 fi
 
-npm ci --ignore-scripts
-
-# The image's npm-cli.js: NPM_CLI when the image names it, otherwise the real
-# path of the npm on the caller's PATH.
-if [ -z "${NPM_CLI:-}" ]; then
-  NPM_CLI="$(node -p 'require("fs").realpathSync(process.argv[1])' "$(command -v npm)")"
-fi
-export NPM_CLI
-node "$tools/build-allowed-packages.js"
+"$NODE" "$NPM_CLI" ci --ignore-scripts
+"$NODE" "$tools/build-allowed-packages.js"
 
 if [ -e "$devdir" ]; then
   echo "node-gyp downloaded headers instead of using $nodedir" >&2
   exit 1
 fi
 
-node "$tools/smoke-allowed-packages.js"
+"$NODE" "$tools/smoke-allowed-packages.js"

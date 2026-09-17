@@ -60,6 +60,16 @@ function main() {
   const lock = JSON.parse(fs.readFileSync(path.join(dir, 'package-lock.json'), 'utf8'));
   const stage = fs.mkdtempSync(path.join(os.tmpdir(), 'allowed-build-'));
   try {
+    // npm also searches every parent of the stage for node_modules/.bin, so no
+    // parent may hold a node_modules (a temporary directory inside a project,
+    // or a shared one somebody wrote a node_modules into).
+    for (let up = path.dirname(fs.realpathSync(stage)); ; up = path.dirname(up)) {
+      if (fs.existsSync(path.join(up, 'node_modules'))) {
+        process.stderr.write(`build-allowed-packages: ${up} holds a node_modules; set TMPDIR to a directory outside any project\n`);
+        return 1;
+      }
+      if (path.dirname(up) === up) break;
+    }
     const paths = [...new Set(names.flatMap((name) => Object.keys(closures[name])))].sort();
     for (const rel of paths) copyPackage(path.join(dir, rel), path.join(stage, rel));
     const dependencies = Object.fromEntries(names.map((name) => [name, lock.packages[`node_modules/${name}`]?.version ?? '*']));
