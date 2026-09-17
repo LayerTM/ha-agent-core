@@ -8,7 +8,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { captureLog, reportedPort } = require('../fixtures/bound-port');
+const { TEST_HOST, captureLog, reportedPort, assertListensOnTestHost, assertPortHeld } = require('../fixtures/bound-port');
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'core-budget-gate-'));
 const OPTIONS = path.join(TMP, 'options.json');
@@ -18,6 +18,7 @@ after(() => fs.rmSync(TMP, { recursive: true, force: true }));
 
 test('a daily USD budget starts the prompt API only for an engine that reports cost', async () => {
   process.env.CLAUDE_PROMPT_PORT = '0';
+  process.env.CLAUDE_PROMPT_HOST = TEST_HOST;
   process.env.CLAUDE_PROMPT_DEV = '1';
   process.env.CLAUDE_PROMPT_DATA = TMP;
   process.env.CLAUDE_PROMPT_OPTIONS = OPTIONS;
@@ -45,7 +46,9 @@ test('a daily USD budget starts the prompt API only for an engine that reports c
   const port = reportedPort(started.logged.join('\n'), 'prompt server');
   try {
     assert.ok(port, started.logged.join('\n'));
-    const res = await fetch(`http://127.0.0.1:${port}/api/status`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+    assertListensOnTestHost(assert, started.logged.join('\n'), 'prompt server');
+    await assertPortHeld(assert, port);
+    const res = await fetch(`http://${TEST_HOST}:${port}/api/status`, { headers: { Authorization: `Bearer ${TOKEN}` } });
     assert.equal(res.status, 200);
     assert.deepEqual((await res.json()).budget, { limit: 2, spent: 0 });
   } finally {

@@ -11,7 +11,7 @@ const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { reportedPort } = require('../fixtures/bound-port');
+const { TEST_HOST, reportedPort, assertListensOnTestHost, assertPortHeld } = require('../fixtures/bound-port');
 const { NEUTRAL_BRANDING } = require('../fixtures/neutral-adapter');
 const { NEUTRAL } = require('../../server/theme');
 
@@ -24,7 +24,7 @@ async function placeholderPage(t, branding, { theme = undefined, page: pageFile 
   const tree = fs.mkdtempSync(path.join(os.tmpdir(), 'core-starting-'));
   t.after(() => fs.rmSync(tree, { recursive: true, force: true }));
   fs.mkdirSync(path.join(tree, 'server'));
-  for (const name of ['starting.js', 'sources.js', 'branding.js', 'theme.js', 'pages.js']) {
+  for (const name of ['starting.js', 'sources.js', 'branding.js', 'theme.js', 'pages.js', 'listen.js']) {
     fs.copyFileSync(path.join(SERVER, name), path.join(tree, 'server', name));
   }
   fs.mkdirSync(path.join(tree, 'adapter'));
@@ -38,7 +38,7 @@ async function placeholderPage(t, branding, { theme = undefined, page: pageFile 
   }
   const child = spawn(process.execPath, [path.join(tree, 'server', 'starting.js')], {
     cwd: tree,
-    env: { PATH: process.env.PATH, CLAUDE_CONSOLE_PORT: '0', CLAUDE_CONSOLE_DEV: '1', NODE_PATH: '' },
+    env: { PATH: process.env.PATH, CLAUDE_CONSOLE_PORT: '0', CLAUDE_CONSOLE_HOST: TEST_HOST, CLAUDE_CONSOLE_DEV: '1', NODE_PATH: '' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   t.after(() => child.kill('SIGTERM'));
@@ -54,10 +54,12 @@ async function placeholderPage(t, branding, { theme = undefined, page: pageFile 
   });
   const port = await listening;
   assert.ok(port > 0, output);
-  const health = await fetch(`http://127.0.0.1:${port}/api/health`);
+  assertListensOnTestHost(assert, output, 'Startup placeholder');
+  await assertPortHeld(assert, port);
+  const health = await fetch(`http://${TEST_HOST}:${port}/api/health`);
   assert.equal(health.status, 503);
   assert.deepEqual(await health.json(), { ok: false, starting: true });
-  const page = await fetch(`http://127.0.0.1:${port}/`);
+  const page = await fetch(`http://${TEST_HOST}:${port}/`);
   assert.equal(page.status, 200);
   return { page: await page.text(), output };
 }

@@ -23,11 +23,14 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const sources = require('./sources');
+const { boundAddress } = require('./listen');
 const { readBranding } = require('./branding');
 const { NEUTRAL, readTheme } = require('./theme');
 const { pageValues, renderPage } = require('./pages');
 
 const PORT = Number(process.env.CLAUDE_CONSOLE_PORT || 8099);
+// Every interface unless one address is named (the tests name the one they use).
+const HOST = process.env.CLAUDE_CONSOLE_HOST || undefined;
 const DEV = process.env.CLAUDE_CONSOLE_DEV === '1';
 const PAGE_FILE = path.join(__dirname, '..', 'templates', 'starting.html');
 
@@ -92,9 +95,8 @@ server.on('error', (err) => {
   process.exit(0);
 });
 
-server.listen(PORT, () => {
-  const { port } = /** @type {import('node:net').AddressInfo} */ (server.address());
-  console.log(`Startup placeholder listening on :${port}`);
+server.listen(PORT, HOST, () => {
+  console.log(`Startup placeholder listening on ${boundAddress(server)}`);
 });
 
 // The run script stops this before the console binds the port. Exit at once
