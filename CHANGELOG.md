@@ -6,6 +6,20 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Adapter API 5: the console pages move to `app/templates/` and carry the
+  engine's names and colours as placeholders, filled in once when the console
+  starts; only the rendered pages are served. `app/public/` may no longer hold
+  a page, and a path under `icons/` other than the five icons is a 404.
+  `branding.json` adds `cliName` and `tabGlyph`. The optional
+  `app/adapter/theme.json` holds the colours; without it the console uses a
+  neutral palette of its own. The icons
+  come from `app/adapter/icons/`, and the console does not start without them.
+  A page that uses an unknown placeholder stops the start. The startup
+  placeholder renders its page the same way, and serves a plain page in the
+  theme's colours when it cannot.
+
 ## [0.4.0]
 
 ### Added
@@ -31,16 +45,6 @@ uses [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- Adapter API 5: the console pages move to `app/templates/` and carry the
-  engine's names and colours as placeholders, filled in once when the console
-  starts; only the rendered pages are served. `app/public/` may no longer hold
-  a page, and a path under `icons/` other than the five icons is a 404.
-  `branding.json` adds `cliName` and `tabGlyph`. The optional `app/adapter/theme.json` holds the
-  colours; without it the console uses a neutral palette of its own. The icons
-  come from `app/adapter/icons/`, and the console does not start without them.
-  A page that uses an unknown placeholder stops the start. The startup
-  placeholder renders its page the same way, and serves a plain page in the
-  theme's colours when it cannot.
 - Adapter API 4: the adapter slot also holds `app/adapter/branding.json` with
   `productName`, `consoleName` and `agentName`, checked when the adapter is
   loaded. The daily budget notice, the console's listening line, the error for
