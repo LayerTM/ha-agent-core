@@ -8,6 +8,9 @@ uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Every error answer of the prompt API carries a stable `code` next to its
+  `error` message, and `field` or `limit_bytes` where they apply.
+  `GET /api/status` publishes `prompt_max_bytes` and `body_max_bytes`.
 - `tools/npm-ci-checked.sh` accepts `--omit=dev`, `--omit=optional` and
   `--omit=peer` for its `npm ci` step, and no other argument.
 - `tools/check-install-scripts.js` and `app/install-scripts.json`: the packages

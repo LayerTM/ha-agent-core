@@ -20,9 +20,48 @@ const { createHistoryStore } = require('./history');
 const { run, TIMEOUT_MS, safeLangTag } = require('./run');
 
 const MAX_PROMPT_BYTES = 8 * 1024;
+const MAX_BODY_BYTES = 64 * 1024;
 const MAX_CONCURRENT_RUNS = 2;
 // The body fields POST /api/prompt accepts. /api/status publishes this same set
 // as `request_fields`, so a client sends a field only where it is accepted.
+// Every error answer of this server: its status, a stable code clients can map,
+// and the message it has always carried. A message given where it is sent (it
+// names the field) replaces the fixed one.
+/** @type {Record<string, [number, string]>} */
+const ERRORS = {
+  forbidden: [403, 'forbidden'],
+  unauthorized: [401, 'unauthorized'],
+  not_found: [404, 'not found'],
+  invalid_json: [400, 'invalid JSON body'],
+  body_too_large: [413, 'body too large'],
+  invalid_body: [400, 'body must be a JSON object'],
+  unknown_field: [400, 'unknown field'],
+  invalid_field: [400, 'invalid field'],
+  mode_mismatch: [400, 'field not valid in this mode'],
+  invalid_intents: [400, 'invalid intents'],
+  prompt_too_large: [413, `prompt too large (max ${MAX_PROMPT_BYTES / 1024} KB)`],
+  confirmation_required: [403, 'sensitive action requires explicit confirmation'],
+  rate_limited: [429, 'rate limited'],
+  write_unavailable: [503, 'write mode unavailable: no HA MCP configured (set an HA token in the add-on options)'],
+  busy: [503, 'busy'],
+  usage_unavailable: [503, 'usage unavailable'],
+  limits_unavailable: [503, 'account limits unavailable'],
+  timeout: [504, 'timeout'],
+  internal: [500, 'internal error'],
+};
+
+/**
+ * `{ error, code, ...extra }` with the code's status. `extra.message` replaces
+ * the fixed message; the rest (field, limit_bytes, domains) is published as is.
+ * @param {import('express').Response} res
+ * @param {string} code a key of ERRORS
+ * @param {{ message?: string, [key: string]: unknown }} [extra]
+ */
+function sendError(res, code, { message, ...extra } = {}) {
+  const [status, fixed] = ERRORS[code];
+  return res.status(status).json({ error: message ?? fixed, code, ...extra });
+}
+
 const BODY_KEYS = new Set([
   'prompt', 'mode', 'conversation_id', 'intents', 'confirmation', 'image_entity', 'stream', 'language',
   'surface', 'edit_automation',
@@ -723,7 +762,7 @@ function createPromptApp({
   app.use((req, res, next) => {
     if (!ipAllowed(req.socket.remoteAddress)) {
       audit(`prompt[deny] reason=403 ip=${sanitizeId(String(req.socket.remoteAddress), 48)}`);
-      return res.status(403).json({ error: 'forbidden' });
+      return sendError(res, 'forbidden');
     }
     next();
   });
@@ -734,7 +773,7 @@ function createPromptApp({
     const presented = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
     if (!tokenMatches(presented, token)) {
       audit(`prompt[deny] reason=401 ip=${sanitizeId(String(req.socket.remoteAddress), 48)} path=${sanitizeId(req.path, 32)}`);
-      return res.status(401).json({ error: 'unauthorized' });
+      return sendError(res, 'unauthorized');
     }
     next();
   });
@@ -753,6 +792,9 @@ function createPromptApp({
       // The same value under the key clients from before engine_version read.
       ...(descriptor.versionAlias ? { [descriptor.versionAlias]: version || '' } : {}),
       request_fields: [...BODY_KEYS],
+      // The size limits POST /api/prompt enforces, from the same constants.
+      prompt_max_bytes: MAX_PROMPT_BYTES,
+      body_max_bytes: MAX_BODY_BYTES,
       model: model || '',
       ha_mcp: Boolean(mcpConfigPath),
       ha_mcp_connected: mcpConfigPath ? lastMcpConnected : false,
@@ -775,7 +817,7 @@ function createPromptApp({
   // Token usage + prompt-API cost, for the integration's usage sensor.
   app.get('/api/usage', async (req, res) => {
     const report = await usageReport();
-    if (!report) return res.status(503).json({ error: 'usage unavailable' });
+    if (!report) return sendError(res, 'usage_unavailable');
     // Usage is numbers + model names, but redact defensively for consistency.
     res.json(redactDeep(report, redact));
   });
@@ -784,7 +826,7 @@ function createPromptApp({
   // the ACCOUNT (every machine, every session); /api/usage above is this add-on.
   app.get('/api/account_limits', async (req, res) => {
     const report = await accountLimits();
-    if (!report) return res.status(503).json({ error: 'account limits unavailable' });
+    if (!report) return sendError(res, 'limits_unavailable');
     res.json(redactDeep(report, redact));
   });
 
@@ -792,53 +834,54 @@ function createPromptApp({
 
   app.post(
     '/api/prompt',
-    express.json({ limit: '64kb', strict: true }),
+    express.json({ limit: MAX_BODY_BYTES, strict: true }),
     async (req, res) => {
       const caller = sanitizeId(req.get('x-claude-caller'), 64) || 'anonymous';
       const body = req.body;
 
       // 3. Input schema + caps.
       if (typeof body !== 'object' || body === null || Array.isArray(body)) {
-        return res.status(400).json({ error: 'body must be a JSON object' });
+        return sendError(res, 'invalid_body');
       }
       for (const key of Object.keys(body)) {
         if (!BODY_KEYS.has(key)) {
-          return res.status(400).json({ error: `unknown field: ${sanitizeId(key, 32)}` });
+          const field = sanitizeId(key, 32);
+          return sendError(res, 'unknown_field', { message: `unknown field: ${field}`, field });
         }
       }
       const mode = body.mode === undefined ? 'read' : body.mode;
       if (mode !== 'read' && mode !== 'write') {
-        return res.status(400).json({ error: 'mode must be "read" or "write"' });
+        return sendError(res, 'invalid_field', { message: 'mode must be "read" or "write"', field: 'mode' });
       }
       // In read mode the prompt IS the request. In write mode it is optional and
       // audit-only — execution is driven solely by the validated intents and the
       // prompt is NEVER shown to the model (no untrusted input on the write path).
       if (mode === 'read') {
         if (typeof body.prompt !== 'string' || body.prompt.trim().length === 0) {
-          return res.status(400).json({ error: 'prompt must be a non-empty string' });
+          return sendError(res, 'invalid_field', { message: 'prompt must be a non-empty string', field: 'prompt' });
         }
       } else if (body.prompt !== undefined && typeof body.prompt !== 'string') {
-        return res.status(400).json({ error: 'prompt must be a string' });
+        return sendError(res, 'invalid_field', { message: 'prompt must be a string', field: 'prompt' });
       }
       if (typeof body.prompt === 'string' && Buffer.byteLength(body.prompt, 'utf8') > MAX_PROMPT_BYTES) {
         audit(`prompt[deny] reason=413 caller=${caller}`);
-        return res.status(413).json({ error: 'prompt too large (max 8 KB)' });
+        return sendError(res, 'prompt_too_large', { limit_bytes: MAX_PROMPT_BYTES });
       }
       if (body.conversation_id !== undefined && typeof body.conversation_id !== 'string') {
-        return res.status(400).json({ error: 'conversation_id must be a string' });
+        return sendError(res, 'invalid_field', { message: 'conversation_id must be a string', field: 'conversation_id' });
       }
       const conversationId = sanitizeId(body.conversation_id, 128);
       // Optional language hint for the server-authored notices (degrade / budget);
       // normalized to a supported code with an English fallback.
       if (body.language !== undefined && typeof body.language !== 'string') {
-        return res.status(400).json({ error: 'language must be a string' });
+        return sendError(res, 'invalid_field', { message: 'language must be a string', field: 'language' });
       }
       const language = langOf(body.language);
 
       // Optional surface hint: "voice" makes the model keep the reply short and
       // TTS-friendly (spoken aloud). Absent → today's behavior (text-length).
       if (body.surface !== undefined && body.surface !== 'voice' && body.surface !== 'text') {
-        return res.status(400).json({ error: 'surface must be "voice" or "text"' });
+        return sendError(res, 'invalid_field', { message: 'surface must be "voice" or "text"', field: 'surface' });
       }
 
       // Optional existing-automation config: when present, the model MODIFIES this
@@ -850,7 +893,7 @@ function createPromptApp({
           && (typeof body.edit_automation !== 'object'
               || body.edit_automation === null
               || Array.isArray(body.edit_automation))) {
-        return res.status(400).json({ error: 'edit_automation must be a JSON object' });
+        return sendError(res, 'invalid_field', { message: 'edit_automation must be a JSON object', field: 'edit_automation' });
       }
 
       // Camera vision: an optional camera entity to snapshot and let Claude SEE.
@@ -859,20 +902,20 @@ function createPromptApp({
       let imageEntity = null;
       if (body.image_entity !== undefined) {
         if (mode !== 'read') {
-          return res.status(400).json({ error: 'image_entity is only valid with mode "read"' });
+          return sendError(res, 'mode_mismatch', { message: 'image_entity is only valid with mode "read"', field: 'image_entity' });
         }
         if (typeof body.image_entity !== 'string' || !CAMERA_ENTITY_RE.test(body.image_entity)) {
-          return res.status(400).json({ error: 'image_entity must be a camera.<id> entity' });
+          return sendError(res, 'invalid_field', { message: 'image_entity must be a camera.<id> entity', field: 'image_entity' });
         }
         imageEntity = body.image_entity;
       }
 
       // Optional SSE streaming of the answer text (read only).
       if (body.stream !== undefined && typeof body.stream !== 'boolean') {
-        return res.status(400).json({ error: 'stream must be a boolean' });
+        return sendError(res, 'invalid_field', { message: 'stream must be a boolean', field: 'stream' });
       }
       if (body.stream === true && mode !== 'read') {
-        return res.status(400).json({ error: 'stream is only valid with mode "read"' });
+        return sendError(res, 'mode_mismatch', { message: 'stream is only valid with mode "read"', field: 'stream' });
       }
       const streaming = body.stream === true;
 
@@ -881,10 +924,10 @@ function createPromptApp({
       // the user's explicit yes. "auto" is the opt-in low-risk fast path.
       const confirmation = body.confirmation === undefined ? 'confirmed' : body.confirmation;
       if (confirmation !== 'auto' && confirmation !== 'confirmed') {
-        return res.status(400).json({ error: 'confirmation must be "auto" or "confirmed"' });
+        return sendError(res, 'invalid_field', { message: 'confirmation must be "auto" or "confirmed"', field: 'confirmation' });
       }
       if (mode !== 'write' && body.confirmation !== undefined) {
-        return res.status(400).json({ error: 'confirmation is only valid with mode "write"' });
+        return sendError(res, 'mode_mismatch', { message: 'confirmation is only valid with mode "write"', field: 'confirmation' });
       }
 
       let intents = null;
@@ -892,12 +935,12 @@ function createPromptApp({
         const checked = validateIntents(body.intents);
         if (!checked.ok) {
           audit(`prompt[deny] reason=400 caller=${caller} detail=${sanitizeId(checked.error, 64)}`);
-          return res.status(400).json({ error: checked.error });
+          return sendError(res, 'invalid_intents', { message: checked.error, field: 'intents' });
         }
         intents = checked.intents;
         if (!mcpConfigPath) {
           audit(`prompt[deny] reason=503-no-mcp caller=${caller}`);
-          return res.status(503).json({ error: 'write mode unavailable: no HA MCP configured (set an HA token in the add-on options)' });
+          return sendError(res, 'write_unavailable');
         }
         // Boundary backstop: an auto (unconfirmed) write may never touch an
         // inherently critical domain, regardless of caller/model intent.
@@ -909,11 +952,11 @@ function createPromptApp({
           )];
           if (blocked.length) {
             audit(`prompt[deny] reason=auto-critical caller=${caller} domains=${blocked.join('+')}`);
-            return res.status(403).json({ error: 'sensitive action requires explicit confirmation', domains: blocked });
+            return sendError(res, 'confirmation_required', { domains: blocked });
           }
         }
       } else if (body.intents !== undefined) {
-        return res.status(400).json({ error: 'intents is only valid with mode "write"' });
+        return sendError(res, 'mode_mismatch', { message: 'intents is only valid with mode "write"', field: 'intents' });
       }
 
       const prompt = typeof body.prompt === 'string' ? sanitizePrompt(body.prompt) : '';
@@ -923,7 +966,7 @@ function createPromptApp({
       if (retryAfter > 0) {
         audit(`prompt[deny] reason=429 caller=${caller}`);
         res.set('Retry-After', String(retryAfter));
-        return res.status(429).json({ error: 'rate limited' });
+        return sendError(res, 'rate_limited');
       }
 
       // 4b. Daily chat spend cap. Enforced on the read path — it is the
@@ -943,7 +986,7 @@ function createPromptApp({
       // 5. Concurrency semaphore.
       if (activeRuns >= MAX_CONCURRENT_RUNS) {
         audit(`prompt[deny] reason=503-busy caller=${caller}`);
-        return res.status(503).json({ error: 'busy' });
+        return sendError(res, 'busy');
       }
       activeRuns += 1;
 
@@ -1099,7 +1142,7 @@ function createPromptApp({
         try { res.end(); } catch { /* client gone */ }
       };
       const failStream = (err) => {
-        try { res.write(`${JSON.stringify({ type: 'error', error: err })}\n`); } catch { /* gone */ }
+        try { res.write(`${JSON.stringify({ type: 'error', error: ERRORS[err][1], code: err })}\n`); } catch { /* gone */ }
         try { res.end(); } catch { /* gone */ }
       };
       const degradedBody = {
@@ -1109,7 +1152,7 @@ function createPromptApp({
         audit(`prompt[${mode}] ${base} status=504 dur=${seconds}s${spendFields(spentTokens, reportsCost() ? spent : null)}`);
         if (mode === 'read') chatHealth.record(false, 'timeout', false);
         if (streaming) { streamDone(degradedBody); return undefined; }
-        return res.status(504).json({ error: 'timeout' });
+        return sendError(res, 'timeout');
       }
       if (outcome.status !== 'ok') {
         // Observability: carry the reason + whatever turns/tools the failed run did
@@ -1136,8 +1179,8 @@ function createPromptApp({
           return res.status(200).json(degradedBody);
         }
         audit(`prompt[write] ${base} status=500 ${diag} dur=${seconds}s`);
-        if (streaming) return failStream('internal error');
-        return res.status(500).json({ error: 'internal error' });
+        if (streaming) return failStream('internal');
+        return sendError(res, 'internal');
       }
 
       // (Cost was already billed for every attempt above, via budget.add(spent).)
@@ -1204,20 +1247,20 @@ function createPromptApp({
     },
   );
 
-  app.use((req, res) => res.status(404).json({ error: 'not found' }));
+  app.use((req, res) => sendError(res, 'not_found'));
 
   // Express error funnel: body-parser errors and anything a handler throws.
   // eslint-disable-next-line no-unused-vars
   app.use((err, req, res, next) => {
     if (res.headersSent) return;
     if (err && err.type === 'entity.too.large') {
-      return res.status(413).json({ error: 'body too large' });
+      return sendError(res, 'body_too_large', { limit_bytes: MAX_BODY_BYTES });
     }
     if (err && (err.type === 'entity.parse.failed' || err instanceof SyntaxError)) {
-      return res.status(400).json({ error: 'invalid JSON body' });
+      return sendError(res, 'invalid_json');
     }
     console.error('[prompt] handler error:', err && err.message ? err.message : err);
-    res.status(500).json({ error: 'internal error' });
+    sendError(res, 'internal');
   });
 
   return app;
