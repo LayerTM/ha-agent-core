@@ -29,6 +29,9 @@ const PACKAGE_FILES = Object.freeze({
   '/fonts/jetbrains-mono-700.woff2': '@fontsource/jetbrains-mono/files/jetbrains-mono-latin-700-normal.woff2',
 });
 const PACKAGE_MAX_AGE_S = 24 * 3600;
+// These routes name fixed files, found by the core, so a dot in a directory
+// above them (a checkout under .git/, a hidden install path) must not hide them;
+// sendFile refuses such paths unless told otherwise.
 
 // The add-on ships these in app/adapter/icons/; the pages link them as icons/<name>.
 const ICONS = Object.freeze(['apple-touch-icon.png', 'favicon-32.png', 'favicon.svg', 'pwa-192.png', 'pwa-512.png']);
@@ -107,12 +110,12 @@ function mountConsoleAssets(app, { pages, icons, publicDir }, { assetVersion }) 
       res.sendStatus(404);
       return;
     }
-    res.sendFile(file, { maxAge: ASSET_MAX_AGE_S * 1000 });
+    res.sendFile(file, { maxAge: ASSET_MAX_AGE_S * 1000, dotfiles: 'allow' });
   });
 
   for (const [route, mod] of Object.entries(PACKAGE_FILES)) {
     const file = require.resolve(mod);
-    app.get(route, (req, res) => res.sendFile(file, { maxAge: PACKAGE_MAX_AGE_S * 1000 }));
+    app.get(route, (req, res) => res.sendFile(file, { maxAge: PACKAGE_MAX_AGE_S * 1000, dotfiles: 'allow' }));
   }
 
   app.use(express.static(publicDir, {

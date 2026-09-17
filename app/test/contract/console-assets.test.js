@@ -258,3 +258,14 @@ test('the terminal emulator and the font are served from the installed packages'
     if (route.endsWith('.woff2')) assert.equal(r.headers.get('content-type'), 'font/woff2', route);
   }
 });
+
+test('fixed files are served from a path with a dot directory above them', async (t) => {
+  const tree = consoleTree({});
+  const hidden = path.join(path.dirname(tree.iconDir), '.hidden', 'icons');
+  fs.mkdirSync(path.dirname(hidden));
+  fs.renameSync(tree.iconDir, hidden);
+  const base = await serve(t, { ...tree, iconDir: hidden });
+  const r = await rawGet(base, '/icons/favicon.svg');
+  assert.equal(r.status, 200);
+  assert.equal(r.body, 'icon favicon.svg');
+});
