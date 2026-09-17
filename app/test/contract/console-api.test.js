@@ -128,6 +128,13 @@ test('DELETE /tabs/:index closes that window and returns the tab list', async ()
   assert.deepEqual(tmuxCalls()[0], ['kill-window', '-t', 'main:3']);
 });
 
+test('DELETE /tabs/0 refuses to close the agent\'s window, naming the agent, without calling tmux', async () => {
+  const r = await call('DELETE', '/tabs/0');
+  assert.equal(r.status, 400);
+  assert.deepEqual(await r.json(), { error: `The ${neutralBranding.agentName} window cannot be closed` });
+  assert.deepEqual(tmuxCalls(), []);
+});
+
 test('DELETE /tabs/:index refuses an invalid index without calling tmux, and reports a failure as 400', async () => {
   const bad = await call('DELETE', '/tabs/-2');
   assert.equal(bad.status, 400);
