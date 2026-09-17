@@ -38,6 +38,7 @@ function makeApp(overrides = {}) {
     claudeBin: path.join(TMP, 'no-such-agent'),
     claudeSettings: 'neutral-settings',
     usageBin: path.join(TMP, 'no-such-usage'),
+    haConfigured: true,
     mcpConfigPath: path.join(TMP, 'mcp.json'),
     model: 'neutral-model',
     workDir: TMP,
@@ -63,7 +64,7 @@ let noMcpBase;
 before(async () => {
   server = await listen(makeApp());
   base = `http://127.0.0.1:${server.address().port}`;
-  noMcpServer = await listen(makeApp({ mcpConfigPath: null }));
+  noMcpServer = await listen(makeApp({ haConfigured: false, mcpConfigPath: null }));
   noMcpBase = `http://127.0.0.1:${noMcpServer.address().port}`;
 });
 
@@ -175,6 +176,23 @@ test('a write whose intents are not acceptable is refused before anything runs',
   assert.equal(state.runs.length, 0);
   assert.ok(auditLines.some((line) => line.includes('reason=auto-critical') && line.includes('domains=lock')));
   assert.ok(auditLines.some((line) => line.includes('reason=503-no-mcp')));
+});
+
+test('whether Home Assistant is configured is a fact of its own, not the presence of a config file', async () => {
+  // The config file is written per run, so between runs there is none while Home
+  // Assistant is configured all the same. Nothing may read the path to answer this.
+  const server_ = await listen(makeApp({ haConfigured: true, mcpConfigPath: null }));
+  const url = `http://127.0.0.1:${server_.address().port}`;
+  try {
+    const status = await (await fetch(`${url}/api/status`, { headers: { authorization: `Bearer ${TOKEN}` } })).json();
+    assert.equal(status.ha_mcp, true, 'configured, though this moment has no config file');
+    const seen = auditLines.length;
+    const write = await post({ mode: 'write', intents: INTENT }, { url });
+    assert.notEqual(write.status, 503, 'a write is not refused for a file that is written per run');
+    assert.ok(!auditLines.slice(seen).some((line) => line.includes('reason=503-no-mcp')));
+  } finally {
+    server_.close();
+  }
 });
 
 test('a caller over its rate limit is refused before anything runs', async () => {

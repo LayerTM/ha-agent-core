@@ -527,7 +527,8 @@ function reportsCost() {
 }
 
 function createPromptApp({
-  token, claudeBin, claudeSettings = '', usageBin, mcpConfigPath, model, voiceModel = '', writeModel = '', cameraModel = '',
+  token, claudeBin, claudeSettings = '', usageBin, haConfigured, mcpConfigPath,
+  model, voiceModel = '', writeModel = '', cameraModel = '',
   dailyBudgetUsd = 0,
   coreRelayUrl = '', coreRelayToken = '',
   // Credentials as the add-on already holds them, for /api/account_limits only:
@@ -773,8 +774,8 @@ function createPromptApp({
       prompt_max_bytes: MAX_PROMPT_BYTES,
       body_max_bytes: MAX_BODY_BYTES,
       model: model || '',
-      ha_mcp: Boolean(mcpConfigPath),
-      ha_mcp_connected: mcpConfigPath ? lastMcpConnected : false,
+      ha_mcp: haConfigured,
+      ha_mcp_connected: haConfigured ? lastMcpConnected : false,
       chat_health: chatHealth.snapshot(),
       // The add-on's wall-clock ceiling per request (a TIME) — lets the client pair
       // its own REQUEST_TIMEOUT dynamically. Distinct from the daily-$ budget below.
@@ -915,7 +916,7 @@ function createPromptApp({
           return sendError(res, 'invalid_intents', { message: checked.error, field: 'intents' });
         }
         intents = checked.intents;
-        if (!mcpConfigPath) {
+        if (!haConfigured) {
           audit(`prompt[deny] reason=503-no-mcp caller=${caller}`);
           return sendError(res, 'write_unavailable');
         }
