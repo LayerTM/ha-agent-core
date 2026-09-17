@@ -9,6 +9,7 @@ is unpacked or executed.
 | path | what |
 |---|---|
 | `app/server/` | the web console (terminal, tabs, uploads, restart) and the prompt API server |
+| `app/templates/` | the console pages, filled in with the engine's names and colours when the console starts |
 | `app/package.json`, `app/package-lock.json`, `app/install-scripts.json` | their dependencies and the reviewed install-script dependencies, installed by the add-on with `tools/npm-ci-checked.sh` |
 | `ha-tools/` | the dashboard screenshot helper |
 | `rootfs/` | shared scripts: alerts, audit and backup hooks, Home Assistant helpers, shell configuration |
@@ -16,10 +17,10 @@ is unpacked or executed.
 | `tools/npm-ci-checked.sh`, `tools/check-install-scripts.js`, `tools/build-allowed-packages.js`, `tools/smoke-allowed-packages.js` | the dependency install an add-on runs in `app/` and `ha-tools/` |
 
 An add-on assembles its image from this tree plus its own files, in the same
-layout: its engine adapter goes to `app/adapter/`, its console pages to
-`app/templates/` and the rest of its console frontend to `app/public/`, its own
-scripts next to the core's under `rootfs/`. The `app/`
-tree is installed at `/opt/agent-console`.
+layout: its engine adapter (with its names, colours and icons) goes to
+`app/adapter/`, any further static files for the console to `app/public/`, its
+own scripts next to the core's under `rootfs/`. The `app/` tree is installed at
+`/opt/agent-console`.
 
 ## The engine adapter
 
@@ -76,9 +77,11 @@ All five are available to the console pages.
 
 ### Console pages
 
-The console pages live in `app/templates/`: `index.html`, `starting.html`,
-`app.js`, `styles.css` and `manifest.webmanifest`. They may write the engine's
-names and colours as placeholders. The console fills them in once when it
+The core ships the console pages in `app/templates/`: `index.html`,
+`starting.html`, `app.js`, `styles.css` and `manifest.webmanifest`. They carry
+the engine's names and colours as placeholders. The terminal emulator and its
+font (JetBrains Mono, OFL-1.1) are served from the installed packages under
+`vendor/` and `fonts/`. The console fills them in once when it
 starts and serves only the finished files; nothing serves `app/templates/`
 itself, and nothing is templated in the browser. Everything in `app/public/` is
 served as it is, and the console does not start if `app/public/` holds a file

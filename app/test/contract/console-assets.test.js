@@ -14,7 +14,7 @@ const vm = require('node:vm');
 const express = require('express');
 
 const { PAGES, pageValues, renderPage } = require('../../server/pages');
-const { ICONS, loadConsoleAssets, mountConsoleAssets } = require('../../server/console-assets');
+const { ICONS, PACKAGE_FILES, loadConsoleAssets, mountConsoleAssets } = require('../../server/console-assets');
 const { NEUTRAL, accentRgb } = require('../../server/theme');
 const { NEUTRAL_BRANDING } = require('../fixtures/neutral-adapter');
 
@@ -246,4 +246,26 @@ test('without an index page the entry document is a 500, as before', async (t) =
   const r = await rawGet(base, '/');
   assert.equal(r.status, 500);
   assert.equal(r.body, 'index unavailable');
+});
+
+test('the terminal emulator and the font are served from the installed packages', async (t) => {
+  const base = await serve(t, consoleTree({}));
+  for (const [route, mod] of Object.entries(PACKAGE_FILES)) {
+    const r = await fetch(`${base}${route}`);
+    assert.equal(r.status, 200, route);
+    assert.deepEqual(Buffer.from(await r.arrayBuffer()), fs.readFileSync(require.resolve(mod)), route);
+    assert.equal(r.headers.get('cache-control'), 'public, max-age=86400', route);
+    if (route.endsWith('.woff2')) assert.equal(r.headers.get('content-type'), 'font/woff2', route);
+  }
+});
+
+test('fixed files are served from a path with a dot directory above them', async (t) => {
+  const tree = consoleTree({});
+  const hidden = path.join(path.dirname(tree.iconDir), '.hidden', 'icons');
+  fs.mkdirSync(path.dirname(hidden));
+  fs.renameSync(tree.iconDir, hidden);
+  const base = await serve(t, { ...tree, iconDir: hidden });
+  const r = await rawGet(base, '/icons/favicon.svg');
+  assert.equal(r.status, 200);
+  assert.equal(r.body, 'icon favicon.svg');
 });
