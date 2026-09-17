@@ -8,7 +8,9 @@
 // createPromptApp, recording every call so a test can assert what was (or was
 // not) dispatched. Never packed and never used outside tests.
 
+const fs = require('node:fs');
 const fsp = require('node:fs/promises');
+const os = require('node:os');
 const path = require('node:path');
 
 const AGENT = path.join(__dirname, 'neutral-agent.js');
@@ -53,6 +55,15 @@ function okTape(text = 'neutral answer') {
   return [{ emit: { type: 'result', structured: { text, proposal: null, automation: null }, numTurns: 1, costUsd: 0 } }];
 }
 
+let tapes = null;
+function tapeDir() {
+  if (!tapes) {
+    tapes = fs.mkdtempSync(path.join(os.tmpdir(), 'neutral-tapes-'));
+    process.on('exit', () => fs.rmSync(tapes, { recursive: true, force: true }));
+  }
+  return tapes;
+}
+
 function createNeutralAdapter() {
   const state = {
     runs: [], // every options object handed to the scripted run
@@ -85,8 +96,10 @@ function createNeutralAdapter() {
       launch(spec, { env }) {
         state.launches.push(spec);
         const tape = state.tapes.shift() || okTape();
+        const file = path.join(tapeDir(), `tape-${state.launches.length}.json`);
+        fs.writeFileSync(file, JSON.stringify(tape));
         return {
-          args: [AGENT, JSON.stringify(tape)],
+          args: [AGENT, file],
           env: {
             ...(env.NEUTRAL_AGENT_KEY ? { NEUTRAL_AGENT_KEY: env.NEUTRAL_AGENT_KEY } : {}),
             ...(env.NEUTRAL_LEAK_TEST ? { SUPERVISOR_TOKEN: 'leak', TERM: 'xterm', PATH: '/leak' } : {}),

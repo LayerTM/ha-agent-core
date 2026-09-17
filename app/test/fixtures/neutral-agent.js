@@ -1,7 +1,8 @@
 'use strict';
 
 // A stand-in agent process for the core's run tests. It reads its whole stdin,
-// then plays the tape given as its only argument (a JSON array of steps):
+// then plays the tape in the file named by its only argument (a JSON array of
+// steps; a file, because one argument is limited to 128 KiB on Linux):
 //   { emit: <object> }          one JSON line on stdout
 //   { raw: <string> }           a raw stdout line (not JSON)
 //   { stdout: <bytes> }         that many bytes of stdout without a newline
@@ -12,7 +13,7 @@
 //                               environment as JSON
 //   { exit: <code> }            exit with that code (default 0 at the end)
 
-const tape = JSON.parse(process.argv[2] || '[]');
+const tape = JSON.parse(require('node:fs').readFileSync(process.argv[2], 'utf8'));
 
 function write(line) {
   return new Promise((resolve) => process.stdout.write(`${line}\n`, resolve));
