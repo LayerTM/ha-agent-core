@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Runs /usr/local/bin/addon-run inside the add-on base image, with its real
-# bashio, and a neutral engine-hooks.sh. Started by ../addon-run.test.sh; the
+# bashio, and a neutral engine-hooks.sh. Started by ../image.test.sh; the
 # repository is mounted read-only at /src.
 #
 # The add-on options reach bashio through its own cache directory, which bashio

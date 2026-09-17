@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
-# Claude Code Notification hook — when Claude is waiting for your input or
+# Claude Code Notification hook — when the agent is waiting for your input or
 # permission, push it to your phone. No-op unless HA_NOTIFY_SERVICE is set to a
 # mobile notify service (so it never spams the HA bell for every prompt).
 set -o pipefail
+# shellcheck source-path=SCRIPTDIR source=../lib/addon-branding.sh
+source "${BASH_SOURCE[0]%/*}/../lib/addon-branding.sh"
 [ -n "${HA_NOTIFY_SERVICE:-}" ] || exit 0
 input="$(cat)"
-msg="$(printf '%s' "${input}" | jq -r '.message // "Claude Code needs your attention"' 2>/dev/null)"
-ha-notify "${msg}" "Claude Code" >/dev/null 2>&1 || true
+product="$(branding_name_or_fallback productName)"
+msg="$(printf '%s' "${input}" | jq -r --arg fallback "${product} needs your attention" '.message // $fallback' 2>/dev/null)"
+ha-notify "${msg}" "${product}" >/dev/null 2>&1 || true
 exit 0

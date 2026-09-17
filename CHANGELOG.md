@@ -23,6 +23,16 @@ uses [Semantic Versioning](https://semver.org/).
   closing the agent's tab and the fallback startup page use these names instead
   of a fixed engine name. Without a page file and without the names, the startup
   page is titled "Starting…".
+- The notification titles of `ha-notify`, the agent's attention hook, the
+  safety backup hook and the home alerts loop come from `branding.json`
+  (`rootfs/usr/local/lib/addon-branding.sh`), and are `Agent` when it cannot be
+  read. Stored names (the `claude-auto-` backups, the backup marker, the
+  notification id prefix) are unchanged.
+
+### Fixed
+
+- Every command under `rootfs/usr/local/bin` is executable in the release
+  archive; most were packed with mode 644.
 
 ## [0.3.0]
 

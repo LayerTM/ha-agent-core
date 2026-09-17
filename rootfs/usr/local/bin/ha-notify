@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # Send a Home Assistant notification.
-#   ha-notify "message" ["title"]
+#   ha-notify "message" ["title"]      (the title defaults to the product name)
 # Shows in the HA notification bell (persistent_notification) by default — no
 # setup needed. Set HA_NOTIFY_SERVICE=notify.mobile_app_<device> to push to a
 # phone instead. Use this to ping the user when a long task finishes.
 set -o pipefail
+# shellcheck source-path=SCRIPTDIR source=../lib/addon-branding.sh
+source "${BASH_SOURCE[0]%/*}/../lib/addon-branding.sh"
 
 msg="${1:-}"
-title="${2:-Claude Code}"
+title="${2:-$(branding_name_or_fallback productName)}"
 [ -n "${msg}" ] || { echo "usage: ha-notify <message> [title]" >&2; exit 2; }
 
 API="http://supervisor/core/api"

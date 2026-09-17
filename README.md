@@ -59,14 +59,16 @@ exactly these keys:
 
 | key | used for | Claude Code add-on |
 |---|---|---|
-| `productName` | the first line the start script logs; the startup page title when the page file is missing | `Claude Code` |
+| `productName` | the first line the start script logs; the startup page title when the page file is missing; the default title of `ha-notify` and the agent's attention notifications | `Claude Code` |
 | `consoleName` | the last line the start script logs; the console's listening line | `Claude Console` |
-| `agentName` | the daily budget notice; the error for closing the agent's tab | `Claude` |
+| `agentName` | the daily budget notice; the error for closing the agent's tab; the titles of the backup and home alert notifications | `Claude` |
 
 Every value is 1 to 64 characters, without surrounding spaces, control
 characters, quotes, `<`, `>`, `&`, `\` or `` ` ``, so it is used as it is in pages,
-log lines and shell strings. The file is data: the startup placeholder and the
-start script read it without loading the adapter's code.
+log lines and shell strings. The file is data: the startup placeholder reads it
+without loading the adapter's code, and the shell scripts read it through
+`rootfs/usr/local/lib/addon-branding.sh`. A notification whose names cannot be
+read is still sent, titled `Agent`; the start script refuses to start instead.
 
 ### Prompt runs
 
@@ -383,7 +385,7 @@ node tools/pack.js --out dist
 
 ## Development
 
-Requires Node.js 22 or later (CI uses Node.js 26), Python 3, bash, jq, Docker (for `test:addon-run`, which runs the start script in the add-on base image, `app/test/image/Dockerfile`) and a C/C++ toolchain for node-gyp where node-pty has no prebuild.
+Requires Node.js 22 or later (CI uses Node.js 26), Python 3, bash, jq, Docker (for `test:image`, which runs the start and notification scripts in the add-on base image, `app/test/image/Dockerfile`) and a C/C++ toolchain for node-gyp where node-pty has no prebuild.
 
 The tests in `app/test/contract/` run the prompt API and the console against a
 neutral test adapter (`app/test/fixtures/neutral-adapter.js`) that records what
@@ -394,7 +396,7 @@ tools/npm-ci-checked.sh
 npm test
 npm run lint
 npm run typecheck
-(cd app && ../tools/npm-ci-checked.sh && npm test && npm run test:alerts && npm run test:config && npm run test:addon-run && npm run lint && npm run typecheck)
+(cd app && ../tools/npm-ci-checked.sh && npm test && npm run test:alerts && npm run test:config && npm run test:image && npm run lint && npm run typecheck)
 python .github/scripts/secret_scan.py .
 python .github/scripts/hygiene_scan.py .
 ```

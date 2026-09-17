@@ -6,7 +6,7 @@
 # Phase 2: exec the Node web console (terminal server on the ingress port)
 #
 # Everything that depends on the engine comes from the add-on: its names from
-# the adapter's branding.json, the rest from /usr/local/lib/engine-hooks.sh —
+# the adapter's branding.json (addon-branding.sh), the rest from /usr/local/lib/engine-hooks.sh —
 # the variables in ENGINE_VARIABLES and the functions in ENGINE_HOOKS, called
 # here in the order they are listed below.
 # ==============================================================================
@@ -18,9 +18,6 @@
 set -o errexit -o errtrace -o nounset -o pipefail
 shopt -s inherit_errexit
 
-# The console is installed here by every add-on.
-CONSOLE_DIR=/opt/agent-console
-BRANDING="${CONSOLE_DIR}/adapter/branding.json"
 
 ENGINE_VARIABLES=(
     ENGINE_BIN_DIR              # put first on PATH
@@ -45,17 +42,20 @@ ENGINE_HOOKS=(
 # cannot be used for list options).
 # shellcheck source-path=SCRIPTDIR source=../lib/addon-config.sh
 source /usr/local/lib/addon-config.sh
+# The engine's names, and AGENT_CONSOLE_DIR where every add-on installs the console.
+# shellcheck source-path=SCRIPTDIR source=../lib/addon-branding.sh
+source /usr/local/lib/addon-branding.sh
 # shellcheck source=/dev/null
 source /usr/local/lib/engine-hooks.sh || {
     bashio::log.error "Cannot load /usr/local/lib/engine-hooks.sh"
     exit 1
 }
 # productName: "Initializing <it> add-on..."; consoleName: "Starting <it> on port ..."
-product_name=$(jq -er '.productName | select(type == "string" and . != "")' "${BRANDING}" 2>/dev/null) || product_name=""
-console_name=$(jq -er '.consoleName | select(type == "string" and . != "")' "${BRANDING}" 2>/dev/null) || console_name=""
+product_name=$(branding_name productName) || product_name=""
+console_name=$(branding_name consoleName) || console_name=""
 missing=()
-[ -n "${product_name}" ] || missing+=("productName in ${BRANDING}")
-[ -n "${console_name}" ] || missing+=("consoleName in ${BRANDING}")
+[ -n "${product_name}" ] || missing+=("productName in ${ADDON_BRANDING_FILE}")
+[ -n "${console_name}" ] || missing+=("consoleName in ${ADDON_BRANDING_FILE}")
 for name in "${ENGINE_VARIABLES[@]}"; do
     [ -n "${!name:-}" ] || missing+=("variable ${name}")
 done
@@ -78,7 +78,7 @@ bashio::log.info "Initializing ${product_name} add-on..."
 # it is stopped the moment before the console takes the port over.
 # Absolute path on purpose: this runs before PATH is set below, and the image's
 # node is the one that must serve it.
-CLAUDE_CONSOLE_PORT=8099 /usr/local/bin/node "${CONSOLE_DIR}/server/starting.js" &
+CLAUDE_CONSOLE_PORT=8099 /usr/local/bin/node "${AGENT_CONSOLE_DIR}/server/starting.js" &
 starting_pid=$!
 # If initialization exits early the placeholder must not outlive it and keep the
 # port from the console's next attempt.
@@ -298,4 +298,4 @@ wait "${starting_pid}" 2>/dev/null || true
 trap - EXIT
 
 bashio::log.info "Starting ${console_name} on port ${CLAUDE_CONSOLE_PORT}..."
-exec node "${CONSOLE_DIR}/server/index.js"
+exec node "${AGENT_CONSOLE_DIR}/server/index.js"
