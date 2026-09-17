@@ -565,7 +565,14 @@ function createPromptApp({
         timeout: 15000,
         env: { PATH: process.env.PATH, HOME: process.env.HOME },
       }, (err, stdout) => {
-        const parsed = err ? null : adapter().descriptor.parseVersion(String(stdout).trim());
+        let parsed = null;
+        // The adapter's parser runs in this callback, where a throw would end the
+        // process; a parser that fails means no version.
+        try {
+          if (!err) parsed = adapter().descriptor.parseVersion(String(stdout).trim());
+        } catch {
+          parsed = null;
+        }
         const value = typeof parsed === 'string' && VERSION_RE.test(parsed) ? parsed : null;
         versionCache = { value, stamp: Date.now() };
         versionInFlight = null;
