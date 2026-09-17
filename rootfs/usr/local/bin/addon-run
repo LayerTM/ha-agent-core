@@ -1,0 +1,272 @@
+#!/usr/bin/env bashio
+# ==============================================================================
+# The add-on's single longrun service. The s6 `run` script of an add-on is
+#   exec /usr/local/bin/addon-run
+# Phase 1: initialization (persistent HOME, auth, env, instructions)
+# Phase 2: exec the Node web console (terminal server on the ingress port)
+#
+# Everything that depends on the engine comes from the add-on's
+# /usr/local/lib/engine-hooks.sh: the variables in ENGINE_VARIABLES and the
+# functions in ENGINE_HOOKS, called here in the order they are listed below.
+# ==============================================================================
+
+# The console is installed here by every add-on.
+CONSOLE_DIR=/opt/agent-console
+
+ENGINE_VARIABLES=(
+    ENGINE_ADDON_NAME           # "Initializing <name> add-on..."
+    ENGINE_CONSOLE_NAME         # "Starting <name> on port ..."
+    ENGINE_BIN_DIR              # put first on PATH
+    ENGINE_PROMPT_BIN           # the agent executable of the prompt API
+    ENGINE_INSTRUCTIONS_SOURCE  # the bundled instructions file
+    ENGINE_INSTRUCTIONS_FILE    # its name in /data/workdir and /homeassistant
+)
+ENGINE_HOOKS=(
+    engine_prepare_home     # after /data/home exists: seed the engine's files
+    engine_env              # the engine's own environment
+    engine_sync_from_image  # bring a newer engine from the image
+    engine_auth             # credentials from the options
+    engine_model            # the model option
+    engine_update           # auto_update is on
+    engine_update_disabled  # auto_update is off
+    engine_provision        # after /data/workdir exists: engine settings and dirs
+    engine_console_env      # the console's engine options
+    engine_prompt_settings  # prints the prompt API's settings; empty means none
+)
+
+# Shared config readers (config_list — see the file for why bashio::config
+# cannot be used for list options).
+# shellcheck source-path=SCRIPTDIR source=../lib/addon-config.sh
+source /usr/local/lib/addon-config.sh
+# shellcheck source=/dev/null
+source /usr/local/lib/engine-hooks.sh || {
+    bashio::log.error "Cannot load /usr/local/lib/engine-hooks.sh"
+    exit 1
+}
+missing=()
+for name in "${ENGINE_VARIABLES[@]}"; do
+    [ -n "${!name:-}" ] || missing+=("variable ${name}")
+done
+for name in "${ENGINE_HOOKS[@]}"; do
+    [ "$(type -t "${name}")" = function ] || missing+=("function ${name}")
+done
+if [ "${#missing[@]}" -gt 0 ]; then
+    bashio::log.error "engine-hooks.sh does not define: ${missing[*]}"
+    exit 1
+fi
+
+bashio::log.info "Initializing ${ENGINE_ADDON_NAME} add-on..."
+
+# --- Hold the ingress port while we initialize ---
+# Everything below takes time — the persistent home, authentication, the engine
+# version check — and the console cannot listen until it is done. Nothing
+# answering on the ingress port means Home Assistant's panel has nothing to
+# render, so a restart looked like a broken add-on instead of a busy one. This
+# answers from the first second with a page that says the console is starting;
+# it is stopped the moment before the console takes the port over.
+# Absolute path on purpose: this runs before PATH is set below, and the image's
+# node is the one that must serve it.
+CLAUDE_CONSOLE_PORT=8099 /usr/local/bin/node "${CONSOLE_DIR}/server/starting.js" &
+starting_pid=$!
+# If initialization exits early the placeholder must not outlive it and keep the
+# port from the console's next attempt.
+trap 'kill "${starting_pid}" 2>/dev/null || true' EXIT
+
+# --- Persistent HOME ---
+# Login state, sessions and updates live under /data/home, so they survive
+# restarts and add-on updates.
+mkdir -p /data/home
+engine_prepare_home
+
+export HOME=/data/home
+export PATH="${ENGINE_BIN_DIR}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+export TERM=xterm-256color
+export LANG=C.UTF-8
+engine_env
+
+engine_sync_from_image
+
+# --- Authentication ---
+engine_auth
+
+# --- Home Assistant access token (LLAT) ---
+# Persists across add-on updates (stored by the Supervisor). Feeds the browser
+# dashboard screenshots, hass-cli, hass-mcp, and direct WS/REST access as the
+# user. Exported under the several names those tools expect.
+# Read straight from options.json (no Supervisor API dependency).
+ha_token=$(jq -r '.ha_token // ""' /data/options.json 2>/dev/null || echo "")
+# Where Core actually listens. Hardcoding http://homeassistant:8123 breaks every
+# install that terminates TLS on Core itself or moved the port; the Supervisor
+# knows the answer and keeps it in sync with Core's HTTP config. Falls back to
+# the historic literal whenever it cannot be asked, so nothing changes for the
+# installs where the literal was already right.
+ha_core_scheme="http"
+ha_core_port="8123"
+if [ -n "${SUPERVISOR_TOKEN:-}" ]; then
+    ha_core_info=$(curl -fsSL -m 10 -H "Authorization: Bearer ${SUPERVISOR_TOKEN}" \
+        http://supervisor/core/info 2>/dev/null || echo "")
+    if [ -n "${ha_core_info}" ]; then
+        [ "$(echo "${ha_core_info}" | jq -r '.data.ssl // false')" = "true" ] && ha_core_scheme="https"
+        ha_core_port_reported=$(echo "${ha_core_info}" | jq -r '.data.port // empty')
+        case "${ha_core_port_reported}" in
+            ''|*[!0-9]*) ;;
+            *) ha_core_port="${ha_core_port_reported}" ;;
+        esac
+    fi
+fi
+export HA_URL="${ha_core_scheme}://homeassistant:${ha_core_port}"
+bashio::log.info "Home Assistant Core at ${HA_URL}"
+if [ -n "${ha_token}" ]; then
+    export HA_TOKEN="${ha_token}"
+    export HASS_TOKEN="${ha_token}"
+    export HASS_SERVER="${HA_URL}"
+    bashio::log.info "HA Token configured (dashboard screenshots + HA tools enabled)"
+fi
+
+# `ha` (Supervisor CLI) reads SUPERVISOR_API_TOKEN, but the runtime injects
+# SUPERVISOR_TOKEN — bridge the two so `ha ...` works with zero prep.
+if [ -n "${SUPERVISOR_TOKEN:-}" ]; then
+    export SUPERVISOR_API_TOKEN="${SUPERVISOR_TOKEN}"
+fi
+
+# --- Model override ---
+engine_model
+
+# --- Auto-update on startup ---
+if bashio::config.true 'auto_update'; then
+    engine_update
+else
+    engine_update_disabled
+fi
+
+# --- User environment variables (KEY=VALUE, one per entry) ---
+while IFS= read -r env_entry; do
+    [ -n "${env_entry}" ] || continue
+    key="${env_entry%%=*}"
+    val="${env_entry#*=}"
+    if [ -n "${key}" ] && [ "${key}" != "${env_entry}" ]; then
+        export "${key}=${val}"
+        bashio::log.info "Custom env: ${key}"
+    else
+        bashio::log.warning "Ignoring malformed environment_vars entry (expected KEY=VALUE): ${env_entry}"
+    fi
+done < <(config_list environment_vars)
+
+# --- Working directory, engine settings and instructions ---
+mkdir -p /data/workdir /data/uploads
+engine_provision
+
+instructions="/data/workdir/${ENGINE_INSTRUCTIONS_FILE}"
+cp "${ENGINE_INSTRUCTIONS_SOURCE}" "${instructions}"
+
+custom=$(bashio::config 'custom_instructions')
+if bashio::var.has_value "${custom}"; then
+    printf "\n\n---\n\n# User Custom Instructions\n\n%s\n" "${custom}" \
+        >> "${instructions}"
+fi
+
+if [ -d /homeassistant ] && [ -w /homeassistant ] && [ ! -f "/homeassistant/${ENGINE_INSTRUCTIONS_FILE}" ]; then
+    cp "${instructions}" "/homeassistant/${ENGINE_INSTRUCTIONS_FILE}"
+fi
+
+# --- Init commands ---
+# Only the first word is logged — init commands may embed credentials.
+while IFS= read -r cmd; do
+    [ -n "${cmd}" ] || continue
+    bashio::log.info "Running init command: ${cmd%% *} ..."
+    eval "${cmd}" 2>&1 \
+        || bashio::log.warning "Init command failed: ${cmd%% *}"
+done < <(config_list init_commands)
+
+# --- Provision bundled + user-declared extras (skills, plugins, MCP) ---
+# Runs in the background so it never delays the console. Idempotent: only
+# missing pieces install, and it persists in /data across restarts/updates.
+{
+    CC_USER_MARKETPLACES="$(jq -r '(.marketplaces // [])[]' /data/options.json 2>/dev/null)" \
+    CC_USER_PLUGINS="$(jq -r '(.plugins // [])[]' /data/options.json 2>/dev/null)" \
+    CC_SKILLS_GIT="$(jq -r '.skills_git // ""' /data/options.json 2>/dev/null)" \
+    HA_TOKEN="${HA_TOKEN:-}" HA_URL="${HA_URL}" \
+    /usr/local/bin/provision-extras
+} >/data/provision.log 2>&1 &
+
+bashio::log.info "Initialization complete (provisioning extras in background — see /data/provision.log)"
+
+# ==============================
+# Phase 2: Start web console
+# ==============================
+
+# Set AFTER user environment_vars: these are authoritative and must not be
+# overridable from the config (CLAUDE_CONSOLE_DEV would disable the IP guard).
+# Read straight from options.json — independent of bashio internals.
+export CLAUDE_CONSOLE_PORT=8099
+export CLAUDE_CONSOLE_DEV=0
+export UPLOAD_DIR=/data/uploads
+export UPLOAD_RETENTION_DAYS=$(jq -r '.upload_retention_days // 14' /data/options.json 2>/dev/null || echo 14)
+engine_console_env
+
+# Prompt API — same authoritative treatment (CLAUDE_PROMPT_DEV would disable its
+# IP guard; the BIN path must not be redirectable via user env vars).
+export CLAUDE_PROMPT_PORT=8126
+export CLAUDE_PROMPT_DEV=0
+export CLAUDE_PROMPT_DATA=/data
+export CLAUDE_PROMPT_OPTIONS=/data/options.json
+export CLAUDE_PROMPT_BIN="${ENGINE_PROMPT_BIN}"
+export CLAUDE_PROMPT_USAGE_BIN=/usr/local/bin/ha-usage
+# Prompt runs read no settings files, so whatever the console gets from its
+# settings is handed to them explicitly. An engine that restricts prompt runs
+# through its command line instead prints nothing. Assigned before the export,
+# so a failing hook ends the start instead of passing on an empty value.
+CLAUDE_PROMPT_SETTINGS="$(engine_prompt_settings)"
+export CLAUDE_PROMPT_SETTINGS
+# NOT set: the prompt server derives Core's address itself and puts a loopback
+# relay in front of it (see app/server/prompt/core-target.js). Unset here, after
+# user environment_vars are applied, so the destination the HA token is sent to
+# still cannot come from the add-on configuration.
+unset CLAUDE_PROMPT_HA_MCP_URL
+# Time-based fallback (not a fixed "unknown") so asset cache-busting still gets a
+# fresh key if bashio::app.version ever fails — a fixed string would freeze the
+# cache key and defeat busting for the whole outage.
+export ADDON_VERSION="$(bashio::app.version 2>/dev/null || echo "unknown-$(date +%s)")"
+
+# --- Proactive monitoring (opt-in via monitoring_interval_hours > 0) ---
+# Periodically asks the agent to review the HA error log/config and pushes a
+# short summary via ha-notify only if it finds something. Spends plan usage —
+# off by default. Inherits SUPERVISOR_TOKEN / HA_NOTIFY_SERVICE / HOME from this scope.
+monitor_hours=$(jq -r '.monitoring_interval_hours // 0' /data/options.json 2>/dev/null || echo 0)
+if [ "${monitor_hours}" -gt 0 ] 2>/dev/null; then
+    bashio::log.info "Proactive monitoring enabled (every ${monitor_hours}h)"
+    CLAUDE_MONITOR_HOURS="${monitor_hours}" nohup /usr/local/bin/cc-monitor >/data/monitor.log 2>&1 &
+fi
+
+# --- Morning digest (opt-in via daily_digest_time = "HH:MM") ---
+# Once a day, the agent sends a short friendly briefing (weather + heads-ups) via
+# ha-notify. Same injection-safe posture as the monitor. Spends plan usage once/day.
+digest_time=$(jq -r '.daily_digest_time // ""' /data/options.json 2>/dev/null || echo "")
+if [ -n "${digest_time}" ]; then
+    bashio::log.info "Morning digest enabled (${digest_time})"
+    CLAUDE_DIGEST_TIME="${digest_time}" nohup /usr/local/bin/cc-digest >/data/digest.log 2>&1 &
+fi
+
+# --- Proactive anomaly alerts (opt-in via proactive_alerts = true) ---
+# Deterministic bash + jq loop (no agent call, no plan usage): fetches HA states
+# and notifies via ha-notify when an entity NEWLY hits a rule (low battery, water
+# leak, door open at night, temperature out of band). Off by default.
+if [ "$(jq -r '.proactive_alerts // false' /data/options.json 2>/dev/null || echo false)" = "true" ]; then
+    alerts_interval=$(jq -r '.proactive_alerts_interval_minutes // 15' /data/options.json 2>/dev/null || echo 15)
+    bashio::log.info "Proactive alerts enabled (every ${alerts_interval}m)"
+    CC_ALERTS_INTERVAL_MINUTES="${alerts_interval}" nohup /usr/local/bin/cc-alerts >/data/alerts.log 2>&1 &
+else
+    # Off: drop the loop's state. Its active-key list is also the "already notified"
+    # memory, so keeping it would silence an anomaly that is still (or again) active
+    # when alerts are switched back on.
+    rm -f /data/alerts-state.json
+fi
+
+# Hand the port over: stop the placeholder and wait for it to actually exit, so
+# the console's bind cannot race a socket that is still held.
+kill "${starting_pid}" 2>/dev/null || true
+wait "${starting_pid}" 2>/dev/null || true
+trap - EXIT
+
+bashio::log.info "Starting ${ENGINE_CONSOLE_NAME} on port ${CLAUDE_CONSOLE_PORT}..."
+exec node "${CONSOLE_DIR}/server/index.js"
