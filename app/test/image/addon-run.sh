@@ -31,7 +31,8 @@ cat > /usr/local/bin/provision-extras <<'EOF'
 #!/bin/bash
 echo "plugins=${CC_USER_PLUGINS} skills=${CC_SKILLS_GIT} ha_url=${HA_URL}" > /pins/provision.out
 EOF
-chmod +x /usr/local/bin/node /usr/local/bin/provision-extras
+printf '#!/bin/bash\ncat\n' > /usr/local/bin/agent-ask
+chmod +x /usr/local/bin/node /usr/local/bin/provision-extras /usr/local/bin/agent-ask
 mkdir -p /usr/share/neutral
 printf 'Neutral instructions.\n' > /usr/share/neutral/AGENTS.md
 
@@ -163,6 +164,14 @@ for omit in engine_provision engine_prompt_settings ENGINE_PROMPT_BIN ENGINE_INS
     [ -e "${P}/node.log" ] && bad "without ${omit}: nothing started" || ok "without ${omit}: nothing started"
     [ -e "${P}/hooks.log" ] && bad "without ${omit}: no hook ran" || ok "without ${omit}: no hook ran"
 done
+engine_hooks
+chmod -x /usr/local/bin/agent-ask
+options '{}'
+run_service
+eq "without an executable agent-ask: exits 1" "${STATUS}" 1
+contains "without an executable agent-ask: names it" "${P}/run.out" "command /usr/local/bin/agent-ask"
+[ -e "${P}/node.log" ] && bad "without agent-ask: nothing started" || ok "without agent-ask: nothing started"
+chmod +x /usr/local/bin/agent-ask
 rm -f /usr/local/lib/engine-hooks.sh
 options '{}'
 run_service
