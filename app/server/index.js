@@ -9,9 +9,10 @@ const tmux = require('./tmux');
 const { createRouter } = require('./api');
 const terminal = require('./terminal');
 const promptServer = require('./prompt');
-const { stampAssetVersion } = require('./shell');
+const { pageValues } = require('./pages');
+const { loadConsoleAssets, mountConsoleAssets } = require('./console-assets');
 const sources = require('./sources');
-const { adapter, branding } = require('./adapter-contract');
+const { adapter, branding, theme } = require('./adapter-contract');
 
 const PORT = Number(process.env.CLAUDE_CONSOLE_PORT || 8099);
 const UPLOAD_DIR = process.env.UPLOAD_DIR || '/data/uploads';
@@ -51,39 +52,16 @@ const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 // fresh shell always fetches matching assets while an unchanged version still
 // hits cache.
 const ASSET_VERSION = process.env.ADDON_VERSION || String(Date.now());
-const INDEX_HTML = path.join(PUBLIC_DIR, 'index.html');
 
-async function serveIndex(req, res) {
-  let html;
-  try {
-    html = await fsp.readFile(INDEX_HTML, 'utf8');
-  } catch (err) {
-    console.error('serveIndex: failed to read index.html:', err.message);
-    res.status(500).send('index unavailable');
-    return;
-  }
-  res.setHeader('Cache-Control', 'no-store');
-  res.type('html').send(stampAssetVersion(html, ASSET_VERSION));
-}
-app.get(['/', '/index.html'], serveIndex);
-
-app.use(express.static(PUBLIC_DIR, {
-  index: 'index.html',
-  maxAge: '1h',
-  setHeaders(res, filePath) {
-    // The HTML app-shell must never be cached behind HA ingress. Ingress serves
-    // it Content-Encoding: deflate WITHOUT Vary and adds X-Content-Type-Options:
-    // nosniff; if the browser replays a stale cached copy, Safari/WebKit can't
-    // re-inflate it and — with nosniff blocking any fallback — DOWNLOADS the
-    // document instead of rendering it, leaving the ingress iframe blank (endless
-    // spinner). A restart/auto-update just refreshes that poisoned entry, so a
-    // page reload never recovers. Assets keep their long cache; only the entry
-    // document is forced to revalidate every load.
-    if (filePath.endsWith('.html')) {
-      res.setHeader('Cache-Control', 'no-store');
-    }
-  },
-}));
+// The pages carry the engine's names and colours, filled in here once; the
+// icons are the add-on's. Either failing stops the start (console-assets.js).
+const consoleAssets = loadConsoleAssets({
+  templateDir: path.join(__dirname, '..', 'templates'),
+  publicDir: PUBLIC_DIR,
+  iconDir: path.join(__dirname, '..', 'adapter', 'icons'),
+  values: pageValues({ branding: branding(), theme: theme(), console: adapter().console }),
+});
+mountConsoleAssets(app, consoleAssets, { assetVersion: ASSET_VERSION });
 
 // Vendor assets served straight from installed packages
 const VENDOR = {

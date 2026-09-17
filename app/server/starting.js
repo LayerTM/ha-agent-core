@@ -14,36 +14,47 @@
 // the console, and the page's own poll of /api/health carries it across: 503
 // while this is what is listening, 200 once the console is.
 //
-// Deliberately dependency-free (node:http, two file reads): it must be able to
-// start before anything else in the add-on is ready, including npm's opinion of
-// whether node_modules is intact, and it never loads the adapter's code.
+// Deliberately dependency-free (node:http and a few file reads): it must be able
+// to start before anything else in the add-on is ready, including npm's opinion
+// of whether node_modules is intact, and it never loads the adapter's code. The
+// adapter's names and colours are data, read as such.
 
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const sources = require('./sources');
 const { readBranding } = require('./branding');
+const { NEUTRAL, readTheme } = require('./theme');
+const { pageValues, renderPage } = require('./pages');
 
 const PORT = Number(process.env.CLAUDE_CONSOLE_PORT || 8099);
 const DEV = process.env.CLAUDE_CONSOLE_DEV === '1';
-const PAGE_FILE = path.join(__dirname, '..', 'public', 'starting.html');
+const PAGE_FILE = path.join(__dirname, '..', 'templates', 'starting.html');
 
-// Read once, at boot. If it cannot be read the placeholder still answers —
+// Read and rendered once, at boot. If that fails the placeholder still answers —
 // a plain sentence beats an unexplained blank panel, which is the whole point.
+let names = null;
+try {
+  names = readBranding();
+} catch (err) {
+  console.error(`${err.message}; the page has no product name`);
+}
+let colours = NEUTRAL;
+try {
+  colours = readTheme();
+} catch (err) {
+  console.error(`${err.message}; the page uses the neutral colours`);
+}
+
 let page;
 try {
-  page = fs.readFileSync(PAGE_FILE, 'utf8');
+  if (!names) throw new Error('no names to render it with');
+  page = renderPage(fs.readFileSync(PAGE_FILE, 'utf8'), 'starting.html', pageValues({ branding: names, theme: colours }));
 } catch (err) {
   console.error(`starting page unavailable (${err.message}); serving plain text`);
-  // A branding name needs no escaping (branding.js).
-  let title = 'Starting…';
-  try {
-    title = readBranding().productName;
-  } catch (brandingErr) {
-    console.error(`${brandingErr.message}; the page has no product name`);
-  }
-  page = `<!DOCTYPE html><meta charset="utf-8"><title>${title}</title>`
-    + '<body style="background:#14141a;color:#ede9e0;font-family:system-ui;padding:24px">'
+  // A branding name and a colour need no escaping (branding.js, theme.js).
+  page = `<!DOCTYPE html><meta charset="utf-8"><title>${names ? names.productName : 'Starting…'}</title>`
+    + `<body style="background:${colours.ui.bg};color:${colours.ui.fg};font-family:system-ui;padding:24px">`
     + 'Starting the console…</body>';
 }
 

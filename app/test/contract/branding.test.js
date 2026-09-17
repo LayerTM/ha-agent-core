@@ -14,7 +14,9 @@ const { KEYS, validateBranding, readBranding } = require('../../server/branding'
 const { NEUTRAL_BRANDING } = require('../fixtures/neutral-adapter');
 
 const SERVER = path.join(__dirname, '..', '..', 'server');
-const CLAUDE = { productName: 'Claude Code', consoleName: 'Claude Console', agentName: 'Claude' };
+const CLAUDE = {
+  productName: 'Claude Code', consoleName: 'Claude Console', agentName: 'Claude', cliName: 'Claude CLI', tabGlyph: '✳',
+};
 
 function tmpDir(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'core-branding-'));
@@ -23,7 +25,7 @@ function tmpDir(t) {
 }
 
 test('the key set is closed and every key is required', () => {
-  assert.deepEqual(Object.keys(KEYS), ['productName', 'consoleName', 'agentName']);
+  assert.deepEqual(Object.keys(KEYS), ['productName', 'consoleName', 'agentName', 'cliName', 'tabGlyph']);
   assert.deepEqual(validateBranding(NEUTRAL_BRANDING), NEUTRAL_BRANDING);
   assert.deepEqual(validateBranding(CLAUDE), CLAUDE);
   for (const key of Object.keys(KEYS)) {
