@@ -98,6 +98,7 @@ the answer is nullable there, and a `null` for it is treated as absent.
 
   A report with any other entry is not published. Reports are cached for five minutes per `key`, the credential the report belongs to; only a hash of it is kept.
 - **Cost.** Without `descriptor.reportsCost`:
+  - no spend is counted;
   - `GET /api/status` has no `budget`;
   - audit lines say `cost=unknown`;
   - a non-zero `chat_daily_budget_usd` keeps the prompt API from starting instead of pretending to enforce it.
