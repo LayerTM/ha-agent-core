@@ -6,6 +6,14 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- The console pages (`app/templates/`): the terminal page, the startup page,
+  its script, style sheet and web app manifest, with the engine's names and
+  colours as placeholders. An add-on no longer ships them.
+- The terminal font, JetBrains Mono 5.3.0 (OFL-1.1), as an installed package
+  served under `fonts/`; an add-on no longer downloads it.
+
 ### Changed
 
 - The start lines of the console, the startup placeholder and the prompt

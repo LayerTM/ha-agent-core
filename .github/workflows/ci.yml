@@ -128,7 +128,7 @@ jobs:
       - name: The archive carries the core and nothing of its tests
         run: |
           i="$RUNNER_TEMP/installed"
-          for f in app/server/adapter-contract.js app/server/prompt/server.js app/package-lock.json \
+          for f in app/server/adapter-contract.js app/server/prompt/server.js app/package-lock.json app/templates/index.html \
                    ha-tools/package-lock.json rootfs/usr/local/bin/cc-alerts \
                    app/install-scripts.json tools/verify-core.js tools/check-adapter-graph.js \
                    tools/build-allowed-packages.js tools/check-install-scripts.js tools/npm-ci-checked.sh \

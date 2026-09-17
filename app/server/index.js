@@ -66,21 +66,6 @@ const consoleAssets = loadConsoleAssets({
 });
 mountConsoleAssets(app, consoleAssets, { assetVersion: ASSET_VERSION });
 
-// Vendor assets served straight from installed packages
-const VENDOR = {
-  '/vendor/xterm.js': '@xterm/xterm/lib/xterm.js',
-  '/vendor/xterm.css': '@xterm/xterm/css/xterm.css',
-  '/vendor/addon-fit.js': '@xterm/addon-fit/lib/addon-fit.js',
-  '/vendor/addon-unicode11.js': '@xterm/addon-unicode11/lib/addon-unicode11.js',
-  '/vendor/addon-web-links.js': '@xterm/addon-web-links/lib/addon-web-links.js',
-  '/vendor/addon-search.js': '@xterm/addon-search/lib/addon-search.js',
-  '/vendor/addon-webgl.js': '@xterm/addon-webgl/lib/addon-webgl.js',
-};
-for (const [route, mod] of Object.entries(VENDOR)) {
-  const file = require.resolve(mod);
-  app.get(route, (req, res) => res.sendFile(file, { maxAge: '1d' }));
-}
-
 app.use('/api', createRouter({ uploadDir: UPLOAD_DIR, viewerCount: terminal.viewerCount }));
 
 const server = http.createServer(app);

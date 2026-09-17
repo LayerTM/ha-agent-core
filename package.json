@@ -19,6 +19,7 @@
     "package.json",
     "package-lock.json",
     "app/server/",
+    "app/templates/",
     "app/package.json",
     "app/package-lock.json",
     "app/install-scripts.json",
