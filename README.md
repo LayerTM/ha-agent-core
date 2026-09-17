@@ -17,7 +17,8 @@ is unpacked or executed.
 
 An add-on assembles its image from this tree plus its own files, in the same
 layout: its engine adapter goes to `app/adapter/`, its console frontend to
-`app/public/`, its own scripts next to the core's under `rootfs/`.
+`app/public/`, its own scripts next to the core's under `rootfs/`. The `app/`
+tree is installed at `/opt/agent-console`.
 
 ## The engine adapter
 
@@ -150,6 +151,50 @@ tree: it reads every file under `server/` and `adapter/`, follows only
 `Function`, the `vm` and `module` built-ins, `.mjs` and `.node` files, local
 requires of anything but `.js`, `.cjs` or `.json`, or outside those two
 directories), and reports cycles.
+
+## The start script
+
+`rootfs/usr/local/bin/addon-run` is the add-on's single longrun service; the
+add-on's s6 `run` script is `exec /usr/local/bin/addon-run`. It holds the
+ingress port with the startup placeholder, prepares `/data`, resolves Home
+Assistant Core, applies `environment_vars` and `init_commands`, writes the
+instructions file, starts provisioning, the monitor, the digest and the alerts
+loop, and then runs the console from `/opt/agent-console`.
+
+Everything engine-specific comes from the add-on: `productName` and
+`consoleName` from its `app/adapter/branding.json` (the first and the last log
+line), everything else from its `/usr/local/lib/engine-hooks.sh`. The script
+refuses to start, before anything runs, unless both names are non-empty
+strings and the hooks file defines every variable and function below.
+
+| variable | meaning |
+|---|---|
+| `ENGINE_BIN_DIR` | the directory put first on `PATH` |
+| `ENGINE_PROMPT_BIN` | the agent executable of the prompt API (`CLAUDE_PROMPT_BIN`) |
+| `ENGINE_INSTRUCTIONS_SOURCE` | the bundled instructions file |
+| `ENGINE_INSTRUCTIONS_FILE` | its name in `/data/workdir` and, when absent there, `/homeassistant` |
+
+The functions are called in this order; each may log and export variables.
+
+| function | called |
+|---|---|
+| `engine_prepare_home` | after `/data/home` is created, before `HOME` points at it |
+| `engine_env` | after `HOME`, `PATH`, `TERM` and `LANG` are set |
+| `engine_sync_from_image` | next |
+| `engine_auth` | next |
+| `engine_model` | after Home Assistant Core is resolved |
+| `engine_update` or `engine_update_disabled` | as the `auto_update` option says |
+| `engine_provision` | after `environment_vars`, once `/data/workdir` and `/data/uploads` exist |
+| `engine_console_env` | with the console's environment |
+| `engine_prompt_settings` | prints `CLAUDE_PROMPT_SETTINGS`; an engine that restricts prompt runs on its command line prints nothing |
+
+The script runs with `errexit`, `nounset` and `pipefail`, inherited by
+command substitutions, and calls every hook as a plain command: a failing step
+anywhere in a hook ends the start, the log names the hook, and the placeholder
+is stopped. The variables
+the script sets for the console after `environment_vars` (ports, `*_DEV`,
+`CLAUDE_PROMPT_BIN`, the unset `CLAUDE_PROMPT_HA_MCP_URL`) cannot be changed
+from the options.
 
 ## Install scripts
 
@@ -320,7 +365,7 @@ node tools/pack.js --out dist
 
 ## Development
 
-Requires Node.js 22 or later (CI uses Node.js 26), Python 3, bash, jq and a C/C++ toolchain for node-gyp where node-pty has no prebuild.
+Requires Node.js 22 or later (CI uses Node.js 26), Python 3, bash, jq, Docker (for `test:addon-run`, which runs the start script in the add-on base image, `app/test/image/Dockerfile`) and a C/C++ toolchain for node-gyp where node-pty has no prebuild.
 
 The tests in `app/test/contract/` run the prompt API and the console against a
 neutral test adapter (`app/test/fixtures/neutral-adapter.js`) that records what
@@ -331,7 +376,7 @@ tools/npm-ci-checked.sh
 npm test
 npm run lint
 npm run typecheck
-(cd app && ../tools/npm-ci-checked.sh && npm test && npm run test:alerts && npm run test:config && npm run lint && npm run typecheck)
+(cd app && ../tools/npm-ci-checked.sh && npm test && npm run test:alerts && npm run test:config && npm run test:addon-run && npm run lint && npm run typecheck)
 python .github/scripts/secret_scan.py .
 python .github/scripts/hygiene_scan.py .
 ```

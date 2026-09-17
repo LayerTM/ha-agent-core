@@ -6,6 +6,15 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `rootfs/usr/local/bin/addon-run`, the add-on's start script. The engine
+  provides its names in `app/adapter/branding.json` and its paths and start-up
+  steps in `/usr/local/lib/engine-hooks.sh`; the script checks that every one is
+  defined before it starts anything.
+  An empty `engine_prompt_settings` is valid. The console runs from
+  `/opt/agent-console`.
+
 ## [0.3.0]
 
 ### Added

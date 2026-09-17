@@ -41,6 +41,15 @@ updates:
       npm-app:
         patterns: ["*"]
 
+  # The add-on base image the start script is tested in.
+  - package-ecosystem: docker
+    directory: "/app/test/image"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "deps"
+    labels: ["dependencies"]
+
   # The screenshot helper, a separate manifest and lockfile.
   - package-ecosystem: npm
     directory: "/ha-tools"
