@@ -8,6 +8,11 @@ uses [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- The start lines of the console, the startup placeholder and the prompt
+  server name the address as well as the port: `listening on <address>:<port>`,
+  with an IPv6 address in brackets (`listening on [::]:8099`). Before, they read
+  `listening on :<port>`. `CLAUDE_CONSOLE_HOST` and `CLAUDE_PROMPT_HOST` choose
+  the address; without them the servers listen where they did before.
 - Adapter API 5: the console pages move to `app/templates/` and carry the
   engine's names and colours as placeholders, filled in once when the console
   starts; only the rendered pages are served. `app/public/` may no longer hold
