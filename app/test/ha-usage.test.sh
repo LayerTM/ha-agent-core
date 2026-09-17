@@ -456,8 +456,116 @@ check "after 1 GB already counted, a call reads only the appended bytes" "$(cach
 check "and counts them" "$(printf '%s' "${out}" | jq -r '.by_model_recent.big.input // .tokens.all_time.input')" 5
 rm -f "${big}"
 
-if [ "${ran}" -lt 70 ]; then
-    echo "FAIL: only ${ran} ha-usage assertions ran — expected at least 70"
+echo "ha-usage --maintain — the daily upkeep"
+# aged <file> <days>: its modification time moved back (portable, a link itself not followed).
+aged() { python3 -c 'import os, sys, time; t = time.time() - int(sys.argv[2]) * 86400; os.utime(sys.argv[1], (t, t), follow_symlinks=False)' "$1" "$2"; }
+md_="${work}/m"; mkdir -p "${md_}/s"
+: > "${md_}/claude-audit.log"
+OLD="${md_}/s/old.jsonl"; NEW="${md_}/s/new.jsonl"; LINKED="${md_}/s/linked.jsonl"
+maintain() { : > "${work}/calls"; CC_USAGE_AGENT_CMD="${work}/agent-usage" USAGE_CALLS="${work}/calls" USAGE_STATES="${work}/states" \
+    USAGE_LINES="${OLD}" USAGE_MORE="${MORE-${NEW}}" USAGE_SOURCE=x USAGE_RC="${USAGE_RC:-0}" CC_AUDIT_DATA_DIR="${md_}" \
+    CC_USAGE_AUDIT_ROTATE_BYTES="${ROTATE:-16777216}" python3 "${bin}" --maintain "$@"; }
+mreport() { DATA="${md_}" USAGE_LINES="${OLD}" USAGE_MORE="${MORE-${NEW}}" report --json; }
+usage 1 0 0 0 m > "${OLD}"
+usage 2 0 0 0 m > "${NEW}"
+check "counted before the upkeep" "$(input "$(mreport)")" 3
+usage 4 0 0 0 m >> "${OLD}"
+aged "${OLD}" 40
+out="$(maintain 30)"
+check "the upkeep runs" "$?" 0
+check "it says what it did" "${out}" "usage upkeep: read $(( ${#line} * 0 + $(usage 4 0 0 0 m | wc -c) )) bytes, audit log rotated: no, transcripts older than 30 days deleted: 1"
+[ -e "${OLD}" ] && fail "a transcript not written to for 40 days is deleted" present absent || pass "a transcript not written to for 40 days is deleted"
+[ -e "${NEW}" ] && pass "a recent one is kept" || fail "a recent one is kept" absent present
+out="$(MORE="${NEW}" mreport)"
+check "and its usage, including what was appended just before, stays counted" "$(input "${out}")" 7
+check "without a history reset" "$(printf '%s' "${out}" | jq -c 'has("history_reset")')" false
+
+rm -f "${OLD}"; usage 8 0 0 0 m > "${OLD}"; aged "${OLD}" 40
+check "0 days: the upkeep runs" "$(maintain 0 > /dev/null; echo $?)" 0
+[ -e "${OLD}" ] && pass "and deletes nothing" || fail "and deletes nothing" absent present
+check "a reader that fails: the upkeep says so" "$(USAGE_RC=1 maintain 30 > "${work}/mout"; echo $?)" 1
+contains_=$(cat "${work}/mout")
+case "${contains_}" in *"not deleting anything: agent-usage exited 1"*) pass "and deletes nothing, saying why" ;; *) fail "and deletes nothing, saying why" "${contains_}" "not deleting anything" ;; esac
+[ -e "${OLD}" ] && pass "the old transcript is still there" || fail "the old transcript is still there" absent present
+check "an engine that reports no usage: the upkeep runs" "$(USAGE_RC=3 maintain 30 > /dev/null; echo $?)" 0
+[ -e "${OLD}" ] && pass "and deletes nothing it has not read" || fail "and deletes nothing it has not read" absent present
+
+printf 'target\n' > "${md_}/target"; ln -s "${md_}/target" "${LINKED}"
+aged "${LINKED}" 40
+MORE="${LINKED}" maintain 30 > /dev/null
+[ -e "${md_}/target" ] && [ -L "${LINKED}" ] && pass "a listed link is never deleted, nor what it points to" || fail "a listed link is never deleted" gone kept
+
+check "a file left out of one listing and listed again is not counted twice" "$(input "$(MORE="${NEW}" mreport)")" 15
+check "and while it was left out, its days still counted" "$(input "$(MORE="${LINKED}" mreport)")" 15
+printf '%s 10:00:01  prompt[read] caller=a status=200 tokens=chat:1000:0:0:0 cost=$0.2500\n' "${today}" >> "${md_}/claude-audit.log"
+big_before="$(wc -c < "${md_}/claude-audit.log")"
+out="$(ROTATE=10 MORE="${NEW}" maintain 30)"
+check "an audit log above the limit is rotated" "$(printf '%s' "${out}" | grep -c 'audit log rotated: yes')" 1
+check "to .1, whole" "$(wc -c < "${md_}/claude-audit.log.1")" "${big_before}"
+[ -e "${md_}/claude-audit.log" ] && fail "a new log is left to the writers" present absent || pass "a new log is left to the writers"
+out="$(MORE="${NEW}" mreport)"
+check "the rotated log's usage stays counted" "$(printf '%s' "${out}" | jq -c '[.tokens.all_time.input, .prompt_api_cost_usd.total]')" '[1015,0.25]'
+printf '%s 10:00:02  prompt[read] caller=a status=200 tokens=chat:5:0:0:0 cost=$0.0100\n' "${today}" > "${md_}/claude-audit.log"
+printf 'x%.0s' $(seq 1 20) >> "${md_}/claude-audit.log.1"
+out="$(MORE="${NEW}" mreport)"
+check "the new log counts, the old .1 is not read again" "$(printf '%s' "${out}" | jq -c '[.tokens.all_time.input, .prompt_api_cost_usd.total]')" '[1020,0.26]'
+cat > "${work}/race.py" <<'PY'
+import json, os, runpy, sys
+ha, data, day = sys.argv[1:4]
+os.environ["CC_AUDIT_DATA_DIR"] = data
+m = runpy.run_path(ha)
+g = m["_rotate_audit"].__globals__
+log = g["AUDIT_LOG"]
+g["AUDIT_ROTATE_BYTES"] = 10
+cache = m["_load"]()
+cache["last_read_bytes"] = 0
+m["_read_audit"](cache, 1e18)
+real = os.replace
+def racing(a, b):
+    # A writer appends between the count and the move.
+    if a == log:
+        with open(log, "a") as fh:
+            fh.write(f"{day} 10:00:03  prompt[read] caller=a status=200 tokens=late:7:0:0:0 cost=$0.0000\n")
+    return real(a, b)
+g["os"].replace = racing
+m["_rotate_audit"](cache, 1e18)
+g["os"].replace = real
+days = {}
+for src in [*cache["sources"].values(), *cache["parked"].values()]:
+    if src["kind"] == "audit":
+        for d, models in src["days"].items():
+            for model, row in models.items():
+                days[model] = days.get(model, 0) + row[0]
+print(days.get("late", 0))
+PY
+check "a line a writer adds just before the move is still counted, from .1" \
+    "$(python3 "${work}/race.py" "${bin}" "${md_}" "${today}")" 7
+rm -f "${md_}/claude-audit.log"
+python3 -c '
+import sys
+with open(sys.argv[1], "w") as fh:
+    fh.write("q" * (33 * 1024 * 1024) + "\n")
+' "${md_}/claude-audit.log"
+rm -f "${OLD}"; usage 1 0 0 0 m > "${OLD}"; aged "${OLD}" 40
+out="$(MORE="${NEW}" maintain 30)"
+check "an audit log that cannot be read: the upkeep says so" "$?:$(printf '%s' "${out}" | grep -c 'not deleting anything: audit log')" "1:1"
+[ -e "${OLD}" ] && pass "and deletes no transcript" || fail "and deletes no transcript" absent present
+rm -f "${md_}/claude-audit.log"
+check "a DAYS that is not a number is refused" "$(python3 "${bin}" --maintain soon 2>/dev/null; echo $?)" 64
+
+echo "usage-upkeep — the loop"
+upkeep="${repo}/rootfs/usr/local/bin/usage-upkeep"
+printf '#!/bin/bash\nprintf "%%s\\n" "$*" >> "%s"\n' "${work}/upkeep-calls" > "${work}/ha-usage-rec"; chmod +x "${work}/ha-usage-rec"
+: > "${work}/upkeep-calls"
+CC_USAGE_CMD="${work}/ha-usage-rec" USAGE_SWEEP_DAYS=9 USAGE_UPKEEP_FIRST_S=0 USAGE_UPKEEP_INTERVAL_S=1 bash "${upkeep}" > /dev/null &
+loop=$!
+sleep 1.5; kill "${loop}"; wait "${loop}" 2>/dev/null
+check "it runs the upkeep at once and then every interval, with the sweep days" "$(sort -u "${work}/upkeep-calls")" "--maintain 9"
+check "more than once" "$(( $(wc -l < "${work}/upkeep-calls") >= 2 ))" 1
+check "a sweep that is not a number stops it" "$(USAGE_SWEEP_DAYS=x bash "${upkeep}" 2>/dev/null; echo $?)" 64
+
+if [ "${ran}" -lt 95 ]; then
+    echo "FAIL: only ${ran} ha-usage assertions ran — expected at least 95"
     exit 1
 fi
 if [ "${fails}" -eq 0 ]; then

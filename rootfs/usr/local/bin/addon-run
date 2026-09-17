@@ -41,6 +41,8 @@ ENGINE_HOOKS=(
     engine_provision        # after /data/workdir exists: engine settings and dirs
     engine_console_env      # the console's engine options
     engine_prompt_settings  # prints the prompt API's settings; empty means none
+    engine_transcript_retention  # DAYS (0 = keep): sets the engine's own sweep and prints "native",
+                                 # or prints "core" to have the core delete old transcripts
 )
 
 # Shared config readers (config_list — see the file for why bashio::config
@@ -270,6 +272,29 @@ unset CLAUDE_PROMPT_HA_MCP_URL
 # fresh key if bashio::app.version ever fails — a fixed string would freeze the
 # cache key and defeat busting for the whole outage.
 export ADDON_VERSION="$(bashio::app.version 2>/dev/null || echo "unknown-$(date +%s)")"
+
+# --- Usage upkeep and transcript retention ---
+# Transcripts are kept transcript_retention_days (0 = forever). The engine sweeps
+# them itself where it can ("native"); otherwise the core's daily upkeep does
+# ("core"). Either way their usage stays counted (ha-usage keeps the totals).
+retention_days=$(jq -r '.transcript_retention_days // 30' /data/options.json 2>/dev/null || echo 30)
+case "${retention_days}" in
+    ''|*[!0-9]*)
+        bashio::log.warning "transcript_retention_days is not a whole number (${retention_days}); keeping 30"
+        retention_days=30 ;;
+esac
+current_hook=engine_transcript_retention
+retention_by="$(engine_transcript_retention "${retention_days}")"
+current_hook=""
+case "${retention_by}" in
+    native) sweep_days=0 ;;
+    core) sweep_days="${retention_days}" ;;
+    *)
+        bashio::log.error "engine_transcript_retention printed '${retention_by}', not 'native' or 'core'"
+        exit 1 ;;
+esac
+bashio::log.info "Transcripts kept ${retention_days} days (0 = forever), swept by the ${retention_by} side"
+USAGE_SWEEP_DAYS="${sweep_days}" nohup /usr/local/bin/usage-upkeep >/data/usage-upkeep.log 2>&1 &
 
 # --- Proactive monitoring (opt-in via monitoring_interval_hours > 0) ---
 # Periodically asks the agent to review the HA error log/config and pushes a

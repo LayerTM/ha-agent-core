@@ -38,6 +38,9 @@ cache.
 Usage:
     ha-usage [DAYS]          # recent window for the per-model breakdown (default 7)
     ha-usage --json [DAYS]   # the report /api/usage returns
+    ha-usage --maintain DAYS # daily upkeep: count, rotate the audit log above
+                             # 16 MB, delete the engine's transcripts not
+                             # written to for DAYS days (0 = none)
 """
 
 from __future__ import annotations
@@ -193,7 +196,8 @@ def _audit_line(line: str, days: dict) -> bool:
 # --- the cache --------------------------------------------------------------
 
 def _fresh() -> dict:
-    return {"version": CACHE_VERSION, "sources": {}, "retired": {k: {"days": {}, "cost_seen": False} for k in KINDS},
+    return {"version": CACHE_VERSION, "sources": {}, "parked": {},
+            "retired": {k: {"days": {}, "cost_seen": False} for k in KINDS},
             "history_reset": False, "last_read_bytes": 0}
 
 
@@ -211,13 +215,15 @@ def _valid(cache) -> bool:
         return False
     if not isinstance(cache.get("history_reset"), bool) or not isinstance(cache.get("sources"), dict):
         return False
+    if not isinstance(cache.get("parked"), dict):
+        return False
     retired = cache.get("retired")
     if not isinstance(retired, dict) or set(retired) != set(KINDS):
         return False
     if not all(isinstance(r, dict) and _valid_days(r.get("days")) and isinstance(r.get("cost_seen"), bool)
                for r in retired.values()):
         return False
-    for src in cache["sources"].values():
+    for src in [*cache["sources"].values(), *cache["parked"].values()]:
         if not (isinstance(src, dict) and src.get("kind") in KINDS and isinstance(src.get("path"), str)
                 and isinstance(src.get("offset"), int) and src["offset"] >= 0
                 and isinstance(src.get("fingerprint"), str) and _valid_days(src.get("days"))
@@ -333,6 +339,9 @@ def _track(cache: dict, kind: str, path: str) -> tuple[str, dict, int] | None:
     if not stat.S_ISREG(st.st_mode):
         return None
     sid = f"{kind}:{st.st_dev}:{st.st_ino}"
+    if sid in cache["parked"]:
+        # Listed again: carry on where it stopped (checked like any other).
+        cache["sources"][sid] = cache["parked"].pop(sid)
     src = cache["sources"].get(sid)
     try:
         if src is not None and (st.st_size < src["offset"]
@@ -348,13 +357,27 @@ def _track(cache: dict, kind: str, path: str) -> tuple[str, dict, int] | None:
     return sid, src, st.st_size
 
 
+def _still_there(src: dict, sid: str) -> bool:
+    """Whether the file this source counted is still at its path."""
+    try:
+        st = os.stat(src["path"])
+    except OSError:
+        return False
+    return sid.endswith(f":{st.st_dev}:{st.st_ino}")
+
+
 def _retire(cache: dict, kind: str, listed: set[str]) -> None:
-    """Sources of `kind` no longer listed: a file rewritten in place under the
-    same path (the new file starts as the old one did) is dropped, as the new
-    one is counted in full; any other keeps its days."""
+    """Sources of `kind` no longer listed. A file still at its path is parked:
+    its days count, and it carries on if it is listed again. A file rewritten
+    in place under the same path (the new file starts as the old one did) is
+    dropped, as the new one is counted in full. Any other keeps its days in the
+    history, for good."""
     by_path = {cache["sources"][sid]["path"]: sid for sid in listed}
     for sid in [s for s, src in cache["sources"].items() if src["kind"] == kind and s not in listed]:
         src = cache["sources"].pop(sid)
+        if _still_there(src, sid):
+            cache["parked"][sid] = src
+            continue
         successor = by_path.get(src["path"])
         if successor is not None:
             try:
@@ -362,9 +385,15 @@ def _retire(cache: dict, kind: str, listed: set[str]) -> None:
                     continue
             except OSError:
                 pass
-        retired = cache["retired"][kind]
-        _merge(retired["days"], src["days"])
-        retired["cost_seen"] = retired["cost_seen"] or src["cost_seen"]
+        _fold(cache, src)
+    for sid in [s for s, src in cache["parked"].items() if src["kind"] == kind and not _still_there(src, s)]:
+        _fold(cache, cache["parked"].pop(sid))
+
+
+def _fold(cache: dict, src: dict) -> None:
+    retired = cache["retired"][src["kind"]]
+    _merge(retired["days"], src["days"])
+    retired["cost_seen"] = retired["cost_seen"] or src["cost_seen"]
 
 
 def _advance(src: dict, path: str, end: int) -> None:
@@ -457,28 +486,30 @@ class _Parser:
             raise self._failed()
 
 
-def _read_audit(cache: dict, deadline: float) -> int:
+def _read_audit(cache: dict, deadline: float, path: str = AUDIT_LOG) -> int:
+    """Reads the audit log at `path`; any other audit source is retired."""
     read = 0
     listed = set()
-    tracked = _track(cache, "audit", AUDIT_LOG) if os.path.exists(AUDIT_LOG) else None
+    tracked = _track(cache, "audit", path) if os.path.exists(path) else None
     if tracked:
         sid, src, size = tracked
         listed.add(sid)
-        for end, lines in _chunks(AUDIT_LOG, src["offset"], size, deadline):
+        for end, lines in _chunks(path, src["offset"], size, deadline):
             for line in lines:
                 # A record ends at a newline only; a carriage return inside a
                 # recorded argument must not start a line that passes for ours.
                 if _audit_line(line, src["days"]):
                     src["cost_seen"] = True
             read += end - src["offset"]
-            _advance(src, AUDIT_LOG, end)
+            _advance(src, path, end)
     _retire(cache, "audit", listed)
     return read
 
 
-def _read_console(cache: dict, deadline: float) -> int:
-    """Reads the engine's files; raises NotReported or UsageError. Rounds that
-    finished stay in the cache even when a later one fails."""
+def _read_console(cache: dict, deadline: float) -> list[str]:
+    """Reads the engine's files and returns their paths; raises NotReported or
+    UsageError. Rounds that finished stay in the cache even when a later one
+    fails."""
     listing = _agent_usage(deadline, "--files")
     paths = []
     for p in listing.split("\0"):
@@ -517,7 +548,90 @@ def _read_console(cache: dict, deadline: float) -> int:
             parser.close()
     finally:
         cache["last_read_bytes"] = cache.get("last_read_bytes", 0) + read
-    return read
+    return [path for path, *_ in plans]
+
+
+# --- upkeep -----------------------------------------------------------------
+
+# The daily upkeep may take longer than a report; it runs in the background.
+MAINTAIN_TIMEOUT_S = int(os.environ.get("CC_USAGE_MAINTAIN_TIMEOUT_MS", "600000")) / 1000
+AUDIT_ROTATE_BYTES = int(os.environ.get("CC_USAGE_AUDIT_ROTATE_BYTES", str(16 * 1024 * 1024)))
+
+
+def _rotate_audit(cache: dict, deadline: float) -> bool:
+    """Moves an audit log above AUDIT_ROTATE_BYTES to .1, after counting it.
+    Lines a writer added before the move are read from .1; the log's days stay
+    in the cache when .1 is replaced next time."""
+    try:
+        if os.path.getsize(AUDIT_LOG) <= AUDIT_ROTATE_BYTES:
+            return False
+    except OSError:
+        return False
+    os.replace(AUDIT_LOG, AUDIT_LOG + ".1")
+    cache["last_read_bytes"] += _read_audit(cache, deadline, AUDIT_LOG + ".1")
+    # The new log, if a writer has started it; .1 is retired from here on.
+    cache["last_read_bytes"] += _read_audit(cache, deadline)
+    return True
+
+
+def _sweep(cache: dict, paths: list[str], days: int) -> list[str]:
+    """Deletes the engine's files not written to for `days` days; returns them.
+    Only regular files the engine listed are touched, never a link."""
+    cutoff = time.time() - days * 86400
+    removed = []
+    for path in paths:
+        try:
+            st = os.lstat(path)
+            if stat.S_ISREG(st.st_mode) and st.st_mtime < cutoff:
+                os.remove(path)
+                removed.append(path)
+        except OSError:
+            continue
+    kept = {sid for sid, src in cache["sources"].items() if src["kind"] == "console" and src["path"] not in removed}
+    _retire(cache, "console", kept)
+    return removed
+
+
+def maintain(days: int) -> int:
+    """The daily upkeep: count everything new, rotate a large audit log and,
+    with `days` > 0, delete the engine's files older than that. A file is only
+    deleted after a call that read every listed file without an error."""
+    if not os.path.isdir(DATA_DIR):
+        print(f"usage upkeep: {DATA_DIR} does not exist")
+        return 1
+    deadline = time.monotonic() + MAINTAIN_TIMEOUT_S
+    try:
+        lock = _lock(deadline)
+    except UsageError as err:
+        print(f"usage upkeep: {err}")
+        return 1
+    problem = None
+    rotated = False
+    removed: list[str] = []
+    try:
+        cache = _load()
+        cache["last_read_bytes"] = 0
+        try:
+            cache["last_read_bytes"] = _read_audit(cache, deadline)
+            rotated = _rotate_audit(cache, deadline)
+        except (OSError, UsageError) as err:
+            problem = f"audit log: {err}"
+        try:
+            paths = _read_console(cache, deadline)
+        except NotReported:
+            paths = []
+        except UsageError as err:
+            paths = None
+            problem = str(err)
+        if paths is not None and days > 0 and problem is None:
+            removed = _sweep(cache, paths, days)
+        _save(cache)
+    finally:
+        os.close(lock)
+    print(f"usage upkeep: read {cache['last_read_bytes']} bytes, audit log rotated: {'yes' if rotated else 'no'}, "
+          f"transcripts older than {days} days deleted: {len(removed)}"
+          + (f"; not deleting anything: {_clean(problem, 240)}" if problem else ""))
+    return 1 if problem else 0
 
 
 def collect_all():
@@ -557,7 +671,7 @@ def collect_all():
 
     console, audit = {}, {}
     seen = False
-    for src in cache["sources"].values():
+    for src in [*cache["sources"].values(), *cache["parked"].values()]:
         _merge(console if src["kind"] == "console" else audit, src["days"])
         seen = seen or (src["kind"] == "audit" and src["cost_seen"])
     _merge(console, cache["retired"]["console"]["days"])
@@ -663,6 +777,11 @@ def agent_name() -> str:
 
 def main(argv: list[str]) -> int:
     args = argv[1:]
+    if args[:1] == ["--maintain"]:
+        if len(args) != 2 or not args[1].isdigit():
+            print("usage: ha-usage --maintain DAYS   (0 = delete no transcripts)", file=sys.stderr)
+            return 64
+        return maintain(int(args[1]))
     as_json = "--json" in args
     nums = [a for a in args if a.isdigit()]
     days = max(1, int(nums[0])) if nums else 7
