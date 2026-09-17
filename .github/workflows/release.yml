@@ -6,23 +6,14 @@ name: release
 # the lock a consumer pins. A version is published once; an existing release is
 # never replaced.
 #
-# A pull request that touches the release path runs the same workflow as a dry
-# run: every step except the publishing job, for the version in package.json.
+# Every pull request runs Prepare as a dry run, for the version in package.json,
+# so it can be a required check. On a pull request the gates are not repeated
+# here (ci.yml already runs them for it) and nothing is published.
 
 on:
   push:
     tags: ["v*"]
   pull_request:
-    paths:
-      - ".github/workflows/release.yml"
-      - ".github/workflows/ci.yml"
-      - "tools/**"
-      - "app/**"
-      - "ha-tools/**"
-      - "rootfs/**"
-      - "package.json"
-      - "package-lock.json"
-      - "CHANGELOG.md"
 
 permissions:
   contents: read
@@ -33,11 +24,20 @@ concurrency:
 
 jobs:
   gates:
+    if: github.event_name == 'push'
     uses: ./.github/workflows/ci.yml
 
   prepare:
     name: Prepare
     needs: gates
+    # Runs after the gates passed on a tag, and without them on a pull request.
+    # Anything else (gates failed or cancelled, another event) skips it, and a
+    # skipped Prepare leaves Publish skipped.
+    if: >-
+      !cancelled() && (
+        (github.event_name == 'push' && needs.gates.result == 'success') ||
+        (github.event_name == 'pull_request' && needs.gates.result == 'skipped')
+      )
     runs-on: ubuntu-latest
     env:
       PUBLISH: ${{ github.event_name == 'push' }}
@@ -104,7 +104,8 @@ jobs:
 
   publish:
     name: Publish
-    needs: prepare
+    needs: [gates, prepare]
+    # No status function here, so both must have succeeded.
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
