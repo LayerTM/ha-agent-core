@@ -1,11 +1,22 @@
 name: Dependabot auto-merge
 
-# Automatically merges Dependabot pull requests for non-major updates once all
-# required status checks pass. Major version bumps are left for manual review.
+# Merges a Dependabot pull request for a non-major update once all required
+# checks pass, but only when the install code it would bring is the reviewed one.
 #
-# Safe use of pull_request_target: this job never checks out or executes the
-# PR's code — it only reads Dependabot's metadata and enables auto-merge, which
-# then waits for the branch-protection required checks before merging.
+# Safe use of pull_request_target: the job checks out the BASE branch only and
+# runs the base branch's tools/check-install-scripts.js with the base branch's
+# install-scripts.json records. From the pull request it reads nothing but the
+# manifests and lockfiles, fetched as data through the API; none of its code is
+# checked out or run.
+#
+# Every event on a Dependabot pull request, whoever caused it, first turns
+# auto-merge off; nothing before that can fail. Only then is the new head judged
+# (a newer run cancels an older one), and only as the last step, for a push by
+# Dependabot itself, is auto-merge enabled again — for that exact head commit.
+# Anything else — a major update, a push by someone else, a changed or unknown
+# install-code verdict, a refused enable, any failure — leaves auto-merge off; an
+# install-code verdict other than "reviewed" also labels the pull request
+# "needs review".
 #
 # A merge made with the workflow token raises no push event, so once the pull
 # request has merged this job starts the main-measured workflow, which runs CI
@@ -13,33 +24,129 @@ name: Dependabot auto-merge
 # schedule, but GitHub does not guarantee scheduled runs, so this dispatch is
 # what measures a bot merge.
 
-on: pull_request_target
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
 
 permissions:
   actions: write
   contents: write
   pull-requests: write
 
+concurrency:
+  group: automerge-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   auto-merge:
-    if: ${{ github.actor == 'dependabot[bot]' }}
+    if: ${{ github.event.pull_request.user.login == 'dependabot[bot]' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 50
     steps:
+      - name: Turn auto-merge off until this head is judged
+        run: |
+          for attempt in 1 2 3; do
+            gh pr merge --disable-auto "$PR_URL" && exit 0
+            armed="$(gh pr view "$PR_URL" --json autoMergeRequest --jq '.autoMergeRequest != null')" || armed=unknown
+            [ "$armed" = false ] && exit 0
+            [ "$attempt" = 3 ] || sleep 5
+          done
+          echo "::error::auto-merge could not be turned off"
+          exit 1
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Fetch Dependabot metadata
         id: metadata
+        if: ${{ github.actor == 'dependabot[bot]' }}
         # Pinned to an immutable commit SHA (this job runs with write scope in a
         # pull_request_target context). The version comment lets Dependabot's
         # github-actions updater keep the pin current.
         uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
 
-      - name: Enable auto-merge for known minor/patch updates
+      - name: Check out the base branch
+        if: ${{ steps.metadata.conclusion == 'success' }}
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        if: ${{ steps.metadata.conclusion == 'success' }}
+        with:
+          node-version: "26"
+
+      - name: Decide on this head
+        id: decide
+        if: ${{ steps.metadata.conclusion == 'success' }}
+        run: |
+          set -uo pipefail
+          decision=hold
+          # Fail-closed allowlist: only explicitly-recognized minor/patch updates
+          # auto-merge. Majors — and any PR whose update-type can't be determined —
+          # fall through to manual review instead of merging by default.
+          case "$UPDATE_TYPE" in
+            version-update:semver-minor|version-update:semver-patch) allowlisted=true ;;
+            *) allowlisted=false ;;
+          esac
+          reviewed=true
+          for dir in . app ha-tools; do
+            mkdir -p "$RUNNER_TEMP/head/$dir"
+            for file in package.json package-lock.json; do
+              # The pull request's file at this exact head, as data.
+              repo_path="${dir#.}"
+              repo_path="${repo_path:+$repo_path/}$file"
+              if ! gh api -H "Accept: application/vnd.github.raw+json" \
+                  "repos/$REPO/contents/$repo_path?ref=$HEAD_SHA" > "$RUNNER_TEMP/head/$dir/$file"; then
+                echo "::warning::cannot read $dir/$file at $HEAD_SHA"
+                reviewed=false
+              fi
+            done
+            if ! node tools/check-install-scripts.js --package "$RUNNER_TEMP/head/$dir/package.json" \
+                --lock "$RUNNER_TEMP/head/$dir/package-lock.json" --record "$dir/install-scripts.json"; then
+              reviewed=false
+            fi
+          done
+          if [ "$allowlisted" = true ] && [ "$reviewed" = true ]; then
+            decision=merge
+          fi
+          echo "decision=$decision" >> "$GITHUB_OUTPUT"
+          echo "reviewed=$reviewed" >> "$GITHUB_OUTPUT"
+        env:
+          UPDATE_TYPE: ${{ steps.metadata.outputs.update-type }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Label an update whose install code is not the reviewed one
+        if: ${{ always() && steps.decide.outputs.reviewed != 'true' }}
+        run: |
+          gh pr edit "$PR_URL" --add-label "needs review"
+          echo "::notice::the install code of this update is not the reviewed one, or could not be judged; it waits for a review"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Enable auto-merge for this head
         id: enable
-        # Fail-closed allowlist: only explicitly-recognized minor/patch updates
-        # auto-merge. Majors — and any PR whose update-type can't be determined —
-        # fall through to manual review instead of merging by default.
-        if: ${{ contains(fromJSON('["version-update:semver-minor", "version-update:semver-patch"]'), steps.metadata.outputs.update-type) }}
-        run: gh pr merge --auto --squash "$PR_URL"
+        if: ${{ steps.decide.outputs.decision == 'merge' }}
+        run: |
+          gh pr edit "$PR_URL" --remove-label "needs review" >/dev/null 2>&1 || true
+          gh pr merge --auto --squash --match-head-commit "$HEAD_SHA" "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Leave auto-merge off after any failure
+        if: ${{ failure() || cancelled() }}
+        run: |
+          gh pr merge --disable-auto "$PR_URL" || true
+          gh pr edit "$PR_URL" --add-label "needs review" || true
+          if [ "$(gh pr view "$PR_URL" --json autoMergeRequest --jq '.autoMergeRequest != null')" != false ]; then
+            echo "::error::auto-merge is still on after a failure"
+            exit 1
+          fi
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

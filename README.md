@@ -9,10 +9,11 @@ is unpacked or executed.
 | path | what |
 |---|---|
 | `app/server/` | the web console (terminal, tabs, uploads, restart) and the prompt API server |
-| `app/package.json`, `app/package-lock.json` | their dependencies, installed by the add-on with `npm ci` |
+| `app/package.json`, `app/package-lock.json`, `app/install-scripts.json` | their dependencies and the reviewed install-script dependencies, installed by the add-on with `tools/npm-ci-checked.sh` |
 | `ha-tools/` | the dashboard screenshot helper |
 | `rootfs/` | shared scripts: alerts, audit and backup hooks, Home Assistant helpers, shell configuration |
 | `tools/verify-core.js`, `tools/check-adapter-graph.js` | the checks an add-on runs when it assembles its image |
+| `tools/npm-ci-checked.sh`, `tools/check-install-scripts.js`, `tools/build-allowed-packages.js`, `tools/smoke-allowed-packages.js` | the dependency install an add-on runs in `app/` and `ha-tools/` |
 
 An add-on assembles its image from this tree plus its own files, in the same
 layout: its engine adapter goes to `app/adapter/`, its console frontend to
@@ -103,6 +104,50 @@ tree: it reads every file under `server/` and `adapter/`, follows only
 `Function`, the `vm` and `module` built-ins, `.mjs` and `.node` files, local
 requires of anything but `.js`, `.cjs` or `.json`, or outside those two
 directories), and reports cycles.
+
+## Install scripts
+
+npm runs a dependency's install scripts only for the packages named in the
+`allowScripts` field of a `package.json` (in `app/`, `node-pty`, which compiles
+the terminal's native module). An entry names a package, not a version. What it
+allows is pinned in `install-scripts.json` beside it: for every allowed package,
+the whole closure of packages it depends on, each by its registry tarball and
+its sha512 integrity. That digest covers every file of the package.
+
+`tools/check-install-scripts.js` compares a lockfile with that record. It reads
+JSON only and runs nothing. The following are all reported as not reviewed:
+- a changed, added or removed package in a closure;
+- a package from outside the npm registry, or one without an integrity hash;
+- any package with an install script that `allowScripts` does not name.
+
+After a review, `tools/check-install-scripts.js <dir> --write` records the new
+state. The toolchain the scripts use (Node.js, npm and its node-gyp, Python, make,
+the compiler) comes from the image that runs the install.
+
+Dependencies are installed with `tools/npm-ci-checked.sh`, run in the directory
+that holds the lockfile:
+1. the check, before anything is unpacked;
+2. `npm ci --ignore-scripts`;
+3. `tools/build-allowed-packages.js`: the reviewed closures, and nothing else,
+   are copied into a staging directory, `npm rebuild --strict-allow-scripts`
+   runs there, and the built packages are copied back. The rebuild uses npm and
+   its node-gyp by absolute path, a PATH of the Node.js and system directories,
+   and an empty HOME and npm configuration. A package outside a closure, even
+   one that provides a `node-gyp` command, cannot be reached from an install
+   script. Nothing else ever runs a dependency's script;
+4. loading each allowed package, and starting a terminal through node-pty.
+
+node-gyp compiles against the headers of the Node.js that runs it
+(`npm_package_config_node_gyp_nodedir`), so nothing is downloaded.
+
+On a Dependabot pull request, every event turns auto-merge off first.
+Auto-merge is enabled again only when:
+- the event is Dependabot's own push of a minor or patch update;
+- the base branch's checker and records accept the update's lockfiles, which
+  are read as data and never run.
+
+It is enabled for the head commit that was judged, and nothing else. An update
+whose install code is not the reviewed one is labelled `needs review`.
 
 ## The release archive
 
@@ -228,18 +273,18 @@ node tools/pack.js --out dist
 
 ## Development
 
-Requires Node.js 22 or later (CI uses Node.js 26), Python 3, bash and jq.
+Requires Node.js 22 or later (CI uses Node.js 26), Python 3, bash, jq and a C/C++ toolchain for node-gyp where node-pty has no prebuild.
 
 The tests in `app/test/contract/` run the prompt API and the console against a
 neutral test adapter (`app/test/fixtures/neutral-adapter.js`) that records what
 the core dispatches; it is never packed.
 
 ```sh
-npm ci
+tools/npm-ci-checked.sh
 npm test
 npm run lint
 npm run typecheck
-(cd app && npm ci && npm test && npm run test:alerts && npm run test:config && npm run lint && npm run typecheck)
+(cd app && ../tools/npm-ci-checked.sh && npm test && npm run test:alerts && npm run test:config && npm run lint && npm run typecheck)
 python .github/scripts/secret_scan.py .
 python .github/scripts/hygiene_scan.py .
 ```
