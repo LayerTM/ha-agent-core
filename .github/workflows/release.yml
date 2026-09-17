@@ -45,6 +45,8 @@ jobs:
     outputs:
       tag: ${{ steps.version.outputs.tag }}
     steps:
+      - name: Fail on purpose
+        run: exit 1
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
