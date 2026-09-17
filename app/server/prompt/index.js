@@ -166,6 +166,15 @@ async function start() {
     return () => {};
   }
 
+  // A USD cap can only be kept by an engine that reports what a run cost; for any
+  // other, the prompt API does not start rather than claim to enforce it.
+  const dailyBudgetUsd = Number(options.chat_daily_budget_usd) || 0;
+  if (dailyBudgetUsd > 0 && adapter().descriptor.reportsCost !== true) {
+    log(`ERROR: chat_daily_budget_usd is ${dailyBudgetUsd}, but ${adapter().descriptor.engine} does not report`
+      + ' what a request costs — the prompt API is not started; set the budget to 0');
+    return () => {};
+  }
+
   const token = await loadToken(options);
   // A dedicated restricted-user LLAT (prompt_ha_token) is preferred; the
   // general ha_token is the zero-extra-config fallback. Assist exposure still
@@ -203,7 +212,7 @@ async function start() {
     ...secrets.options,
     process.env.SUPERVISOR_TOKEN,
     ...secrets.env,
-  ]);
+  ], adapter().prompt.secretPatterns || []);
 
   const auditFile = path.join(DATA_DIR, 'claude-audit.log');
   const audit = (line) => {
@@ -228,7 +237,7 @@ async function start() {
     // Optional models per request type; empty → the chat model above (no change).
     writeModel: optionString(options, 'chat_model_write'),
     cameraModel: optionString(options, 'chat_model_camera'),
-    dailyBudgetUsd: Number(options.chat_daily_budget_usd) || 0,
+    dailyBudgetUsd,
     // Camera snapshots (vision) go through the same relay, so the HA token and
     // the Core TLS decision live in exactly one place.
     coreRelayUrl: relay ? relay.url : '',

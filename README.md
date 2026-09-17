@@ -31,20 +31,20 @@ Everything engine-specific comes from one module the add-on provides at
 | `descriptor.engine` | string | the engine's stable name (`a-z`, `0-9`, `_`, `-`; at most 32), published as `engine` on `/api/status` |
 | `descriptor.parseVersion(stdout)` | function | the version in the agent's `--version` output, or `null` |
 | `descriptor.versionAlias` | optional string | one more `<name>_version` status key carrying `engine_version`, for clients that predate it |
+| `descriptor.reportsCost` | optional boolean | `true` when every run reports its cost in USD; only then is a daily budget published and enforced |
 | `runner.bin` | string | the agent executable a prompt run starts (`CLAUDE_PROMPT_BIN` overrides it) |
 | `runner.launch(spec, { env })` | function | `{ args, env }` for one run (see below) |
 | `runner.createDecoder(spec)` | function | a function turning one parsed line of the agent's JSON-lines output into a list of run events |
 | `runner.toolName(basename)` | function | the name the agent gives a tool of the `ha` MCP server |
 | `runner.toolBasename(name)` | function | the basename of such a tool name, or `null` for any other tool |
-| `prompt.limitsCredential({ oauthToken, homeDir })` | function | the access token the account-limits call uses, or `''` |
-| `prompt.fetchLimits(accessToken, fetch)` | function | the upstream account-limits request; resolves to the response |
-| `prompt.limitEntry(item)` | function | one upstream limit as a contract entry, or `null` |
+| `prompt.limitsSource({ apiKey, oauthToken, homeDir })` | function | the account's limits: `null` without a credential, or `{ mode, key, read(fetch)? }` (see below) |
 | `prompt.authConfigured({ env, home })` | function | whether the agent has credentials |
 | `prompt.writeMcpConfig({ dir, url, bearer })` | function | write (or, without a URL, remove) the MCP configuration in `dir` |
 | `prompt.hasAuditHook(raw)` | function | whether the run settings carry the audit hook; without it the prompt API does not start |
 | `prompt.removeSavedSessions(homeDir, workDir)` | function | remove transcripts earlier versions saved |
 | `prompt.credentials({ options, env, optionString })` | function | `{ apiKey, oauthToken }` |
 | `prompt.secretValues({ options, env, optionString })` | function | `{ options: [...], env: [...] }`, added to the redactor |
+| `prompt.secretPatterns` | optional list | global regular expressions for further credential formats, added to the ones the redactor always applies (Anthropic and OpenAI keys, JWTs, bearer and token header values) |
 | `console.bin` | string | the agent executable whose version the console shows |
 | `console.updateCommand` | string | the command behind the console's update button |
 | `console.windowName`, `console.launcher` | strings | the agent's terminal tab |
@@ -88,6 +88,20 @@ A missing optional field never widens what a run may do:
 
 Every property of the answer schema is required; a property that is optional in
 the answer is nullable there, and a `null` for it is treated as absent.
+
+### What an engine may not report
+
+- **Account limits.** `GET /api/account_limits` asks `prompt.limitsSource` on each call:
+  - without a source there is nothing to report;
+  - a source without `read` reports its `mode` with an empty list;
+  - otherwise `read(fetch)` resolves to the limit entries `{ kind, percent, severity, resets_at, model }` (`percent` an integer from 0 to 100, the last three a string or `null`).
+
+  A report with any other entry is not published. Reports are cached for five minutes per `key`, the credential the report belongs to; only a hash of it is kept.
+- **Cost.** Without `descriptor.reportsCost`:
+  - no spend is counted;
+  - `GET /api/status` has no `budget`;
+  - audit lines say `cost=unknown`;
+  - a non-zero `chat_daily_budget_usd` keeps the prompt API from starting instead of pretending to enforce it.
 
 `GET /api/status` identifies the engine with three fields: `engine`,
 `engine_version` (the parsed agent version, `""` when unknown; `version` is the

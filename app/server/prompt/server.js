@@ -504,9 +504,17 @@ function addRunTokens(total, tokens) {
   }
 }
 
+// `costUsd` is null when the engine does not report cost: the line says so
+// rather than claim $0.
 function spendFields(tokens, costUsd) {
   const list = [...tokens].map(([m, t]) => `${m}:${t.input}:${t.output}:${t.cacheRead}:${t.cacheWrite}`).join(',');
-  return `${list ? ` tokens=${list}` : ''} cost=$${costUsd.toFixed(4)}`;
+  return `${list ? ` tokens=${list}` : ''} cost=${costUsd === null ? 'unknown' : `$${costUsd.toFixed(4)}`}`;
+}
+
+// Whether the engine reports what a run cost. Without it there is no spend to
+// count, so no budget is published or enforced.
+function reportsCost() {
+  return adapter().descriptor.reportsCost === true;
 }
 
 function createPromptApp({
@@ -618,41 +626,46 @@ function createPromptApp({
   // Account-wide rate-limit utilisation for /api/account_limits — the whole
   // account (every machine, every session), not this add-on's own spend.
   //
-  // Only a subscription has these buckets. An API key is billed per request, so
-  // upstream has nothing to report for it and would answer for the wrong thing
-  // if asked; the endpoint therefore reports the auth MODE next to the list and
-  // an API-key install gets an empty list rather than an error, so a consumer
-  // creates no entities at all instead of a row of unavailable ones.
-  // Where the access token is sent, and with which headers, is the adapter's
-  // (fixed there, deliberately not overridable). Tests inject `limitsFetch`.
+  // The adapter says which credential the account uses and how to read its
+  // limits (prompt.limitsSource), read at call time so a login after the add-on
+  // started is picked up without a restart. A credential without limits (an API
+  // key is billed per request) reports its MODE next to an empty list, so a
+  // consumer creates no entities at all instead of a row of unavailable ones.
+  // Where a credential is sent is the adapter's (fixed there, deliberately not
+  // overridable). Tests inject `limitsFetch`.
   const LIMITS_TTL_MS = 5 * 60 * 1000;
   // Both are keyed on WHICH credential asked, so figures fetched for one account
   // are never served to the next one after a re-login.
   let limitsCache = { value: null, stamp: 0, key: '' };
   let limitsInFlight = null; // { key, promise } while a call is out
 
-  // Which access token the account has, read at call time so a login after the
-  // add-on started is picked up without a restart; '' when there is none.
-  function oauthAccessToken() {
-    return adapter().prompt.limitsCredential({ oauthToken, homeDir });
-  }
+  const LIMIT_MODE_RE = /^[a-z][a-z0-9_]{0,31}$/;
 
-  // One upstream entry → one contract entry, or null when the entry is not what
-  // it claims (which makes the whole payload unparsable).
+  // One entry of the contract, or null when it is not one.
   function limitEntry(item) {
-    return adapter().prompt.limitEntry(item);
+    if (!item || typeof item !== 'object') return null;
+    const { kind, percent, severity, resets_at: resetsAt, model: modelName } = item;
+    if (typeof kind !== 'string' || !kind || !Number.isInteger(percent) || percent < 0 || percent > 100) return null;
+    const optional = (v) => v === null || typeof v === 'string';
+    if (!optional(severity) || !optional(resetsAt) || !optional(modelName)) return null;
+    return { kind, percent, severity, resets_at: resetsAt, model: modelName };
   }
 
   // Resolves to the report, or null when there is nothing honest to say.
   function accountLimits() {
-    const accessToken = oauthAccessToken();
-    if (!accessToken) {
-      if (!apiKey) return Promise.resolve(null);
-      return Promise.resolve({ mode: 'api_key', fetched_at: new Date().toISOString(), limits: [] });
+    let source;
+    try {
+      source = adapter().prompt.limitsSource({ apiKey, oauthToken, homeDir });
+    } catch {
+      return Promise.resolve(null);
     }
-    // A short hash of the token, never the token itself — it only has to tell one
-    // credential from another.
-    const credentialKey = crypto.createHash('sha256').update(accessToken).digest('hex').slice(0, 12);
+    if (!source || typeof source.mode !== 'string' || !LIMIT_MODE_RE.test(source.mode)) return Promise.resolve(null);
+    if (typeof source.read !== 'function') {
+      return Promise.resolve({ mode: source.mode, fetched_at: new Date().toISOString(), limits: [] });
+    }
+    // A short hash of the credential, never the credential itself — it only has
+    // to tell one from another.
+    const credentialKey = crypto.createHash('sha256').update(`${source.mode}\0${String(source.key)}`).digest('hex').slice(0, 12);
     if (limitsCache.value && limitsCache.key === credentialKey
         && Date.now() - limitsCache.stamp < LIMITS_TTL_MS) {
       return Promise.resolve(limitsCache.value);
@@ -660,13 +673,11 @@ function createPromptApp({
     if (limitsInFlight && limitsInFlight.key === credentialKey) return limitsInFlight.promise;
     const promise = (async () => {
       try {
-        const resp = await adapter().prompt.fetchLimits(accessToken, limitsFetch);
-        if (!resp.ok) return null;
-        const body = /** @type {any} */ (await resp.json());
-        if (!body || !Array.isArray(body.limits)) return null;
-        const limits = body.limits.map(limitEntry);
+        const entries = await source.read(limitsFetch);
+        if (!Array.isArray(entries)) return null;
+        const limits = entries.map(limitEntry);
         if (limits.some((entry) => entry === null)) return null;
-        const value = { mode: 'subscription', fetched_at: new Date().toISOString(), limits };
+        const value = { mode: source.mode, fetched_at: new Date().toISOString(), limits };
         limitsCache = { value, stamp: Date.now(), key: credentialKey };
         return value;
       } catch {
@@ -749,8 +760,9 @@ function createPromptApp({
       // The add-on's wall-clock ceiling per request (a TIME) — lets the client pair
       // its own REQUEST_TIMEOUT dynamically. Distinct from the daily-$ budget below.
       prompt_timeout_ms: TIMEOUT_MS,
-      // Daily chat spend cap for a budget sensor (limit 0 = unlimited).
-      budget: { limit: budget.limit, spent: Number(budget.spent().toFixed(4)) },
+      // Daily chat spend cap for a budget sensor (limit 0 = unlimited); absent
+      // when the engine does not report what a request costs.
+      ...(reportsCost() ? { budget: { limit: budget.limit, spent: Number(budget.spent().toFixed(4)) } } : {}),
       // Current proactive-alerts set — the user's own home entity names/values, so
       // the integration can offer an active-alerts sensor. The option decides
       // whether there is a set at all: off → null, whatever alerts-state.json still
@@ -1063,7 +1075,7 @@ function createPromptApp({
       }
       // Bill EVERY attempt's real cost against the daily cap — including a failed or
       // degraded read (the tokens were spent regardless of the final outcome).
-      budget.add(spent);
+      if (reportsCost()) budget.add(spent);
 
       const seconds = ((Date.now() - started) / 1000).toFixed(1);
       // Audit the confirmed intents/targets for write, the prompt hash for read.
@@ -1094,7 +1106,7 @@ function createPromptApp({
         text: DEGRADE_TEXT[language], proposal: null, tools_used: [], truncated: false, degraded: true,
       };
       if (outcome.status === 'timeout') {
-        audit(`prompt[${mode}] ${base} status=504 dur=${seconds}s${spendFields(spentTokens, spent)}`);
+        audit(`prompt[${mode}] ${base} status=504 dur=${seconds}s${spendFields(spentTokens, reportsCost() ? spent : null)}`);
         if (mode === 'read') chatHealth.record(false, 'timeout', false);
         if (streaming) { streamDone(degradedBody); return undefined; }
         return res.status(504).json({ error: 'timeout' });
@@ -1105,7 +1117,7 @@ function createPromptApp({
         const reason = outcome.reason || 'unknown';
         const diag = `reason=${reason} attempts=${attempts} turns=${outcome.numTurns ?? '?'}`
           + ` tools=${(outcome.toolsUsed || []).map((t) => sanitizeId(t, 64)).join('|') || '-'}`
-          + spendFields(spentTokens, spent);
+          + spendFields(spentTokens, reportsCost() ? spent : null);
         console.error(`[prompt] run failed (${caller}): ${reason} — ${redact(outcome.message || 'unknown')}`);
         // Read: never let the chat die — degrade to a friendly 200 (the run already
         // retried where it could). Write: fail honestly with 500 — a state-changing
@@ -1161,7 +1173,7 @@ function createPromptApp({
         + ` out=${Buffer.byteLength(text, 'utf8')}B${outcome.truncated ? ' truncated' : ''}`
         + `${attempts > 1 ? ` attempts=${attempts} recovered=${recoveredFrom}` : ''}`
         + `${outcome.mcpFailed ? ' mcp=FAILED' : ''}${proposal ? ' proposal=yes' : ''}`
-        + `${automation ? ' automation=draft' : ''}${spendFields(spentTokens, spent)}`,
+        + `${automation ? ' automation=draft' : ''}${spendFields(spentTokens, reportsCost() ? spent : null)}`,
       );
       if (outcome.mcpFailed) {
         console.error('[prompt] HA MCP server did not connect — check the add-on log for the resolved Core address, that the Model Context Protocol Server integration is installed, and the HA token');
