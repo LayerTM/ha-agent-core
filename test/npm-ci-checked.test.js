@@ -81,3 +81,31 @@ test('a preset npm must be an installed npm-cli.js outside the project and outsi
     assert.match(r.stderr, message, value);
   }
 });
+
+test('only --omit=dev, --omit=optional and --omit=peer are accepted, and nothing runs otherwise', (t) => {
+  const dir = emptyProject(t);
+  for (const args of [['--ignore-scripts=false'], ['--omit', 'dev'], ['--omit=bundle'], ['--foreground-scripts'], ['--omit=dev', 'x']]) {
+    const r = spawnSync('bash', [WRAPPER, ...args], { cwd: dir, encoding: 'utf8', env: { ...process.env, NPM_CLI: '' } });
+    assert.equal(r.status, 2, args.join(' '));
+    assert.match(r.stderr, /unsupported argument/, args.join(' '));
+    assert.equal(fs.existsSync(path.join(dir, 'node_modules')), false, args.join(' '));
+  }
+});
+
+test('--omit=dev leaves the dev dependencies out', (t) => {
+  const dir = tempDir(t);
+  fs.mkdirSync(path.join(dir, 'devtool'));
+  fs.writeFileSync(path.join(dir, 'devtool', 'package.json'), JSON.stringify({ name: 'devtool', version: '1.0.0' }));
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({
+    name: 'withdev', version: '1.0.0', devDependencies: { devtool: 'file:./devtool' },
+  }));
+  const npmCli = fs.realpathSync(spawnSync('sh', ['-c', 'command -v npm'], { encoding: 'utf8' }).stdout.trim());
+  const lock = spawnSync(process.execPath, [npmCli, 'install', '--package-lock-only', '--ignore-scripts', '--offline'], { cwd: dir, encoding: 'utf8' });
+  assert.equal(lock.status, 0, lock.stderr);
+  let r = spawnSync('bash', [WRAPPER, '--omit=dev'], { cwd: dir, encoding: 'utf8', env: { ...process.env, NPM_CLI: '' } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(fs.existsSync(path.join(dir, 'node_modules', 'devtool')), false);
+  r = spawnSync('bash', [WRAPPER], { cwd: dir, encoding: 'utf8', env: { ...process.env, NPM_CLI: '' } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(fs.existsSync(path.join(dir, 'node_modules', 'devtool', 'package.json')), true);
+});

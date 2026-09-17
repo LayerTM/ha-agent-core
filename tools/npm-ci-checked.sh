@@ -2,6 +2,12 @@
 # npm ci with nothing a dependency ships running before it has been checked.
 # Run it in the directory that holds package.json and package-lock.json.
 #
+#   npm-ci-checked.sh [--omit=dev|optional|peer ...]
+#
+# `--omit` is passed on to `npm ci` (an image leaves out its dev dependencies);
+# no other argument is accepted, so nothing can be handed to npm that would run
+# scripts again.
+#
 #   1. tools/check-install-scripts.js compares the lockfile with the reviewed
 #      record (install-scripts.json) — pure data, nothing is unpacked yet;
 #   2. npm ci --ignore-scripts unpacks the packages without running anything;
@@ -23,6 +29,14 @@
 # requests, which cannot be merged until the new packages are reviewed. Nothing
 # that ships sets it.
 set -euo pipefail
+
+omit=()
+for arg in "$@"; do
+  case "$arg" in
+    --omit=dev|--omit=optional|--omit=peer) omit+=("$arg") ;;
+    *) echo "npm-ci-checked: unsupported argument '$arg' (only --omit=dev, --omit=optional, --omit=peer)" >&2; exit 2 ;;
+  esac
+done
 
 tools="$(cd "$(dirname "$0")" && pwd)"
 
@@ -84,7 +98,7 @@ if ! "$NODE" "$tools/check-install-scripts.js" .; then
   echo "::notice::building packages whose install code has not been reviewed, as an untrusted test"
 fi
 
-"$NODE" "$NPM_CLI" ci --ignore-scripts
+"$NODE" "$NPM_CLI" ci --ignore-scripts ${omit[@]+"${omit[@]}"}
 "$NODE" "$tools/build-allowed-packages.js"
 
 if [ -e "$devdir" ]; then

@@ -54,7 +54,9 @@ function main() {
     for (const problem of problems) process.stderr.write(`install scripts: ${problem}\n`);
     if (process.env.INSTALL_SCRIPTS_UNREVIEWED !== 'build') return 1;
   }
-  const names = Object.keys(closures);
+  // An allowed package the install left out (npm ci --omit) has nothing to build.
+  const names = Object.keys(closures)
+    .filter((name) => fs.existsSync(path.join(dir, 'node_modules', name, 'package.json')));
   if (names.length === 0) return 0;
 
   const lock = JSON.parse(fs.readFileSync(path.join(dir, 'package-lock.json'), 'utf8'));

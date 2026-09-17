@@ -137,6 +137,14 @@ test('a staging directory under a node_modules parent is refused', (t) => {
   assert.equal(fs.existsSync(path.join(dir, 'node_modules/native/gyp-version.txt')), false);
 });
 
+test('an allowed package the install left out is skipped, by the build and by the smoke test', (t) => {
+  const { dir } = installed(t);
+  fs.rmSync(path.join(dir, 'node_modules', 'native'), { recursive: true });
+  assert.equal(build(dir).status, 0);
+  const smoke = spawnSync(process.execPath, [path.join(__dirname, '..', 'tools', 'smoke-allowed-packages.js')], { cwd: dir, encoding: 'utf8' });
+  assert.equal(smoke.status, 0, smoke.stderr);
+});
+
 test('nothing allowed means nothing to build', (t) => {
   const dir = tempDir(t);
   put(dir, 'package.json', { name: 'plain' });

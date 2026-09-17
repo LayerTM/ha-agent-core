@@ -138,8 +138,9 @@ After a review, `tools/check-install-scripts.js <dir> --write` records the new
 state. The toolchain the scripts use (Node.js, npm and its node-gyp, Python, make,
 the compiler) comes from the image that runs the install.
 
-Dependencies are installed with `tools/npm-ci-checked.sh`, run in the directory
-that holds the lockfile:
+Dependencies are installed with `tools/npm-ci-checked.sh [--omit=dev|optional|peer ...]`,
+run in the directory that holds the lockfile (an image passes `--omit=dev`; no
+other argument is accepted):
 1. the check, before anything is unpacked;
 2. `npm ci --ignore-scripts`;
 3. `tools/build-allowed-packages.js`: the reviewed closures, and nothing else,

@@ -7,13 +7,16 @@
 // node-pty 1.1.0 ships its macOS spawn-helper without the executable bit, so a
 // prebuilt macOS copy cannot start one whatever this repository does.
 
+const fs = require('node:fs');
 const path = require('node:path');
 
 const dir = process.cwd();
 const pkg = require(path.join(dir, 'package.json'));
+// An allowed package the install left out (npm ci --omit) is not there to load.
 const allowed = Object.entries(pkg.allowScripts || {})
   .filter(([, on]) => on === true)
-  .map(([name]) => name);
+  .map(([name]) => name)
+  .filter((name) => fs.existsSync(path.join(dir, 'node_modules', name, 'package.json')));
 const load = (name) => require(require.resolve(name, { paths: [dir] }));
 
 for (const name of allowed) load(name);

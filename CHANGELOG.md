@@ -8,6 +8,8 @@ uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `tools/npm-ci-checked.sh` accepts `--omit=dev`, `--omit=optional` and
+  `--omit=peer` for its `npm ci` step, and no other argument.
 - `tools/check-install-scripts.js` and `app/install-scripts.json`: the packages
   whose install scripts npm may run, together with everything they depend on,
   are pinned by registry tarball and integrity and checked from the lockfile
