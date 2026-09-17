@@ -1,6 +1,6 @@
 'use strict';
 
-// A stand-in agent process for the core's run tests. It reads its whole stdin,
+// A test agent process for the core's run tests. It reads its whole stdin,
 // then plays the tape in the file named by its only argument (a JSON array of
 // steps; a file, because one argument is limited to 128 KiB on Linux):
 //   { emit: <object> }          one JSON line on stdout
@@ -12,6 +12,9 @@
 //   { echo: 'stdin' | 'env' }   a result event whose text is the stdin, or the
 //                               environment as JSON
 //   { exit: <code> }            exit with that code (default 0 at the end)
+//   { descendant: <file> }      start a long-running process in the agent's
+//                               group, detached from its output, and write its
+//                               pid to <file>
 
 const tape = JSON.parse(require('node:fs').readFileSync(process.argv[2], 'utf8'));
 
@@ -30,6 +33,10 @@ async function play(input) {
     else if (step.echo) {
       const text = step.echo === 'env' ? JSON.stringify(process.env) : input;
       await write(JSON.stringify({ type: 'result', structured: { text, proposal: null, automation: null } }));
+    } else if (step.descendant) {
+      const child = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+      child.unref();
+      require('node:fs').writeFileSync(step.descendant, String(child.pid));
     } else if (typeof step.exit === 'number') process.exit(step.exit);
   }
   process.exit(0);
