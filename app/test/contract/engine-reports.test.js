@@ -191,17 +191,26 @@ test('an engine that reports cost publishes the budget and bills every run', asy
 
 // Credential-shaped strings, assembled here so the file itself holds none.
 const JWT_LIKE = ['eyJ' + 'hbGciOiJIUzI1NiJ9', 'eyJzdWIiOiIx', 'c2lnbmF0dXJl'].join('.');
-const VENDOR_KEY_LIKE = ['sk', 'ant', 'api03', 'abcdefghijkl'].join('-');
+const KEYS_LIKE = [
+  ['sk', 'ant', 'api03', 'abcdefghijkl'].join('-'),
+  ['sk', 'proj', 'abcdefghijklmnopqrstuvwx'].join('-'),
+  ['sk', 'svcacct', 'abcdefghijklmnopqrstuvwx'].join('-'),
+  ['sk', 'abcdefghijklmnopqrstuvwxyz0123'].join('-'),
+];
 
-test('the engine\'s credential shapes are redacted next to the generic ones', () => {
-  const redact = buildRedactor(['exact-secret-value'], adapter.prompt.secretPatterns);
+test('every known credential shape is redacted for every engine, and the adapter can add more', () => {
+  const core = buildRedactor([]);
+  for (const key of KEYS_LIKE) assert.equal(core(`key ${key} end`), 'key [REDACTED] end', key);
+  assert.equal(core(`token ${JWT_LIKE}`), 'token [REDACTED]');
+  // An adapter's own shape is added, never needed for the known ones.
+  assert.equal(core('neutral-key-ABCDEFGH1234'), 'neutral-key-ABCDEFGH1234');
+  const withEngine = buildRedactor(['exact-secret-value'], adapter.prompt.secretPatterns);
   assert.equal(
-    redact(`neutral-key-ABCDEFGH1234 and ${JWT_LIKE} and exact-secret-value`),
+    withEngine(`neutral-key-ABCDEFGH1234 and ${KEYS_LIKE[0]} and exact-secret-value`),
     '[REDACTED] and [REDACTED] and [REDACTED]',
   );
-  // An engine's shape is not the core's: without the adapter's list it stays.
-  assert.equal(buildRedactor([])('neutral-key-ABCDEFGH1234'), 'neutral-key-ABCDEFGH1234');
-  assert.equal(buildRedactor([])(VENDOR_KEY_LIKE), VENDOR_KEY_LIKE);
+  // Short words that merely start like a key stay.
+  assert.equal(core('ask-antelope sk-short'), 'ask-antelope sk-short');
 });
 
 test('the credential shapes must be global regular expressions', () => {

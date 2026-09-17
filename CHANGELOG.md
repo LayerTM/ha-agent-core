@@ -31,9 +31,9 @@ uses [Semantic Versioning](https://semver.org/).
   are nullable; a `null` for an optional property is the same as leaving it out.
 - Account limits come from `prompt.limitsSource`, which replaces
   `prompt.limitsCredential`, `prompt.fetchLimits` and `prompt.limitEntry`; the
-  core validates every entry. The engine's credential formats for the redactor
-  come from the optional `prompt.secretPatterns`; the core's own list keeps the
-  generic ones. With the optional `descriptor.reportsCost` unset, no budget is
+  core validates every entry. The redactor applies every credential format it
+  knows for every engine, now including OpenAI keys; the optional
+  `prompt.secretPatterns` adds more. With the optional `descriptor.reportsCost` unset, no budget is
   published or enforced, audit lines say `cost=unknown`, and a non-zero daily
   USD budget keeps the prompt API from starting.
 - `app/package.json` allows `node-pty`'s install scripts by name, which npm 12

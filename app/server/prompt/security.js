@@ -159,8 +159,10 @@ function escapeRegExp(s) {
 // Redactor: shape-based patterns for credential formats plus exact matches of
 // every secret value this process knows about. Applied to all model output
 // before it leaves the add-on (exfiltration-via-answer defense).
-// `enginePatterns` are the shapes of the engine's own credentials, from the
-// adapter (global regular expressions); the shapes here fit any engine.
+// The shapes here are every credential format the core knows, applied whatever
+// the engine: redacting a format an engine never produces costs nothing, while a
+// format left to an adapter that forgets it would leak. `enginePatterns` (global
+// regular expressions from the adapter) only add to them.
 function buildRedactor(secretValues, enginePatterns = []) {
   const exact = (secretValues || [])
     .filter((v) => typeof v === 'string' && v.length >= 8)
@@ -168,6 +170,8 @@ function buildRedactor(secretValues, enginePatterns = []) {
     .map((v) => new RegExp(escapeRegExp(v), 'g'));
   const shapes = [
     ...enginePatterns,
+    /\bsk-ant-[A-Za-z0-9_-]{8,}/g, // Anthropic API keys
+    /\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{20,}/g, // OpenAI API keys
     /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\b/g, // JWT / HA LLAT
     /\b(?:Bearer|Token)\s+[A-Za-z0-9._~+/=-]{20,}/g, // auth header values
   ];

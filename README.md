@@ -44,7 +44,7 @@ Everything engine-specific comes from one module the add-on provides at
 | `prompt.removeSavedSessions(homeDir, workDir)` | function | remove transcripts earlier versions saved |
 | `prompt.credentials({ options, env, optionString })` | function | `{ apiKey, oauthToken }` |
 | `prompt.secretValues({ options, env, optionString })` | function | `{ options: [...], env: [...] }`, added to the redactor |
-| `prompt.secretPatterns` | optional list | global regular expressions matching the engine's credential formats, added to the redactor |
+| `prompt.secretPatterns` | optional list | global regular expressions for further credential formats, added to the ones the redactor always applies (Anthropic and OpenAI keys, JWTs, bearer and token header values) |
 | `console.bin` | string | the agent executable whose version the console shows |
 | `console.updateCommand` | string | the command behind the console's update button |
 | `console.windowName`, `console.launcher` | strings | the agent's terminal tab |
