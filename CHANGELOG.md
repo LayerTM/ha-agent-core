@@ -6,6 +6,8 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.0]
+
 ### Added
 
 - `transcript_retention_days` (default 30, 0 = keep) and the engine hook
