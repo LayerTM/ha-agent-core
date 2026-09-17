@@ -7,7 +7,9 @@ Each run is counted once, by whoever runs it:
   message, ``{"day", "model", "input", "output", "cache_read", "cache_write"}``,
   where ``input`` counts only the input tokens not read from cache. It exits 3
   when the engine does not report usage; the report then says
-  ``"available": false``. ``agent-usage --source`` prints where it reads from.
+  ``"available": false``. If it fails or runs out of time, the report says
+  ``"available": false`` with a short ``"error"``, and still carries the prompt
+  API usage. ``agent-usage --source`` prints where it reads from.
 - Prompt API runs leave no session file the engine reads. Their tokens and cost
   come only from the ``prompt[...]`` lines the prompt server writes to
   ``/data/claude-audit.log``.
@@ -24,12 +26,19 @@ import os
 import re
 import subprocess
 import sys
+import time
 from collections import defaultdict
 from datetime import datetime, timezone
 
 # The engine's usage reader. Overridable so the parsing can be tested.
 AGENT_USAGE = os.environ.get("CC_USAGE_AGENT_CMD", "/usr/local/bin/agent-usage")
 NOT_REPORTED = 3
+# The time agent-usage may take, both calls together. The prompt server passes
+# the budget it keeps inside its own limit for this script; the default is for a
+# run from the shell.
+READER_TIMEOUT_S = int(os.environ.get("CC_USAGE_READER_TIMEOUT_MS", "20000")) / 1000
+# What a text from outside (a model name, a path, an error) may not contain.
+CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
 BRANDING_FILE = "/opt/agent-console/adapter/branding.json"
 # Same override convention as cc-hook-audit, so the parsing can be tested.
 AUDIT_LOG = os.path.join(os.environ.get("CC_AUDIT_DATA_DIR", "/data"), "claude-audit.log")
@@ -51,6 +60,11 @@ class UsageError(Exception):
     """agent-usage failed in a way other than "not reported"."""
 
 
+def _clean(text: str, limit: int) -> str:
+    """One line of at most `limit` characters, control characters replaced."""
+    return CONTROL.sub("?", text)[:limit]
+
+
 def _fmt(n: int) -> str:
     return f"{n:,}"
 
@@ -59,29 +73,42 @@ def _today() -> str:
     return datetime.now(timezone.utc).date().isoformat()
 
 
-def _agent_usage(*args: str) -> tuple[bool, str]:
-    """(reported, stdout) of one agent-usage call."""
+def _agent_usage(deadline: float, *args: str) -> tuple[bool, str]:
+    """(reported, stdout) of one agent-usage call that must end by `deadline`."""
+    left = deadline - time.monotonic()
+    if left <= 0:
+        raise UsageError("agent-usage ran out of time")
     try:
-        done = subprocess.run([AGENT_USAGE, *args], capture_output=True, text=True, timeout=60)
-    except (OSError, subprocess.TimeoutExpired) as err:
-        raise UsageError(f"agent-usage could not run: {err}") from err
+        done = subprocess.run([AGENT_USAGE, *args], capture_output=True, text=True,
+                              errors="replace", timeout=left)
+    except subprocess.TimeoutExpired as err:
+        raise UsageError("agent-usage ran out of time") from err
+    except OSError as err:
+        raise UsageError(f"agent-usage could not run: {err.strerror}") from err
     if done.returncode == NOT_REPORTED:
         return False, ""
     if done.returncode != 0:
-        raise UsageError(f"agent-usage exited {done.returncode}: {done.stderr.strip()[-300:]}")
+        raise UsageError(f"agent-usage exited {done.returncode}: {done.stderr.strip()[-200:]}")
     return True, done.stdout
 
 
 def collect_console():
-    """(available, source, by_day, by_day_model, msgs_by_day) from agent-usage."""
-    by_day: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
-    by_day_model: dict[tuple[str, str], dict[str, int]] = defaultdict(lambda: defaultdict(int))
-    msgs_by_day: dict[str, int] = defaultdict(int)
+    """(available, source, error, by_day, by_day_model, msgs_by_day) from agent-usage.
 
-    available, out = _agent_usage()
-    if not available:
-        return False, "", by_day, by_day_model, msgs_by_day
-    for line in out.splitlines():
+    A reader that fails leaves the console usage out and says why; it never
+    takes the rest of the report with it.
+    """
+    empty = (defaultdict(lambda: defaultdict(int)), defaultdict(lambda: defaultdict(int)), defaultdict(int))
+    deadline = time.monotonic() + READER_TIMEOUT_S
+    try:
+        available, out = _agent_usage(deadline)
+        if not available:
+            return (False, "", None, *empty)
+        reported, source = _agent_usage(deadline, "--source")
+    except UsageError as err:
+        return (False, "", _clean(str(err), 240), *empty)
+    by_day, by_day_model, msgs_by_day = empty
+    for line in out.split("\n"):
         try:
             ev = json.loads(line)
         except ValueError:
@@ -92,15 +119,15 @@ def collect_console():
         if not all(isinstance(v, int) and not isinstance(v, bool) and v >= 0 for v in counts):
             continue
         day = ev.get("day")
-        day = day if isinstance(day, str) and DAY.match(day) else "unknown"
+        day = day if isinstance(day, str) and DAY.fullmatch(day) else "unknown"
         model = ev.get("model")
-        model = model if isinstance(model, str) and model else "unknown"
+        model = _clean(model, 100) if isinstance(model, str) and model else "unknown"
         msgs_by_day[day] += 1
         for k, v in zip(TOKEN_KEYS, counts):
             by_day[day][k] += v
             by_day_model[(day, model)][k] += v
-    reported, source = _agent_usage("--source")
-    return True, source.strip() if reported else "", by_day, by_day_model, msgs_by_day
+    source = _clean(source.strip(), 500) if reported else ""
+    return True, source, None, by_day, by_day_model, msgs_by_day
 
 
 def collect_chat():
@@ -139,7 +166,7 @@ def collect_chat():
                 parts = entry.rsplit(":", 4)
                 if len(parts) != 5 or not all(p.isdigit() for p in parts[1:]):
                     continue
-                model, counts = parts[0], [int(p) for p in parts[1:]]
+                model, counts = _clean(parts[0], 100), [int(p) for p in parts[1:]]
                 for key, value in zip(TOKEN_KEYS, counts):
                     by_day[day][key] += value
                     by_day_model[(day, model)][key] += value
@@ -148,7 +175,7 @@ def collect_chat():
 
 def collect_all():
     """Console usage plus chat audit lines, merged by day and by model."""
-    available, source, by_day, by_day_model, msgs_by_day = collect_console()
+    available, source, error, by_day, by_day_model, msgs_by_day = collect_console()
     chat_day, chat_model, today_cost, total_cost, seen = collect_chat()
     for day, tots in chat_day.items():
         for k, v in tots.items():
@@ -156,7 +183,7 @@ def collect_all():
     for key, tots in chat_model.items():
         for k, v in tots.items():
             by_day_model[key][k] += v
-    return available, source, by_day, by_day_model, msgs_by_day, (today_cost, total_cost, seen)
+    return available, source, error, by_day, by_day_model, msgs_by_day, (today_cost, total_cost, seen)
 
 
 def window_days(n: int) -> list[str]:
@@ -195,7 +222,7 @@ def line_for(label: str, totals: dict[str, int]) -> str:
 def build_report(days: int) -> tuple[dict, bool, bool]:
     """The report /api/usage returns, whether any usage was recorded at all, and
     whether any prompt line carried a cost."""
-    available, source, by_day, by_day_model, msgs_by_day, costs = collect_all()
+    available, source, error, by_day, by_day_model, msgs_by_day, costs = collect_all()
     today = _today()
     recent = window_days(days)
     today_cost, total_cost, seen = costs
@@ -215,6 +242,7 @@ def build_report(days: int) -> tuple[dict, bool, bool]:
         },
         "prompt_api_cost_usd": {"today": round(today_cost, 4), "total": round(total_cost, 4)},
         "available": available,
+        "error": error,
     }
     return report, bool(by_day), seen
 
@@ -223,6 +251,7 @@ def agent_name() -> str:
     try:
         with open(BRANDING_FILE, encoding="utf-8") as fh:
             name = json.load(fh).get("agentName")
+        name = _clean(name, 64) if isinstance(name, str) else None
     except (OSError, ValueError, AttributeError):
         name = None
     return name if isinstance(name, str) and name else "Agent"
@@ -234,11 +263,7 @@ def main(argv: list[str]) -> int:
     nums = [a for a in args if a.isdigit()]
     days = max(1, int(nums[0])) if nums else 7
 
-    try:
-        report, recorded, seen = build_report(days)
-    except UsageError as err:
-        print(f"ha-usage: {err}", file=sys.stderr)
-        return 1
+    report, recorded, seen = build_report(days)
 
     # Machine-readable mode for the prompt API's /api/usage endpoint.
     if as_json:
@@ -249,6 +274,8 @@ def main(argv: list[str]) -> int:
     tokens = report["tokens"]
     if report["available"]:
         print(f"{agent_name()} usage — {report['projects']}\n")
+    elif report["error"]:
+        print(f"{agent_name()} usage — console usage could not be read: {report['error']}\n")
     else:
         print(f"{agent_name()} usage — the engine does not report its console usage\n")
 

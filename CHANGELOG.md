@@ -20,7 +20,8 @@ uses [Semantic Versioning](https://semver.org/).
 - `ha-usage` and `/api/usage` take the agent's console usage from the engine's
   `/usr/local/bin/agent-usage`, which the start script requires, and prompt API
   runs from the audit log as before. The report adds `available`, false when
-  the engine does not report usage.
+  the engine does not report usage or its reader fails, and `error`, which says
+  why it failed.
 
 ### Changed
 

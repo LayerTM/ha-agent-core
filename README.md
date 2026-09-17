@@ -243,8 +243,11 @@ executable.
 `{"day": "YYYY-MM-DD", "model", "input", "output", "cache_read", "cache_write"}`,
 where `input` counts only the input tokens not read from cache. With
 `--source` it prints where it reads from. It exits 3 when the engine does not
-report usage; the report then carries `"available": false`, and any other
-failure makes `/api/usage` answer `usage_unavailable`. Prompt API runs are
+report usage; the report then carries `"available": false`. If it fails or
+takes longer than its budget (20 of the 30 seconds the prompt server gives
+`ha-usage`), the report carries `"available": false` and a one-line `"error"`,
+and still reports the prompt API usage. Model names and the source are kept to
+one line. Prompt API runs are
 counted by the core from its audit log, so an engine runs them without leaving
 a session file that `agent-usage` reads (each add-on's tests check this against
 its real engine); every run is counted once.

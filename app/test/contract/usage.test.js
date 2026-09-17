@@ -24,7 +24,7 @@ const { useAdapter } = require('../../server/adapter-contract');
 const { createNeutralAdapter, okTape } = require('../fixtures/neutral-adapter');
 const { adapter, state, branding } = createNeutralAdapter();
 useAdapter(adapter, branding);
-const { createPromptApp } = require('../../server/prompt/server');
+const { createPromptApp, USAGE_TIMEOUT_MS, USAGE_READER_TIMEOUT_MS } = require('../../server/prompt/server');
 const { run } = require('../../server/prompt/run');
 
 const HA_USAGE = path.join(__dirname, '..', '..', '..', 'rootfs', 'usr', 'local', 'bin', 'ha-usage');
@@ -85,11 +85,22 @@ test('an engine that reports no usage is "not available", and prompt runs still 
   assert.equal(body.messages.all_time, 0);
 });
 
-test('a reader that fails makes usage unavailable, not zero', async () => {
+test('a reader that fails leaves console usage out and says why; prompt runs still count', async () => {
   home({ broken: '' });
   const { status, body } = await getUsage();
-  assert.equal(status, 503);
-  assert.equal(body.code, 'usage_unavailable');
+  assert.equal(status, 200);
+  assert.equal(body.available, false);
+  assert.equal(body.error, 'agent-usage exited 1: neutral usage reader broke');
+  assert.deepEqual(body.tokens.today, { input: 7, output: 8, cache_read: 0, cache_write: 0 });
+});
+
+test('the reader\'s time budget is passed down and fits inside the server\'s own', async () => {
+  home({ 'sessions/a.jsonl': line(1, 2), 'record-budget': '' });
+  const { status } = await getUsage();
+  assert.equal(status, 200);
+  const passed = fs.readFileSync(path.join(process.env.HOME, '.neutral', 'budget'), 'utf8');
+  assert.equal(Number(passed), USAGE_READER_TIMEOUT_MS);
+  assert.ok(USAGE_READER_TIMEOUT_MS + 5000 <= USAGE_TIMEOUT_MS, 'the rest of the report keeps at least 5 s');
 });
 
 test('example of the rule: a prompt run leaves the engine\'s usage output unchanged', async () => {

@@ -116,6 +116,9 @@ const RETRY_BACKOFF_MS = Math.min(5000, Math.max(0, Number(process.env.CLAUDE_PR
 const MIN_RETRY_BUDGET_MS = Math.min(TIMEOUT_MS, Math.max(1000, Number(process.env.CLAUDE_PROMPT_MIN_RETRY_BUDGET_MS) || 15000));
 const delay = (ms) => new Promise((r) => { setTimeout(r, ms); });
 
+const USAGE_TIMEOUT_MS = 30000;
+const USAGE_READER_TIMEOUT_MS = 20000;
+
 // Rolling summary of recent chat READ runs, surfaced on /api/status so the
 // integration can show a soft health signal ("chat degraded N of the last M").
 // In-memory ring (last `cap`); a failure carries only a reason TOKEN from the
@@ -602,6 +605,9 @@ function createPromptApp({
   // Cached usage report from `ha-usage --json`. Parsing the CLI transcripts is
   // heavy, so cache for a few minutes and share one in-flight run across callers
   // (the coordinator sensor should poll no more than every few minutes).
+  // ha-usage gets USAGE_TIMEOUT_MS in all; the engine's reader inside it gets
+  // USAGE_READER_TIMEOUT_MS of that, so a slow reader leaves time for the rest of
+  // the report instead of taking it down with it.
   let usageCache = { value: null, stamp: 0 };
   let usageInFlight = null;
   function usageReport() {
@@ -611,9 +617,13 @@ function createPromptApp({
     if (usageInFlight) return usageInFlight;
     usageInFlight = new Promise((resolve) => {
       execFile(usageBin, ['--json'], {
-        timeout: 30000,
+        timeout: USAGE_TIMEOUT_MS,
         maxBuffer: 8 * 1024 * 1024,
-        env: { PATH: process.env.PATH, HOME: process.env.HOME },
+        env: {
+          PATH: process.env.PATH,
+          HOME: process.env.HOME,
+          CC_USAGE_READER_TIMEOUT_MS: String(USAGE_READER_TIMEOUT_MS),
+        },
       }, (err, stdout) => {
         usageInFlight = null;
         if (err) { resolve(null); return; }
@@ -1235,5 +1245,5 @@ function createPromptApp({
 
 module.exports = {
   createPromptApp, createRateLimiter, createBudget, createChatHealth, fileStore, fetchSnapshot, resizeSnapshot, Bucket,
-  resolveChatModel,
+  resolveChatModel, USAGE_TIMEOUT_MS, USAGE_READER_TIMEOUT_MS,
 };

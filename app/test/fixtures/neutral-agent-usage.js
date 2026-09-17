@@ -3,7 +3,8 @@
 
 // The neutral engine's agent-usage: prints the lines of every session file under
 // $HOME/.neutral/sessions, already in the contract's shape. $HOME/.neutral/unreported
-// makes it exit 3 (the engine reports no usage), $HOME/.neutral/broken exit 1.
+// makes it exit 3 (the engine reports no usage), $HOME/.neutral/broken exit 1;
+// with $HOME/.neutral/record-budget it writes the time budget it was given.
 
 const fs = require('node:fs');
 const path = require('node:path');
@@ -11,6 +12,9 @@ const path = require('node:path');
 const root = path.join(process.env.HOME || '', '.neutral');
 const sessions = path.join(root, 'sessions');
 
+if (fs.existsSync(path.join(root, 'record-budget'))) {
+  fs.writeFileSync(path.join(root, 'budget'), process.env.CC_USAGE_READER_TIMEOUT_MS || '');
+}
 if (fs.existsSync(path.join(root, 'unreported'))) process.exit(3);
 if (fs.existsSync(path.join(root, 'broken'))) {
   process.stderr.write('neutral usage reader broke\n');
