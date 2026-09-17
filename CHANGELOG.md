@@ -6,6 +6,8 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.0]
+
 ### Added
 
 - Every error answer of the prompt API carries a stable `code` next to its
