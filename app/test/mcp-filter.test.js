@@ -182,6 +182,48 @@ test('a success Home Assistant sends in another format carries nothing; an error
   assert.equal(await res.text(), '405: Method Not Allowed');
 });
 
+// A request with a body the relay must not judge: fetch refuses to send one on
+// GET, so this goes through node:http, with a length or chunked.
+function sendWithBody(method, path, body, chunked) {
+  return new Promise((resolve, reject) => {
+    const headers = { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' };
+    if (chunked) headers['transfer-encoding'] = 'chunked';
+    else headers['content-length'] = String(Buffer.byteLength(body));
+    const req = http.request(`${relay.url}${path}`, { method, headers }, (res) => {
+      let text = '';
+      res.setEncoding('utf8');
+      res.on('data', (c) => { text += c; });
+      res.on('end', () => resolve({ status: res.statusCode, text }));
+    });
+    req.on('error', reject);
+    if (chunked) req.write(body);
+    req.end(chunked ? undefined : body);
+  });
+}
+
+test('only POST carries a body to Home Assistant: any other request with one is refused', async () => {
+  const body = JSON.stringify(rpc('resources/read', 9, { uri: 'homeassistant://assist/context-snapshot' }));
+  for (const method of ['GET', 'DELETE']) {
+    for (const chunked of [false, true]) {
+      const res = await sendWithBody(method, '/api/mcp', body, chunked);
+      assert.equal(res.status, 400, `${method} chunked=${chunked}`);
+      assert.deepEqual(JSON.parse(res.text), { error: `a ${method} request carries no body` });
+      assert.doesNotMatch(res.text, /result/);
+    }
+  }
+  const camera = await sendWithBody('GET', '/api/camera_proxy/camera.door', body, false);
+  assert.equal(camera.status, 400);
+  assert.equal(seen.length, 0, 'nothing reached Home Assistant');
+});
+
+test('a GET or DELETE without a body reaches Home Assistant without one', async () => {
+  const empty = await sendWithBody('DELETE', '/api/mcp', '', false);
+  assert.equal(empty.status, 200);
+  const res = await fetch(`${relay.url}/api/mcp`, { headers: { authorization: `Bearer ${TOKEN}` } });
+  assert.equal(res.status, 200);
+  assert.deepEqual(seen, [{ method: 'DELETE', body: '' }, { method: 'GET', body: '' }]);
+});
+
 test('the server stream (GET) is filtered and still streams; DELETE ends a session', async () => {
   reply = (req, res) => {
     if (req.method === 'DELETE') { res.writeHead(200); res.end(); return; }

@@ -43,13 +43,13 @@ const MCP_METHODS = new Set(['POST', 'GET', 'DELETE']);
 const CAMERA_PATH_RE = /^\/api\/camera_proxy\/[a-z_]+\.[a-z0-9_]+$/;
 
 // Headers copied client -> Core. `authorization` is deliberately absent: it is
-// replaced, never forwarded. The MCP set matches what the Supervisor's own proxy
-// forwards for streamable HTTP.
+// replaced, never forwarded. Neither are `content-length` and
+// `transfer-encoding`: the relay sets the length of the one body it sends. The
+// MCP set matches what the Supervisor's own proxy forwards for streamable HTTP.
 const FORWARD_TO_CORE = new Set([
   'accept',
   'accept-language',
   'content-type',
-  'content-length',
   'mcp-session-id',
   'mcp-protocol-version',
   'last-event-id',
@@ -85,6 +85,14 @@ function readBody(stream, done) {
     chunks.push(chunk);
   });
   stream.on('end', () => done(over ? null : Buffer.concat(chunks)));
+}
+
+// Whether a request says it has a body. Only POST /api/mcp may, and that body
+// is read and judged; any other request with one is refused.
+function hasBody(req) {
+  if (req.headers['transfer-encoding'] !== undefined) return true;
+  const length = req.headers['content-length'];
+  return length !== undefined && length !== '0';
 }
 
 function deny(res, status, message) {
@@ -146,11 +154,18 @@ async function startCoreRelay({ coreOrigin, haToken, relayToken, log = () => {} 
       });
       return;
     }
+    if (hasBody(req)) {
+      deny(res, 400, `a ${req.method} request carries no body`);
+      req.resume();
+      return;
+    }
+    req.resume();
     forward(req, res, pathname, null);
   });
 
   // The request to Core, with the Home Assistant token in place of the relay's.
-  // `body` is the already-read MCP request body, or null to stream the request.
+  // Only POST /api/mcp carries a body to Core: `body` is that body, already read
+  // and judged, or null for a request that sends none. Nothing is streamed.
   function forward(req, res, pathname, body) {
     const headers = { authorization: `Bearer ${haToken}` };
     for (const [name, value] of Object.entries(req.headers)) {
@@ -230,7 +245,7 @@ async function startCoreRelay({ coreOrigin, haToken, relayToken, log = () => {} 
     });
 
     if (body !== null) upstream.end(body);
-    else req.pipe(upstream);
+    else upstream.end();
   }
 
   await /** @type {Promise<void>} */ (new Promise((resolve, reject) => {

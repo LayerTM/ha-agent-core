@@ -142,6 +142,9 @@ keeps it within the tools the run's allowlist names.
 - A request body with a refused method is not forwarded at all.
 - A body that is not JSON-RPC 2.0 is refused with 400.
 - A body over 1 MiB is refused with 413.
+- Only `POST /api/mcp` carries a body to Home Assistant. A `GET` or `DELETE`
+  (the event stream, the end of a session, a camera snapshot) is sent without
+  one, and one that comes with a body is refused with 400.
 
 From Home Assistant, answers and notifications pass, in JSON and in
 server-sent-event streams. A request the server makes of the agent (sampling,

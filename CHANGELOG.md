@@ -28,6 +28,11 @@ uses [Semantic Versioning](https://semver.org/).
   (`rootfs/usr/local/lib/addon-branding.sh`), and are `Agent` when it cannot be
   read. Stored names (the `claude-auto-` backups, the backup marker, the
   notification id prefix) are unchanged.
+- The loopback relay to Home Assistant's MCP server lets only `initialize`,
+  `ping`, `notifications/*`, `tools/list` and `tools/call` through from the
+  agent, answering every other method itself, and drops requests the server
+  makes of the agent. Only `POST /api/mcp` carries a body to Home Assistant; a
+  `GET` or `DELETE` that comes with one is refused.
 
 ### Fixed
 
@@ -38,10 +43,6 @@ uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- The loopback relay to Home Assistant's MCP server lets only `initialize`,
-  `ping`, `notifications/*`, `tools/list` and `tools/call` through from the
-  agent, answering every other method itself, and drops requests the server
-  makes of the agent.
 - Every error answer of the prompt API carries a stable `code` next to its
   `error` message, and `field` or `limit_bytes` where they apply.
   `GET /api/status` publishes `prompt_max_bytes` and `body_max_bytes`.
