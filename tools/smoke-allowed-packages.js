@@ -7,13 +7,20 @@
 // node-pty 1.1.0 ships its macOS spawn-helper without the executable bit, so a
 // prebuilt macOS copy cannot start one whatever this repository does.
 
+const fs = require('node:fs');
 const path = require('node:path');
+
+const { omittedByInstall } = require('./check-install-scripts.js');
 
 const dir = process.cwd();
 const pkg = require(path.join(dir, 'package.json'));
+// An allowed package the install left out on purpose (INSTALL_OMIT) is not
+// loaded; every other one must load.
+const lock = JSON.parse(fs.readFileSync(path.join(dir, 'package-lock.json'), 'utf8'));
 const allowed = Object.entries(pkg.allowScripts || {})
   .filter(([, on]) => on === true)
-  .map(([name]) => name);
+  .map(([name]) => name)
+  .filter((name) => !omittedByInstall(lock, `node_modules/${name}`, process.env.INSTALL_OMIT));
 const load = (name) => require(require.resolve(name, { paths: [dir] }));
 
 for (const name of allowed) load(name);
