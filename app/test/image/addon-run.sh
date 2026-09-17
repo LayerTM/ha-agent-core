@@ -32,7 +32,8 @@ cat > /usr/local/bin/provision-extras <<'EOF'
 echo "plugins=${CC_USER_PLUGINS} skills=${CC_SKILLS_GIT} ha_url=${HA_URL}" > /pins/provision.out
 EOF
 printf '#!/bin/bash\ncat\n' > /usr/local/bin/agent-ask
-chmod +x /usr/local/bin/node /usr/local/bin/provision-extras /usr/local/bin/agent-ask
+printf '#!/bin/bash\nexit 3\n' > /usr/local/bin/agent-usage
+chmod +x /usr/local/bin/node /usr/local/bin/provision-extras /usr/local/bin/agent-ask /usr/local/bin/agent-usage
 mkdir -p /usr/share/neutral
 printf 'Neutral instructions.\n' > /usr/share/neutral/AGENTS.md
 
@@ -172,6 +173,13 @@ eq "without an executable agent-ask: exits 1" "${STATUS}" 1
 contains "without an executable agent-ask: names it" "${P}/run.out" "command /usr/local/bin/agent-ask"
 [ -e "${P}/node.log" ] && bad "without agent-ask: nothing started" || ok "without agent-ask: nothing started"
 chmod +x /usr/local/bin/agent-ask
+rm /usr/local/bin/agent-usage
+options '{}'
+run_service
+eq "without agent-usage: exits 1" "${STATUS}" 1
+contains "without agent-usage: names it" "${P}/run.out" "command /usr/local/bin/agent-usage"
+printf '#!/bin/bash\nexit 3\n' > /usr/local/bin/agent-usage
+chmod +x /usr/local/bin/agent-usage
 rm -f /usr/local/lib/engine-hooks.sh
 options '{}'
 run_service

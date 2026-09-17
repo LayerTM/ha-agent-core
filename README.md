@@ -235,8 +235,24 @@ The functions are called in this order; each may log and export variables.
 | `engine_console_env` | with the console's environment |
 | `engine_prompt_settings` | prints `CLAUDE_PROMPT_SETTINGS`; an engine that restricts prompt runs on its command line prints nothing |
 
-The engine also installs `/usr/local/bin/agent-ask`, which the start script
-requires to be executable. It reads a prompt on stdin, runs the agent once with
+The engine also installs two commands, which the start script requires to be
+executable.
+
+`/usr/local/bin/agent-usage` reports the agent's console usage for
+`/api/usage` and `ha-usage`: one JSON line per agent message,
+`{"day": "YYYY-MM-DD", "model", "input", "output", "cache_read", "cache_write"}`,
+where `input` counts only the input tokens not read from cache. With
+`--source` it prints where it reads from. It exits 3 when the engine does not
+report usage; the report then carries `"available": false`. If it fails or
+takes longer than its budget (20 of the 30 seconds the prompt server gives
+`ha-usage`), the report carries `"available": false` and a one-line `"error"`,
+and still reports the prompt API usage. Model names and the source are kept to
+one line. Prompt API runs are
+counted by the core from its audit log, so an engine runs them without leaving
+a session file that `agent-usage` reads (each add-on's tests check this against
+its real engine); every run is counted once.
+
+`/usr/local/bin/agent-ask` It reads a prompt on stdin, runs the agent once with
 no tools and no permission bypass, and prints the answer; it exits non-zero when
 the agent gives none. The health check (`cc-monitor`, every
 `monitoring_interval_hours`) and the morning briefing (`cc-digest`, at
@@ -437,7 +453,7 @@ tools/npm-ci-checked.sh
 npm test
 npm run lint
 npm run typecheck
-(cd app && ../tools/npm-ci-checked.sh && npm test && npm run test:alerts && npm run test:config && npm run test:monitor && npm run test:digest && npm run test:image && npm run lint && npm run typecheck)
+(cd app && ../tools/npm-ci-checked.sh && npm test && npm run test:alerts && npm run test:config && npm run test:monitor && npm run test:digest && npm run test:usage && npm run test:image && npm run lint && npm run typecheck)
 python .github/scripts/secret_scan.py .
 python .github/scripts/hygiene_scan.py .
 ```

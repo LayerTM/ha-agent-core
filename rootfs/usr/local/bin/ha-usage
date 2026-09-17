@@ -1,0 +1,306 @@
+#!/usr/bin/env python3
+"""Summarise the agent's token usage for this add-on.
+
+Each run is counted once, by whoever runs it:
+
+- Console sessions: the engine's ``agent-usage`` prints one JSON line per agent
+  message, ``{"day", "model", "input", "output", "cache_read", "cache_write"}``,
+  where ``input`` counts only the input tokens not read from cache. It exits 3
+  when the engine does not report usage; the report then says
+  ``"available": false``. If it fails or runs out of time, the report says
+  ``"available": false`` with a short ``"error"``, and still carries the prompt
+  API usage. ``agent-usage --source`` prints where it reads from.
+- Prompt API runs leave no session file the engine reads. Their tokens and cost
+  come only from the ``prompt[...]`` lines the prompt server writes to
+  ``/data/claude-audit.log``.
+
+Usage:
+    ha-usage [DAYS]          # recent window for the per-model breakdown (default 7)
+    ha-usage --json [DAYS]   # the report /api/usage returns
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from collections import defaultdict
+from datetime import datetime, timezone
+
+# The engine's usage reader. Overridable so the parsing can be tested.
+AGENT_USAGE = os.environ.get("CC_USAGE_AGENT_CMD", "/usr/local/bin/agent-usage")
+NOT_REPORTED = 3
+# The time agent-usage may take, both calls together. The prompt server passes
+# the budget it keeps inside its own limit for this script; the default is for a
+# run from the shell.
+READER_TIMEOUT_S = int(os.environ.get("CC_USAGE_READER_TIMEOUT_MS", "20000")) / 1000
+# What a text from outside (a model name, a path, an error) may not contain.
+CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+BRANDING_FILE = "/opt/agent-console/adapter/branding.json"
+# Same override convention as cc-hook-audit, so the parsing can be tested.
+AUDIT_LOG = os.path.join(os.environ.get("CC_AUDIT_DATA_DIR", "/data"), "claude-audit.log")
+
+# A line the prompt server wrote: its own timestamp, then `prompt[<kind>]`. Only
+# these carry chat spend. Anything else in the log — a hook's record of a tool
+# call, whose arguments the model chose — is never read for numbers.
+PROMPT_LINE = re.compile(r"^(\d{4}-\d{2}-\d{2}) \d{2}:\d{2}:\d{2}  prompt\[[a-z-]+\] ")
+COST_FIELD = re.compile(r" cost=\$([0-9]+\.[0-9]+)(?= |$)")
+TOKENS_FIELD = re.compile(r" tokens=(\S+)")
+DAY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+# The report's token keys, which are also the order of the counts in an audit
+# line's tokens field.
+TOKEN_KEYS = ("input", "output", "cache_read", "cache_write")
+
+
+class UsageError(Exception):
+    """agent-usage failed in a way other than "not reported"."""
+
+
+def _clean(text: str, limit: int) -> str:
+    """One line of at most `limit` characters, control characters replaced."""
+    return CONTROL.sub("?", text)[:limit]
+
+
+def _fmt(n: int) -> str:
+    return f"{n:,}"
+
+
+def _today() -> str:
+    return datetime.now(timezone.utc).date().isoformat()
+
+
+def _agent_usage(deadline: float, *args: str) -> tuple[bool, str]:
+    """(reported, stdout) of one agent-usage call that must end by `deadline`."""
+    left = deadline - time.monotonic()
+    if left <= 0:
+        raise UsageError("agent-usage ran out of time")
+    try:
+        done = subprocess.run([AGENT_USAGE, *args], capture_output=True, text=True,
+                              errors="replace", timeout=left)
+    except subprocess.TimeoutExpired as err:
+        raise UsageError("agent-usage ran out of time") from err
+    except OSError as err:
+        raise UsageError(f"agent-usage could not run: {err.strerror}") from err
+    if done.returncode == NOT_REPORTED:
+        return False, ""
+    if done.returncode != 0:
+        raise UsageError(f"agent-usage exited {done.returncode}: {done.stderr.strip()[-200:]}")
+    return True, done.stdout
+
+
+def collect_console():
+    """(available, source, error, by_day, by_day_model, msgs_by_day) from agent-usage.
+
+    A reader that fails leaves the console usage out and says why; it never
+    takes the rest of the report with it.
+    """
+    empty = (defaultdict(lambda: defaultdict(int)), defaultdict(lambda: defaultdict(int)), defaultdict(int))
+    deadline = time.monotonic() + READER_TIMEOUT_S
+    try:
+        available, out = _agent_usage(deadline)
+        if not available:
+            return (False, "", None, *empty)
+        reported, source = _agent_usage(deadline, "--source")
+    except UsageError as err:
+        return (False, "", _clean(str(err), 240), *empty)
+    by_day, by_day_model, msgs_by_day = empty
+    for line in out.split("\n"):
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(ev, dict):
+            continue
+        counts = [ev.get(k, 0) for k in TOKEN_KEYS]
+        if not all(isinstance(v, int) and not isinstance(v, bool) and v >= 0 for v in counts):
+            continue
+        day = ev.get("day")
+        day = day if isinstance(day, str) and DAY.fullmatch(day) else "unknown"
+        model = ev.get("model")
+        model = _clean(model, 100) if isinstance(model, str) and model else "unknown"
+        msgs_by_day[day] += 1
+        for k, v in zip(TOKEN_KEYS, counts):
+            by_day[day][k] += v
+            by_day_model[(day, model)][k] += v
+    source = _clean(source.strip(), 500) if reported else ""
+    return True, source, None, by_day, by_day_model, msgs_by_day
+
+
+def collect_chat():
+    """Chat spend from the prompt server's audit lines.
+
+    Returns (by_day, by_day_model, today_cost, total_cost, seen). A line written
+    before tokens were recorded counts its cost and no tokens.
+    """
+    by_day: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    by_day_model: dict[tuple[str, str], dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    today = _today()
+    today_cost = total_cost = 0.0
+    seen = False
+    try:
+        # newline="\n": a record ends at a newline only. A carriage return inside
+        # a recorded argument must not start a line that could pass for ours.
+        fh = open(AUDIT_LOG, encoding="utf-8", errors="ignore", newline="\n")
+    except OSError:
+        return by_day, by_day_model, 0.0, 0.0, False
+    with fh:
+        for line in fh:
+            line = line.rstrip("\n")
+            head = PROMPT_LINE.match(line)
+            if not head:
+                continue
+            day = head.group(1)
+            costs = COST_FIELD.findall(line)
+            if costs:
+                seen = True
+                amt = float(costs[-1])
+                total_cost += amt
+                if day == today:
+                    today_cost += amt
+            tokens = TOKENS_FIELD.search(line)
+            for entry in tokens.group(1).split(",") if tokens else []:
+                parts = entry.rsplit(":", 4)
+                if len(parts) != 5 or not all(p.isdigit() for p in parts[1:]):
+                    continue
+                model, counts = _clean(parts[0], 100), [int(p) for p in parts[1:]]
+                for key, value in zip(TOKEN_KEYS, counts):
+                    by_day[day][key] += value
+                    by_day_model[(day, model)][key] += value
+    return by_day, by_day_model, today_cost, total_cost, seen
+
+
+def collect_all():
+    """Console usage plus chat audit lines, merged by day and by model."""
+    available, source, error, by_day, by_day_model, msgs_by_day = collect_console()
+    chat_day, chat_model, today_cost, total_cost, seen = collect_chat()
+    for day, tots in chat_day.items():
+        for k, v in tots.items():
+            by_day[day][k] += v
+    for key, tots in chat_model.items():
+        for k, v in tots.items():
+            by_day_model[key][k] += v
+    return available, source, error, by_day, by_day_model, msgs_by_day, (today_cost, total_cost, seen)
+
+
+def window_days(n: int) -> list[str]:
+    today = datetime.now(timezone.utc).date()
+    return [(today.fromordinal(today.toordinal() - i)).isoformat() for i in range(n)]
+
+
+def sum_over(by_day, days) -> dict[str, int]:
+    total = {k: 0 for k in TOKEN_KEYS}
+    for d in days:
+        for k, v in by_day.get(d, {}).items():
+            total[k] += v
+    return total
+
+
+def recent_models(by_day_model, recent) -> dict[str, dict[str, int]]:
+    """Per-model totals over the window, without models that did nothing."""
+    totals: dict[str, dict[str, int]] = defaultdict(lambda: {k: 0 for k in TOKEN_KEYS})
+    for (d, model), tots in by_day_model.items():
+        if d in recent:
+            for k, v in tots.items():
+                totals[model][k] += v
+    return {m: t for m, t in totals.items() if t["output"] or t["input"]}
+
+
+def line_for(label: str, totals: dict[str, int]) -> str:
+    return (
+        f"  {label:<16} "
+        f"{_fmt(totals['input']):>14} in  "
+        f"{_fmt(totals['output']):>12} out  "
+        f"{_fmt(totals['cache_read']):>14} cache-read  "
+        f"{_fmt(totals['cache_write']):>12} cache-write"
+    )
+
+
+def build_report(days: int) -> tuple[dict, bool, bool]:
+    """The report /api/usage returns, whether any usage was recorded at all, and
+    whether any prompt line carried a cost."""
+    available, source, error, by_day, by_day_model, msgs_by_day, costs = collect_all()
+    today = _today()
+    recent = window_days(days)
+    today_cost, total_cost, seen = costs
+    report = {
+        "projects": source,
+        "window_days": days,
+        "tokens": {
+            "today": sum_over(by_day, [today]),
+            "recent": sum_over(by_day, recent),
+            "all_time": sum_over(by_day, list(by_day.keys())),
+        },
+        "by_model_recent": recent_models(by_day_model, recent),
+        "messages": {
+            "today": msgs_by_day.get(today, 0),
+            "recent": sum(msgs_by_day.get(d, 0) for d in recent),
+            "all_time": sum(msgs_by_day.values()),
+        },
+        "prompt_api_cost_usd": {"today": round(today_cost, 4), "total": round(total_cost, 4)},
+        "available": available,
+        "error": error,
+    }
+    return report, bool(by_day), seen
+
+
+def agent_name() -> str:
+    try:
+        with open(BRANDING_FILE, encoding="utf-8") as fh:
+            name = json.load(fh).get("agentName")
+        name = _clean(name, 64) if isinstance(name, str) else None
+    except (OSError, ValueError, AttributeError):
+        name = None
+    return name if isinstance(name, str) and name else "Agent"
+
+
+def main(argv: list[str]) -> int:
+    args = argv[1:]
+    as_json = "--json" in args
+    nums = [a for a in args if a.isdigit()]
+    days = max(1, int(nums[0])) if nums else 7
+
+    report, recorded, seen = build_report(days)
+
+    # Machine-readable mode for the prompt API's /api/usage endpoint.
+    if as_json:
+        report["generated_at"] = datetime.now(timezone.utc).isoformat()
+        print(json.dumps(report))
+        return 0
+
+    tokens = report["tokens"]
+    if report["available"]:
+        print(f"{agent_name()} usage — {report['projects']}\n")
+    elif report["error"]:
+        print(f"{agent_name()} usage — console usage could not be read: {report['error']}\n")
+    else:
+        print(f"{agent_name()} usage — the engine does not report its console usage\n")
+
+    if not recorded:
+        print("  No usage recorded yet.")
+    else:
+        print("Tokens")
+        print(line_for("Today", tokens["today"]))
+        print(line_for(f"Last {days} days", tokens["recent"]))
+        print(line_for("All time", tokens["all_time"]))
+        models = report["by_model_recent"]
+        if models:
+            print(f"\nBy model (last {days} days)")
+            for model in sorted(models, key=lambda m: -models[m]["output"]):
+                print(line_for(model[:16], models[model]))
+        msgs = report["messages"]
+        print(f"\nAssistant messages: today {msgs['today']:,} · {days}d {msgs['recent']:,} · all {msgs['all_time']:,}")
+
+    cost = report["prompt_api_cost_usd"]
+    if seen:
+        print("\nPrompt-API cost (claude_ha integration, from ha-audit)")
+        print(f"  Today: ${cost['today']:.4f}   Total: ${cost['total']:.4f}")
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))
