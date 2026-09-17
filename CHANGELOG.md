@@ -8,6 +8,9 @@ uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Every error answer of the prompt API carries a stable `code` next to its
+  `error` message, and `field` or `limit_bytes` where they apply.
+  `GET /api/status` publishes `prompt_max_bytes` and `body_max_bytes`.
 - `tools/check-install-scripts.js` and `app/install-scripts.json`: the packages
   whose install scripts npm may run, together with everything they depend on,
   are pinned by registry tarball and integrity and checked from the lockfile
