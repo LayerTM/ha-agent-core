@@ -279,7 +279,7 @@ out="$(CMORE= creport)"
 check "a rotated audit log keeps its days" "$(printf '%s' "${out}" | jq -c '[.tokens.all_time.input, .prompt_api_cost_usd.total]')" '[1228,0.5]'
 printf 'not json' > "${cd_}/usage-cache.json"
 out="$(CMORE= creport)"
-check "an unreadable cache falls back to the previous one" "$(printf '%s' "${out}" | jq -c '[.tokens.all_time.input, has("history_reset")]')" '[1228,false]'
+check "an unreadable cache falls back to the previous one; an audit log counted since is gone, so a possible loss is said" "$(printf '%s' "${out}" | jq -c '[.tokens.all_time.input, .history_reset]')" '[1228,true]'
 printf 'not json' > "${cd_}/usage-cache.json"; printf '{"version":0}' > "${cd_}/usage-cache.json.1"
 out="$(CMORE= creport)"
 check "without a readable cache the files still there are counted, and the loss is said" \
@@ -300,6 +300,120 @@ out="$(CMORE= CC_USAGE_READER_TIMEOUT_MS=500 creport)"
 check "while another call holds the cache, the report says it is busy and keeps what the cache has" \
     "$(printf '%s' "${out}" | jq -c '[.available, .error, .history_reset]')" '[false,"the usage cache is busy",true]'
 wait "${holder}"
+
+echo "ha-usage — what the fingerprint sees, a lost generation, a crash between renames, a line too long"
+fd_="${work}/f"; mkdir -p "${fd_}"; : > "${fd_}/claude-audit.log"
+F="${fd_}/t.jsonl"
+freport() { DATA="${fd_}" USAGE_LINES="${F}" CMORE= report --json; }
+rec() { usage "$1" 0 0 0 fp; }
+{ printf '%4096s\n' ''; rec 10; } > "${F}"
+check "a record past the first 4 KB is counted" "$(input "$(freport)")" 10
+python3 -c '
+import sys
+p, old, new = sys.argv[1:4]
+data = open(p).read()
+open(p, "r+").write(data.replace(old, new))
+' "${F}" '"input":10,' '"input":90,'
+check "rewritten in place within the last 4 KB counted: seen, counted again" "$(input "$(freport)")" 90
+python3 -c '
+import json, sys
+with open(sys.argv[1], "w") as fh:
+    fh.write(json.dumps({"day": sys.argv[2], "model": "fp", "input": 1, "output": 0, "cache_read": 0, "cache_write": 0}) + "\n")
+    fh.write(" " * 20000 + "\n")
+    fh.write(json.dumps({"day": sys.argv[2], "model": "fp", "input": 2, "output": 0, "cache_read": 0, "cache_write": 0}) + "\n")
+    fh.write(" " * 20000 + "\n")
+' "${F}" "${today}"
+check "rewritten from the start, a file of 40 KB is counted again" "$(input "$(freport)")" 3
+python3 -c '
+import sys
+p = sys.argv[1]
+data = open(p).read()
+open(p, "r+").write(data.replace("\"input\": 2,", "\"input\": 7,"))
+' "${F}"
+check "a change in the middle, outside both fingerprinted ends, is not seen (the files are append-only)" "$(input "$(freport)")" 3
+
+rm -f "${fd_}"/usage-cache.json*
+rec 10 > "${F}"; freport > /dev/null
+rec 20 >> "${F}"
+check "an append on top" "$(input "$(freport)")" 30
+rm "${F}"; printf '{broken' > "${fd_}/usage-cache.json"
+out="$(freport)"
+check "back on the previous generation with a counted file gone: its days are kept and the possible loss is said" \
+    "$(printf '%s' "${out}" | jq -c '[.tokens.all_time.input, .history_reset, .history_since]')" "[10,true,\"${today}\"]"
+
+cat > "${work}/crash.py" <<'PY'
+import json, os, runpy, sys
+ha, data, case = sys.argv[1:4]
+os.environ["CC_AUDIT_DATA_DIR"] = data
+m = runpy.run_path(ha)
+g = m["_save"].__globals__
+cache_file = g["CACHE_FILE"]
+good = m["_fresh"]()
+good["retired"]["console"]["days"] = {"2026-09-17": {"kept": [30, 0, 0, 0, 1, 0]}}
+if case == "recovered":
+    open(cache_file + ".1", "w").write(json.dumps(good))
+    open(cache_file, "w").write("{broken")
+else:
+    open(cache_file, "w").write(json.dumps(good))
+    for name in (cache_file + ".1",):
+        if os.path.exists(name):
+            os.remove(name)
+loaded = m["_load"]()
+real = os.replace
+calls = []
+def crash(a, b):
+    # Every rename but the last one, which puts the new generation in place.
+    calls.append(b)
+    if b == cache_file:
+        raise RuntimeError("crash")
+    return real(a, b)
+g["os"].replace = crash
+try:
+    m["_save"](loaded)
+except RuntimeError:
+    pass
+g["os"].replace = real
+after = m["_load"]()
+print(json.dumps([after["_from"], after["retired"]["console"]["days"] != {}, after["history_reset"]], separators=(",", ":")))
+PY
+rm -f "${fd_}"/usage-cache.json*
+check "a crash while saving a recovered cache keeps the previous generation" \
+    "$(CC_AUDIT_DATA_DIR="${fd_}" python3 "${work}/crash.py" "${bin}" "${fd_}" recovered)" '["previous",true,false]'
+rm -f "${fd_}"/usage-cache.json*
+check "a crash between the two renames leaves the previous generation to load" \
+    "$(CC_AUDIT_DATA_DIR="${fd_}" python3 "${work}/crash.py" "${bin}" "${fd_}" current)" '["previous",true,false]'
+
+rm -f "${fd_}"/usage-cache.json*
+rec 3 > "${F}"
+python3 -c '
+import sys
+with open(sys.argv[1], "a") as fh:
+    fh.write("x" * (5 * 1024 * 1024) + "\n")
+' "${F}"
+check "a 5 MB line across rounds is read" "$(input "$(freport)")" 3
+off="$(jq '[.sources[] | select(.kind == "console") | .offset] | .[0]' "${fd_}/usage-cache.json")"
+python3 -c '
+import sys
+with open(sys.argv[1], "a") as fh:
+    fh.write("y" * (33 * 1024 * 1024) + "\n")
+' "${F}"
+rec 4 >> "${F}"
+out="$(freport)"
+check "a line longer than 32 MB stops the file with an error" \
+    "$(printf '%s' "${out}" | jq -c '[.available, (.error | endswith("has a line longer than 32 MB"))]')" '[false,true]'
+check "and leaves its offset where it was" \
+    "$(jq '[.sources[] | select(.kind == "console") | .offset] | .[0]' "${fd_}/usage-cache.json")" "${off}"
+check "and its state" "$(jq -c '[.sources[] | select(.kind == "console") | .state] | .[0]' "${fd_}/usage-cache.json")" 2
+rec 5 > "${F}"
+python3 -c '
+import sys
+with open(sys.argv[1], "a") as fh:
+    fh.write("z" * (33 * 1024 * 1024))
+' "${F}"
+out="$(freport)"
+check "an unfinished line already longer than 32 MB is an error too, not a buffer that grows" \
+    "$(printf '%s' "${out}" | jq -c '[.available, (.error | endswith("has a line longer than 32 MB"))]')" '[false,true]'
+rm -f "${F}"
 
 echo "ha-usage — two calls at once, a large history, a 1 GB file"
 rm -f "${cd_}"/usage-cache.json*
@@ -325,7 +439,7 @@ with open(path, "wb") as fh:
 st = os.stat(path)
 c = json.load(open(cache))
 c["sources"]["console:%d:%d" % (st.st_dev, st.st_ino)] = {"kind": "console", "path": path, "offset": size,
-    "head": hashlib.sha256(bytes(4096)).hexdigest(), "state": None, "days": {}, "cost_seen": False}
+    "fingerprint": hashlib.sha256(bytes(4096) + b"\0" + bytes(4096)).hexdigest(), "state": None, "days": {}, "cost_seen": False}
 json.dump(c, open(cache, "w"))
 ' "${big}" "${cd_}/usage-cache.json"
 line="$(usage 5 0 0 0 big)"
@@ -335,8 +449,8 @@ check "after 1 GB already counted, a call reads only the appended bytes" "$(cach
 check "and counts them" "$(printf '%s' "${out}" | jq -r '.by_model_recent.big.input // .tokens.all_time.input')" 5
 rm -f "${big}"
 
-if [ "${ran}" -lt 55 ]; then
-    echo "FAIL: only ${ran} ha-usage assertions ran — expected at least 55"
+if [ "${ran}" -lt 70 ]; then
+    echo "FAIL: only ${ran} ha-usage assertions ran — expected at least 70"
     exit 1
 fi
 if [ "${fails}" -eq 0 ]; then

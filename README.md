@@ -307,15 +307,23 @@ what was appended since the last call, and keeps the totals.
 Any of them exits 3 when the engine does not report usage; the report then
 carries `"available": false`.
 
+The transcript files must be append-only: a line once written does not change.
 The core keeps its totals in `/data/usage-cache.json`, per file (device and
-inode), and keeps the previous version as `usage-cache.json.1`:
+inode), with a fingerprint of the bytes it has counted (their first and last
+4 KB), and keeps the previous version as `usage-cache.json.1`:
 - a file that grew is read from where the last call stopped, whole lines only;
-- a file that shrank, or whose start changed, is counted again from its start;
+- a file that shrank, or whose fingerprint changed, is counted again from its
+  start; a change elsewhere in counted bytes is not seen;
+- a line longer than 32 MB stops the reading of that file with an error, and
+  the file is not read past it;
 - a file that is gone keeps its days, so usage history outlives the transcripts.
 
-The prompt server's audit log is read the same way. If neither cache can be
-read, the core counts again whatever files are left, and the report carries
-`"history_reset": true` and `"history_since"`, the first day it still has. If it fails or
+The prompt server's audit log is read the same way. If the current cache
+cannot be read, the core continues from the previous version; a new version
+never replaces the last readable one before it is written. If a file counted
+since the previous version is gone, or neither version can be read, the report
+carries `"history_reset": true` and `"history_since"`, the first day it still
+has. If it fails or
 takes longer than its budget (20 of the 30 seconds the prompt server gives
 `ha-usage`), the report carries `"available": false` and a one-line `"error"`,
 and still reports the prompt API usage. Model names and the source are kept to

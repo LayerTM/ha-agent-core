@@ -13,14 +13,18 @@ Each run is counted once, by whoever runs it:
   come only from the ``prompt[...]`` lines the prompt server writes to
   ``/data/claude-audit.log``.
 
-Both are read incrementally. ``/data/usage-cache.json`` keeps, per file
-(device and inode), the bytes already counted, a hash of the file's start, the
-parser's state and the per-day, per-model totals. A call reads only what was
-appended since, and only whole lines. A file that shrank or whose start changed
-is counted again from the start; a file that is gone keeps its days, so the
-history outlives the files. A cache that cannot be read falls back to the
-previous one; without either, everything is counted again and the report says
-``"history_reset": true`` with ``"history_since"``, the first day it still has.
+Both are read incrementally, and both are append-only: a line once written is
+never changed. ``/data/usage-cache.json`` keeps, per file (device and inode),
+the bytes already counted, a fingerprint of them (the first 4 KB and the 4 KB
+before the counted end), the parser's state and the per-day, per-model totals.
+A call reads only what was appended since, and only whole lines. A file that
+shrank, or whose fingerprint changed, is counted again from the start; a change
+elsewhere in counted bytes breaks the append-only rule and is not seen. A file
+that is gone keeps its days, so the history outlives the files. A cache that
+cannot be read falls back to the previous generation; the report then says
+``"history_reset": true`` with ``"history_since"`` (the first day it still has)
+if a file counted since is gone, and so it does when no generation can be read.
+A line longer than 32 MB stops the reading of its file with an error.
 
 ``agent-usage --parse`` reads one JSON array per line:
 ``["S", id, state]`` starts a file's new lines (``state`` is what the parser
@@ -72,6 +76,7 @@ CACHE_VERSION = 1
 # and how large a parser's state may be.
 HEAD_BYTES = 4096
 CHUNK_BYTES = 4 * 1024 * 1024
+MAX_LINE_BYTES = 32 * 1024 * 1024
 STATE_MAX_BYTES = 64 * 1024
 
 # A line the prompt server wrote: its own timestamp, then `prompt[<kind>]`. Only
@@ -215,17 +220,17 @@ def _valid(cache) -> bool:
     for src in cache["sources"].values():
         if not (isinstance(src, dict) and src.get("kind") in KINDS and isinstance(src.get("path"), str)
                 and isinstance(src.get("offset"), int) and src["offset"] >= 0
-                and isinstance(src.get("head"), str) and _valid_days(src.get("days"))
+                and isinstance(src.get("fingerprint"), str) and _valid_days(src.get("days"))
                 and isinstance(src.get("cost_seen"), bool)):
             return False
     return True
 
 
 def _load() -> dict:
-    """The cache, else the previous one; a fresh one that says so when both were
-    there and neither could be read."""
+    """The cache, else the previous generation; a fresh one that says so when
+    either was there and neither could be read. `_from` says which it is."""
     existed = False
-    for name in (CACHE_FILE, CACHE_FILE + ".1"):
+    for name, origin in ((CACHE_FILE, "current"), (CACHE_FILE + ".1", "previous")):
         try:
             with open(name, encoding="utf-8") as fh:
                 existed = True
@@ -236,21 +241,27 @@ def _load() -> dict:
             existed = True
             continue
         if _valid(cache):
+            cache["_from"] = origin
             return cache
     cache = _fresh()
     cache["history_reset"] = existed
+    cache["_from"] = "fresh"
     return cache
 
 
 def _save(cache: dict) -> None:
-    """Writes the cache atomically and keeps the previous one as .1."""
+    """Writes the cache atomically. A valid current generation becomes .1 only
+    once the new one is on disk; a current file that could not be read is
+    replaced and never moved over the previous generation."""
+    origin = cache.pop("_from", "fresh")
     tmp = f"{CACHE_FILE}.tmp.{os.getpid()}"
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         json.dump(cache, fh, separators=(",", ":"))
         fh.flush()
         os.fsync(fh.fileno())
-    if os.path.exists(CACHE_FILE):
+    if origin == "current":
+        # A crash between these leaves no current file and a valid .1.
         os.replace(CACHE_FILE, CACHE_FILE + ".1")
     os.replace(tmp, CACHE_FILE)
 
@@ -268,19 +279,26 @@ def _lock(deadline: float):
             time.sleep(0.05)
 
 
-def _head(path: str, length: int) -> str:
+def _fingerprint(path: str, length: int) -> str:
+    """Hash of the first 4 KB and the last 4 KB of the file's first `length` bytes."""
     with open(path, "rb") as fh:
-        return hashlib.sha256(fh.read(min(length, HEAD_BYTES))).hexdigest()
+        first = fh.read(min(length, HEAD_BYTES))
+        fh.seek(max(0, length - HEAD_BYTES))
+        last = fh.read(length - max(0, length - HEAD_BYTES))
+    return hashlib.sha256(first + b"\0" + last).hexdigest()
 
 
-def _chunks(path: str, offset: int, size: int):
+def _chunks(path: str, offset: int, size: int, deadline: float):
     """(end offset, whole lines) rounds from `offset` up to `size`; a last line
-    without its newline is left for a later call."""
+    without its newline is left for a later call. A line longer than
+    MAX_LINE_BYTES, or the deadline, ends it with an error before that line."""
     with open(path, "rb") as fh:
         fh.seek(offset)
         pos = offset
         carry = b""
         while pos < size:
+            if time.monotonic() >= deadline:
+                raise UsageError("usage reading ran out of time")
             block = fh.read(min(CHUNK_BYTES, size - pos))
             if not block:
                 return
@@ -289,10 +307,15 @@ def _chunks(path: str, offset: int, size: int):
             cut = data.rfind(b"\n")
             if cut < 0:
                 carry = data
+                if len(carry) > MAX_LINE_BYTES:
+                    raise UsageError(f"{_clean(path, 200)} has a line longer than 32 MB")
                 continue
             carry = data[cut + 1:]
             end = pos - len(carry)
-            yield end, [line.decode("utf-8", "replace") for line in data[:cut].split(b"\n")]
+            lines = data[:cut].split(b"\n")
+            if max(map(len, lines)) > MAX_LINE_BYTES:
+                raise UsageError(f"{_clean(path, 200)} has a line longer than 32 MB")
+            yield end, [line.decode("utf-8", "replace") for line in lines]
 
 
 def _track(cache: dict, kind: str, path: str) -> tuple[str, dict, int] | None:
@@ -307,10 +330,11 @@ def _track(cache: dict, kind: str, path: str) -> tuple[str, dict, int] | None:
     sid = f"{kind}:{st.st_dev}:{st.st_ino}"
     src = cache["sources"].get(sid)
     try:
-        if src is not None and (st.st_size < src["offset"] or _head(path, src["offset"]) != src["head"]):
+        if src is not None and (st.st_size < src["offset"]
+                                or _fingerprint(path, src["offset"]) != src["fingerprint"]):
             src = None
         if src is None:
-            src = {"kind": kind, "path": path, "offset": 0, "head": _head(path, 0), "state": None,
+            src = {"kind": kind, "path": path, "offset": 0, "fingerprint": _fingerprint(path, 0), "state": None,
                    "days": {}, "cost_seen": False}
             cache["sources"][sid] = src
     except OSError:
@@ -329,18 +353,21 @@ def _retire(cache: dict, kind: str, listed: set[str]) -> None:
         successor = by_path.get(src["path"])
         if successor is not None:
             try:
-                if _head(src["path"], src["offset"]) == src["head"]:
+                if _fingerprint(src["path"], src["offset"]) == src["fingerprint"]:
                     continue
             except OSError:
                 pass
         retired = cache["retired"][kind]
+        if cache.get("_from") == "previous":
+            # The lost current generation may have counted more of this file.
+            cache["history_reset"] = True
         _merge(retired["days"], src["days"])
         retired["cost_seen"] = retired["cost_seen"] or src["cost_seen"]
 
 
 def _advance(src: dict, path: str, end: int) -> None:
     src["offset"] = end
-    src["head"] = _head(path, end)
+    src["fingerprint"] = _fingerprint(path, end)
 
 
 class _Parser:
@@ -428,14 +455,14 @@ class _Parser:
             raise self._failed()
 
 
-def _read_audit(cache: dict) -> int:
+def _read_audit(cache: dict, deadline: float) -> int:
     read = 0
     listed = set()
     tracked = _track(cache, "audit", AUDIT_LOG) if os.path.exists(AUDIT_LOG) else None
     if tracked:
         sid, src, size = tracked
         listed.add(sid)
-        for end, lines in _chunks(AUDIT_LOG, src["offset"], size):
+        for end, lines in _chunks(AUDIT_LOG, src["offset"], size, deadline):
             for line in lines:
                 # A record ends at a newline only; a carriage return inside a
                 # recorded argument must not start a line that passes for ours.
@@ -470,7 +497,7 @@ def _read_console(cache: dict, deadline: float) -> int:
         for path, sid, src, size in plans:
             if src["offset"] >= size:
                 continue
-            for end, lines in _chunks(path, src["offset"], size):
+            for end, lines in _chunks(path, src["offset"], size, deadline):
                 if parser is None:
                     parser = _Parser(deadline)
                 records, state = parser.round(sid, src["state"], lines)
@@ -503,9 +530,11 @@ def collect_all():
         cache = _load() if persist else _fresh()
         cache["last_read_bytes"] = 0
         try:
-            cache["last_read_bytes"] = _read_audit(cache)
+            cache["last_read_bytes"] = _read_audit(cache, deadline)
         except OSError:
             pass
+        except UsageError as err:
+            error = _clean(str(err), 240)
         try:
             _read_console(cache, deadline)
             source = _clean(_agent_usage(deadline, "--source").strip(), 500)
@@ -515,6 +544,7 @@ def collect_all():
             available, error = False, _clean(str(err), 240)
         if persist:
             _save(cache)
+        cache.pop("_from", None)
     except UsageError as err:
         # The cache is busy: report what it held, without the new lines.
         cache = _load() if persist else _fresh()
