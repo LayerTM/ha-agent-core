@@ -15,6 +15,21 @@ const path = require('node:path');
 const { PAGES, renderPage } = require('./pages');
 const { stampAssetVersion } = require('./shell');
 
+// Files the pages use, served straight from installed packages: the terminal
+// emulator and the terminal font (JetBrains Mono, OFL-1.1).
+const PACKAGE_FILES = Object.freeze({
+  '/vendor/xterm.js': '@xterm/xterm/lib/xterm.js',
+  '/vendor/xterm.css': '@xterm/xterm/css/xterm.css',
+  '/vendor/addon-fit.js': '@xterm/addon-fit/lib/addon-fit.js',
+  '/vendor/addon-unicode11.js': '@xterm/addon-unicode11/lib/addon-unicode11.js',
+  '/vendor/addon-web-links.js': '@xterm/addon-web-links/lib/addon-web-links.js',
+  '/vendor/addon-search.js': '@xterm/addon-search/lib/addon-search.js',
+  '/vendor/addon-webgl.js': '@xterm/addon-webgl/lib/addon-webgl.js',
+  '/fonts/jetbrains-mono-400.woff2': '@fontsource/jetbrains-mono/files/jetbrains-mono-latin-400-normal.woff2',
+  '/fonts/jetbrains-mono-700.woff2': '@fontsource/jetbrains-mono/files/jetbrains-mono-latin-700-normal.woff2',
+});
+const PACKAGE_MAX_AGE_S = 24 * 3600;
+
 // The add-on ships these in app/adapter/icons/; the pages link them as icons/<name>.
 const ICONS = Object.freeze(['apple-touch-icon.png', 'favicon-32.png', 'favicon.svg', 'pwa-192.png', 'pwa-512.png']);
 
@@ -95,6 +110,11 @@ function mountConsoleAssets(app, { pages, icons, publicDir }, { assetVersion }) 
     res.sendFile(file, { maxAge: ASSET_MAX_AGE_S * 1000 });
   });
 
+  for (const [route, mod] of Object.entries(PACKAGE_FILES)) {
+    const file = require.resolve(mod);
+    app.get(route, (req, res) => res.sendFile(file, { maxAge: PACKAGE_MAX_AGE_S * 1000 }));
+  }
+
   app.use(express.static(publicDir, {
     // The entry document is a rendered page (above), never a file here.
     index: false,
@@ -115,4 +135,4 @@ function mountConsoleAssets(app, { pages, icons, publicDir }, { assetVersion }) 
   }));
 }
 
-module.exports = { ICONS, loadConsoleAssets, mountConsoleAssets };
+module.exports = { ICONS, PACKAGE_FILES, loadConsoleAssets, mountConsoleAssets };
