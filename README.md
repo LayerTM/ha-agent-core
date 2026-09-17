@@ -265,6 +265,30 @@ answer that fails, is empty or cannot be delivered is logged (`[cc-monitor]`,
 `rootfs/usr/share/agent-core/monitor-known-noise.tsv` are left out of the health
 check.
 
+### Provisioning
+
+The start script runs `rootfs/usr/local/bin/provision-extras` in the
+background, logging to `/data/provision.log`. With `HOME=/data/home` and the
+engine's bin directory first on `PATH`, it copies the image's skill pack
+(`/opt/ha-skills`), lets the engine install its plugins, syncs the
+`skills_git` repository (a skill the repository dropped since the previous run
+is removed; the user's own skills and the pack's are kept), and registers the
+`playwright` MCP server and, with a Home Assistant token, `hass-mcp`. Only a
+single run proceeds at a time; a failed step is logged and retried on the next
+start. It needs these from the hooks file:
+
+| variable or function | meaning |
+|---|---|
+| `ENGINE_STATE_DIR` | the engine's directory under `HOME`: the lock, the `skills_git` clone (`.skills-git`) and the names it provided (`.skills-git-names`) |
+| `ENGINE_SKILLS_DIR` | where the engine reads skills from |
+| `engine_provision_plugins` | installs the engine's plugins; an engine without plugins does nothing |
+| `engine_mcp_has NAME` | succeeds when the MCP server `NAME` is registered |
+| `engine_mcp_add NAME [KEY=VALUE...] -- ARGV...` | registers it for the user, with that environment and command line |
+
+These functions run in plain bash (not bashio) and may call `log MESSAGE`.
+`provision-extras --check` prints what is missing, one item per line; the
+start script refuses to start when it prints anything or fails.
+
 The script runs with `errexit`, `nounset` and `pipefail`, inherited by
 command substitutions, and calls every hook as a plain command: a failing step
 anywhere in a hook ends the start, the log names the hook, and the placeholder

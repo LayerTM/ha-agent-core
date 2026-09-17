@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# provision-extras: reconcile the bundled + user-declared agent extras (skill
+# pack, skills_git, the engine's plugins, MCP servers) into the persistent HOME
+# (/data/home). Idempotent — safe to run every start; only missing pieces are
+# installed. Run in the background by addon-run so it never blocks the console.
+# Logs to /data/provision.log.
+#
+# The engine's part comes from /usr/local/lib/engine-hooks.sh: the variables in
+# PROVISION_VARIABLES and the functions in PROVISION_HOOKS, which may call
+# `log`. `provision-extras --check` prints what the engine does not define, one
+# item per line, and does nothing else; addon-run refuses to start on it.
+# ==============================================================================
+export HOME=/data/home
+
+ENGINE_HOOKS_FILE=/usr/local/lib/engine-hooks.sh
+PROVISION_VARIABLES=(
+    ENGINE_BIN_DIR     # put first on PATH
+    ENGINE_STATE_DIR   # the engine's own directory under HOME: the lock, the skills_git clone and names
+    ENGINE_SKILLS_DIR  # where the engine reads skills from
+)
+PROVISION_HOOKS=(
+    engine_provision_plugins  # the engine's plugins and their sources
+    engine_mcp_has            # engine_mcp_has NAME: succeeds when the MCP server is registered
+    engine_mcp_add            # engine_mcp_add NAME [KEY=VALUE...] -- ARGV...: register it for the user
+)
+
+missing=()
+# shellcheck source=/dev/null
+if [ -r "${ENGINE_HOOKS_FILE}" ] && source "${ENGINE_HOOKS_FILE}"; then
+    for name in "${PROVISION_VARIABLES[@]}"; do
+        [ -n "${!name:-}" ] || missing+=("variable ${name}")
+    done
+    for name in "${PROVISION_HOOKS[@]}"; do
+        [ "$(type -t "${name}")" = function ] || missing+=("function ${name}")
+    done
+else
+    missing+=("file ${ENGINE_HOOKS_FILE}")
+fi
+
+log() { echo "[$(date '+%H:%M:%S')] $*"; }
+
+if [ "${1:-}" = --check ]; then
+    [ "${#missing[@]}" -eq 0 ] || printf '%s\n' "${missing[@]}"
+    exit 0
+fi
+if [ "${missing[*]}" = "file ${ENGINE_HOOKS_FILE}" ]; then
+    log "Cannot load ${ENGINE_HOOKS_FILE}"
+    exit 1
+fi
+if [ "${#missing[@]}" -gt 0 ]; then
+    log "The engine does not define: ${missing[*]}"
+    exit 1
+fi
+
+export PATH="${ENGINE_BIN_DIR}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# Single-instance lock: never run two reconciles at once (they write the same
+# engine files). A concurrent start just skips — the running one covers it.
+mkdir -p "${ENGINE_STATE_DIR}"
+exec 9>"${ENGINE_STATE_DIR}/.provision.lock"
+if ! flock -n 9; then
+    log "provisioning already running — skipping"
+    exit 0
+fi
+
+# --- 1. Bundled HA skill pack ---
+# These skills are add-on-owned: overwrite so image updates propagate. User's
+# own skills (any other name, or from skills_git) are never touched.
+# shellcheck disable=SC2088 # the log shows a path under HOME as ~/...
+case "${ENGINE_SKILLS_DIR}" in
+    "${HOME}"/*) skills_shown="~/${ENGINE_SKILLS_DIR#"${HOME}"/}" ;;
+    *) skills_shown="${ENGINE_SKILLS_DIR}" ;;
+esac
+mkdir -p "${ENGINE_SKILLS_DIR}"
+if [ -d /opt/ha-skills ]; then
+    cp -rf /opt/ha-skills/. "${ENGINE_SKILLS_DIR}/" 2>/dev/null || true
+    log "HA skill pack synced to ${skills_shown}"
+fi
+
+# --- 2. The engine's plugins ---
+engine_provision_plugins
+
+# --- 3. Personal skills repo (optional) ---
+# skills_git repo layout: each top-level dir is a skill containing SKILL.md.
+if [ -n "${CC_SKILLS_GIT:-}" ]; then
+    cache="${ENGINE_STATE_DIR}/.skills-git"
+    if [ -d "${cache}/.git" ]; then
+        git -C "${cache}" pull --ff-only >/dev/null 2>&1 && log "skills_git pulled" \
+            || log "skills_git pull failed"
+    else
+        rm -rf "${cache}"
+        git clone --depth 1 "${CC_SKILLS_GIT}" "${cache}" >/dev/null 2>&1 \
+            && log "skills_git cloned" || log "skills_git clone failed"
+    fi
+    if [ -d "${cache}" ]; then
+        # The skills the repository provided on the previous run, so one removed
+        # from it is removed here too. Only names on that list are ever removed:
+        # a skill of the user's own is not, and neither is a bundled HA skill of
+        # the same name (the pack above owns it). Until the list exists (the
+        # first run after an update), nothing is removed.
+        names_file="${ENGINE_STATE_DIR}/.skills-git-names"
+        synced=()
+        for d in "${cache}"/*/; do
+            [ -f "${d}SKILL.md" ] || continue
+            name="$(basename "${d}")"
+            rm -rf "${ENGINE_SKILLS_DIR:?}/${name}"
+            cp -r "${d}" "${ENGINE_SKILLS_DIR}/" 2>/dev/null
+            synced+=("${name}")
+        done
+        if [ -f "${names_file}" ]; then
+            while IFS= read -r old; do
+                case "${old}" in ''|.|..|*/*) continue ;; esac
+                still=0
+                for name in "${synced[@]}"; do
+                    [ "${name}" = "${old}" ] && still=1 && break
+                done
+                [ "${still}" = 1 ] && continue
+                [ -e "/opt/ha-skills/${old}" ] && continue
+                rm -rf "${ENGINE_SKILLS_DIR:?}/${old}"
+                log "skills_git: removed ${old}, which the repository no longer has"
+            done < "${names_file}"
+        fi
+        printf '%s\n' "${synced[@]}" > "${names_file}"
+        log "skills_git skills synced"
+    fi
+fi
+
+# --- 4. MCP servers ---
+if ! engine_mcp_has playwright; then
+    log "registering playwright MCP"
+    engine_mcp_add playwright -- \
+        playwright-mcp --headless --no-sandbox \
+        --browser chromium --executable-path /usr/bin/chromium >/dev/null 2>&1 \
+        && log "  ok playwright" || log "  FAILED playwright MCP"
+fi
+
+if [ -n "${HA_TOKEN:-}" ]; then
+    if ! engine_mcp_has hass-mcp; then
+        log "registering hass-mcp (HA Token present)"
+        engine_mcp_add hass-mcp \
+            "HA_URL=${HA_URL:-http://homeassistant:8123}" \
+            "HA_TOKEN=${HA_TOKEN}" -- hass-mcp >/dev/null 2>&1 \
+            && log "  ok hass-mcp" || log "  FAILED hass-mcp"
+    fi
+fi
+
+log "provisioning complete"

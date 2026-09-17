@@ -17,6 +17,10 @@ uses [Semantic Versioning](https://semver.org/).
 - `cc-monitor` and `cc-digest`, the health check and the morning briefing,
   which ask the engine's `/usr/local/bin/agent-ask` with the prompt on stdin.
   The start script requires `agent-ask` to be executable.
+- `provision-extras`, which installs the skill pack, the `skills_git` skills,
+  the engine's plugins and the MCP servers. The engine provides
+  `ENGINE_STATE_DIR`, `ENGINE_SKILLS_DIR`, `engine_provision_plugins`,
+  `engine_mcp_has` and `engine_mcp_add`, which the start script requires.
 - `ha-usage` and `/api/usage` take the agent's console usage from the engine's
   `/usr/local/bin/agent-usage`, which the start script requires, and prompt API
   runs from the audit log as before. The report adds `available`, false when

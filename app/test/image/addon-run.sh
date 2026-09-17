@@ -27,8 +27,10 @@ case "$1" in
         env -0 > /pins/console.env ;;
 esac
 EOF
+# provision-extras is a recorder too; its own check is tested in section 3.
 cat > /usr/local/bin/provision-extras <<'EOF'
 #!/bin/bash
+[ "${1:-}" = --check ] && exit 0
 echo "plugins=${CC_USER_PLUGINS} skills=${CC_SKILLS_GIT} ha_url=${HA_URL}" > /pins/provision.out
 EOF
 printf '#!/bin/bash\ncat\n' > /usr/local/bin/agent-ask
@@ -43,13 +45,17 @@ engine_hooks() {
     local omit="${1:-}"
     {
         for kv in 'ENGINE_BIN_DIR=/data/home/.neutral/bin' 'ENGINE_PROMPT_BIN=/data/home/.neutral/bin/neutral' \
-            'ENGINE_INSTRUCTIONS_SOURCE=/usr/share/neutral/AGENTS.md' 'ENGINE_INSTRUCTIONS_FILE=AGENTS.md'; do
+            'ENGINE_INSTRUCTIONS_SOURCE=/usr/share/neutral/AGENTS.md' 'ENGINE_INSTRUCTIONS_FILE=AGENTS.md' \
+            'ENGINE_STATE_DIR=/data/home/.neutral' 'ENGINE_SKILLS_DIR=/data/home/.neutral/skills'; do
             [ "${kv%%=*}" = "${omit}" ] || printf "%s='%s'\n" "${kv%%=*}" "${kv#*=}"
         done
         for hook in engine_prepare_home engine_env engine_sync_from_image engine_auth engine_model \
             engine_update engine_update_disabled engine_provision engine_console_env; do
             [ "${hook}" = "${omit}" ] || printf '%s() { echo "%s home=${HOME} data_home=$([ -d /data/home ] && echo y) workdir=$([ -d /data/workdir ] && echo y)" >> /pins/hooks.log; export NEUTRAL_%s=1; }\n' \
                 "${hook}" "${hook}" "${hook#engine_}"
+        done
+        for hook in engine_provision_plugins engine_mcp_has engine_mcp_add; do
+            [ "${hook}" = "${omit}" ] || printf '%s() { :; }\n' "${hook}"
         done
         [ "${omit}" = engine_prompt_settings ] \
             || printf '%s\n' 'engine_prompt_settings() { echo engine_prompt_settings >> /pins/hooks.log; printf "%s" "${NEUTRAL_SETTINGS_VALUE}"; }'
@@ -180,6 +186,23 @@ eq "without agent-usage: exits 1" "${STATUS}" 1
 contains "without agent-usage: names it" "${P}/run.out" "command /usr/local/bin/agent-usage"
 printf '#!/bin/bash\nexit 3\n' > /usr/local/bin/agent-usage
 chmod +x /usr/local/bin/agent-usage
+mv /usr/local/bin/provision-extras /tmp/provision-recorder
+cp /src/rootfs/usr/local/bin/provision-extras /usr/local/bin/provision-extras
+for omit in ENGINE_STATE_DIR engine_mcp_add; do
+    engine_hooks "${omit}"
+    options '{}'
+    run_service
+    eq "without ${omit}, which provisioning needs: exits 1" "${STATUS}" 1
+    contains "without ${omit}: names it" "${P}/run.out" "The engine does not define: $(case "${omit}" in ENGINE_*) echo variable ;; *) echo function ;; esac) ${omit}"
+    [ -e "${P}/node.log" ] && bad "without ${omit}: nothing started" || ok "without ${omit}: nothing started"
+done
+printf '#!/bin/bash\nexit 4\n' > /usr/local/bin/provision-extras
+engine_hooks
+options '{}'
+run_service
+eq "a failing provisioning check: exits 1" "${STATUS}" 1
+contains "a failing provisioning check: names it" "${P}/run.out" "the check /usr/local/bin/provision-extras --check (exit status 4)"
+mv /tmp/provision-recorder /usr/local/bin/provision-extras
 rm -f /usr/local/lib/engine-hooks.sh
 options '{}'
 run_service
