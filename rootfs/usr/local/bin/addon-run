@@ -28,7 +28,7 @@ ENGINE_VARIABLES=(
 # Executables the engine installs, which the core's scripts run.
 ENGINE_COMMANDS=(
     /usr/local/bin/agent-ask    # the prompt on stdin, the answer on stdout; no tools
-    /usr/local/bin/agent-usage  # console usage, one JSON line per agent message; exit 3 = not reported
+    /usr/local/bin/agent-usage  # console usage: --files, --parse, --source; exit 3 = not reported
 )
 ENGINE_HOOKS=(
     engine_prepare_home     # after /data/home exists: seed the engine's files

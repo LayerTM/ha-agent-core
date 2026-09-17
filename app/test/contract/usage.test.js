@@ -43,6 +43,8 @@ function home(files) {
   const root = path.join(process.env.HOME, '.neutral');
   fs.rmSync(root, { recursive: true, force: true });
   fs.mkdirSync(path.join(root, 'sessions'), { recursive: true });
+  // Each case starts from an empty usage cache.
+  for (const name of ['usage-cache.json', 'usage-cache.json.1']) fs.rmSync(path.join(TMP, name), { force: true });
   for (const [name, text] of Object.entries(files)) fs.writeFileSync(path.join(root, name), text);
 }
 
@@ -105,10 +107,26 @@ test('the reader\'s time budget is passed down and fits inside the server\'s own
 
 test('example of the rule: a prompt run leaves the engine\'s usage output unchanged', async () => {
   home({ 'sessions/a.jsonl': line(1, 2) });
-  const read = () => execFileSync(AGENT_USAGE, { encoding: 'utf8', env: { PATH: process.env.PATH, HOME: process.env.HOME } });
+  // What the engine would give the core: its files, and what they hold.
+  const read = () => {
+    const files = execFileSync(AGENT_USAGE, ['--files'], { encoding: 'utf8', env: { PATH: process.env.PATH, HOME: process.env.HOME } });
+    return files.split('\0').filter(Boolean).map((file) => [file, fs.readFileSync(file, 'utf8')]);
+  };
   const before = read();
   state.tapes.push(okTape('answer'));
   const outcome = await run({ bin: process.execPath, mode: 'read', prompt: 'hello', intents: [], cwd: TMP });
   assert.equal(outcome.status, 'ok');
-  assert.equal(read(), before);
+  assert.deepEqual(read(), before);
+  assert.equal(before.length, 1);
+});
+
+test('a second request reads only what was appended, and the files are not re-read', async () => {
+  home({ 'sessions/a.jsonl': line(1, 2) });
+  assert.deepEqual((await getUsage()).body.tokens.today, { input: 8, output: 10, cache_read: 0, cache_write: 0 });
+  fs.appendFileSync(path.join(process.env.HOME, '.neutral', 'sessions', 'a.jsonl'), line(5, 6));
+  // The prompt server keeps a report for a while; a fresh app asks again.
+  const { body } = await getUsage();
+  assert.deepEqual(body.tokens.today, { input: 13, output: 16, cache_read: 0, cache_write: 0 });
+  const cache = JSON.parse(fs.readFileSync(path.join(TMP, 'usage-cache.json'), 'utf8'));
+  assert.equal(cache.last_read_bytes, Buffer.byteLength(line(5, 6)));
 });
