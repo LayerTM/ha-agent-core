@@ -32,7 +32,7 @@ test('a module that is not an object, or has another apiVersion, is refused', ()
   for (const mod of [null, undefined, 'adapter', () => adapter]) {
     assert.throws(() => contract.validateAdapter(mod), /does not export an object/);
   }
-  for (const apiVersion of [undefined, 0, 1, 2, 3, 5, '4']) {
+  for (const apiVersion of [undefined, 0, 1, 2, 3, 4, 6, '5']) {
     assert.throws(() => contract.validateAdapter({ ...adapter, apiVersion }), /apiVersion/);
   }
 });

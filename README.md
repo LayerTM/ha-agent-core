@@ -16,8 +16,9 @@ is unpacked or executed.
 | `tools/npm-ci-checked.sh`, `tools/check-install-scripts.js`, `tools/build-allowed-packages.js`, `tools/smoke-allowed-packages.js` | the dependency install an add-on runs in `app/` and `ha-tools/` |
 
 An add-on assembles its image from this tree plus its own files, in the same
-layout: its engine adapter goes to `app/adapter/`, its console frontend to
-`app/public/`, its own scripts next to the core's under `rootfs/`. The `app/`
+layout: its engine adapter goes to `app/adapter/`, its console pages to
+`app/templates/` and the rest of its console frontend to `app/public/`, its own
+scripts next to the core's under `rootfs/`. The `app/`
 tree is installed at `/opt/agent-console`.
 
 ## The engine adapter
@@ -25,8 +26,8 @@ tree is installed at `/opt/agent-console`.
 Everything engine-specific comes from one module the add-on provides at
 `app/adapter/index.js`. The core loads it in one place,
 `app/server/adapter-contract.js`, and refuses to start if its `apiVersion` is not
-`4`, a member is missing or of the wrong type, or its names are not valid (see
-[Names](#names)):
+`5`, a member is missing or of the wrong type, or its names or colours are not
+valid (see [Names](#names) and [Console pages](#console-pages)):
 
 | member | type | used for |
 |---|---|---|
@@ -62,6 +63,8 @@ exactly these keys:
 | `productName` | the first line the start script logs; the startup page title when the page file is missing; the default title of `ha-notify` and the agent's attention notifications | `Claude Code` |
 | `consoleName` | the last line the start script logs; the console's listening line | `Claude Console` |
 | `agentName` | the daily budget notice; the error for closing the agent's tab; the titles of the backup and home alert notifications | `Claude` |
+| `cliName` | the console's update menu | `Claude CLI` |
+| `tabGlyph` | the mark before the agent's tab name in the console | `✳` |
 
 Every value is 1 to 64 characters, without surrounding spaces, control
 characters, quotes, `<`, `>`, `&`, `\` or `` ` ``, so it is used as it is in pages,
@@ -69,6 +72,43 @@ log lines and shell strings. The file is data: the startup placeholder reads it
 without loading the adapter's code, and the shell scripts read it through
 `rootfs/usr/local/lib/addon-branding.sh`. A notification whose names cannot be
 read is still sent, titled `Agent`; the start script refuses to start instead.
+All five are available to the console pages.
+
+### Console pages
+
+The console pages live in `app/templates/`: `index.html`, `starting.html`,
+`app.js`, `styles.css` and `manifest.webmanifest`. They may write the engine's
+names and colours as placeholders. The console fills them in once when it
+starts and serves only the finished files; nothing serves `app/templates/`
+itself, and nothing is templated in the browser. Everything in `app/public/` is
+served as it is, and the console does not start if `app/public/` holds a file
+with a page's name.
+
+| placeholder | value |
+|---|---|
+| `{{productName}}`, `{{consoleName}}`, `{{agentName}}`, `{{cliName}}`, `{{tabGlyph}}` | the [names](#names) |
+| `{{console.windowName}}` | `console.windowName` |
+| `{{console.updateCommandName}}` | the file name of `console.updateCommand` |
+| `{{theme.<section>.<key>}}` | a colour of the theme |
+| `{{theme.ui.accentRgb}}` | the red, green and blue of `theme.ui.accent`, as `r, g, b` |
+
+Each value is escaped for the file it goes into: HTML in the pages, a string of
+any quoting in `app.js` (it can never end a string or a script element), a JSON
+string in the manifest. A style sheet takes colours only. The startup page has
+the names and colours but not the `console.*` values. The console does not start
+if a file uses a placeholder not listed here, or has a `{{` that is not a
+placeholder. If the startup page cannot be rendered, the startup placeholder
+serves a plain page instead.
+
+The colours come from `app/adapter/theme.json`: an object with the sections
+`ui`, `terminal` and `search`, each with exactly the keys in
+`app/server/theme.js`. Every value is `#rgb`, `#rrggbb`, `#rrggbbaa`, `rgb()` or
+`rgba()`, and `ui.accent` is `#rrggbb`. Without the file the console uses the
+core's own neutral palette. A file that is present and invalid stops the start.
+
+The icons come from `app/adapter/icons/`, served as `icons/<name>`:
+`apple-touch-icon.png`, `favicon-32.png`, `favicon.svg`, `pwa-192.png` and
+`pwa-512.png`. The console does not start without all five.
 
 ### Prompt runs
 
@@ -189,9 +229,9 @@ taken from the same list the request is validated against. A client sends a
 field only when it is listed there.
 
 The adapter may require its own modules and the core's leaf modules
-`app/server/prompt/security.js` and `app/server/branding.js`, and nothing else
-of the core; the core returns to the adapter only through these
-members. `tools/check-adapter-graph.js <app dir>` checks that on an assembled
+`app/server/prompt/security.js`, `app/server/branding.js` and
+`app/server/theme.js`, and nothing else of the core; the core returns to the
+adapter only through these members. `tools/check-adapter-graph.js <app dir>` checks that on an assembled
 tree: it reads every file under `server/` and `adapter/`, follows only
 `require('<string literal>')`, refuses every other way to load or evaluate code
 (require used as a value, `import`, `module.require`, `createRequire`, `eval`,
