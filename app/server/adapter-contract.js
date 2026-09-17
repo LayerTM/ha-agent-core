@@ -12,16 +12,17 @@
 // member or a member of the wrong type stops the add-on at startup instead of
 // failing on the first request that happens to need it.
 
-const API_VERSION = 2;
+const API_VERSION = 3;
 
 // member path -> expected typeof
 const REQUIRED = {
   'descriptor.engine': 'string',
   'descriptor.parseVersion': 'function',
-  'runner.run': 'function',
-  'runner.shutdown': 'function',
-  'runner.safeLangTag': 'function',
-  'runner.TIMEOUT_MS': 'number',
+  'runner.bin': 'string',
+  'runner.launch': 'function',
+  'runner.createDecoder': 'function',
+  'runner.toolName': 'function',
+  'runner.toolBasename': 'function',
   'prompt.limitsCredential': 'function',
   'prompt.fetchLimits': 'function',
   'prompt.limitEntry': 'function',

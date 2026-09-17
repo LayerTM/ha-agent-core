@@ -12,6 +12,7 @@ const http = require('node:http');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { createPromptApp } = require('./server');
+const { shutdown: shutdownRuns } = require('./run');
 const { buildRedactor } = require('./security');
 const { adapter } = require('../adapter-contract');
 const { resolveCoreTarget } = require('./core-target');
@@ -21,7 +22,6 @@ const PORT = Number(process.env.CLAUDE_PROMPT_PORT || 8126);
 const DEV = process.env.CLAUDE_PROMPT_DEV === '1';
 const DATA_DIR = process.env.CLAUDE_PROMPT_DATA || '/data';
 const OPTIONS_FILE = process.env.CLAUDE_PROMPT_OPTIONS || '/data/options.json';
-const CLAUDE_BIN = process.env.CLAUDE_PROMPT_BIN || '/data/home/.local/bin/claude';
 const USAGE_BIN = process.env.CLAUDE_PROMPT_USAGE_BIN || '/usr/local/bin/ha-usage';
 // Dev/test escape hatch only. In the add-on the startup script unsets it after
 // applying user environment_vars, so it can never be set from the config — the
@@ -213,7 +213,8 @@ async function start() {
 
   const app = createPromptApp({
     token,
-    claudeBin: CLAUDE_BIN,
+    // The agent executable: the adapter's, unless the environment names another.
+    claudeBin: process.env.CLAUDE_PROMPT_BIN || adapter().runner.bin,
     claudeSettings,
     usageBin: USAGE_BIN,
     mcpConfigPath,
@@ -267,7 +268,7 @@ async function start() {
   announceDiscovery(token).catch((err) => log(`discovery error: ${err.message}`));
 
   return function shutdown() {
-    adapter().runner.shutdown();
+    shutdownRuns();
     if (relay) relay.close();
     server.close();
     server.closeAllConnections();

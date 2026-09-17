@@ -17,7 +17,7 @@ const {
 const { adapter } = require('../adapter-contract');
 const { createHistoryStore } = require('./history');
 
-const { run: runClaude, TIMEOUT_MS, safeLangTag } = adapter().runner;
+const { run, TIMEOUT_MS, safeLangTag } = require('./run');
 
 const MAX_PROMPT_BYTES = 8 * 1024;
 const MAX_CONCURRENT_RUNS = 2;
@@ -519,6 +519,9 @@ function createPromptApp({
   // from the environment inside, so the endpoint is testable without a login.
   apiKey = '', oauthToken = '', homeDir = '', limitsFetch = fetch,
   workDir, addonVersion, redact, audit, stateDir = null, dataDir = null, proactiveAlerts = false,
+  // The function that runs one agent call: the core's own, unless a test of the
+  // HTTP layer replaces it to script outcomes.
+  runAgent = run,
 }) {
   const app = express();
   app.disable('x-powered-by');
@@ -985,7 +988,7 @@ function createPromptApp({
         models: { model, voiceModel, writeModel, cameraModel },
       });
       try {
-        // 6. Run Claude (stateless, scrubbed, deny-by-default). A read whose run
+        // 6. Run the agent (stateless, scrubbed, deny-by-default). A read whose run
         //    fails to a TRANSIENT reason is retried (the identical prompt commonly
         //    succeeds), EXCEPT a camera-vision read (its snapshot is single-use) or
         //    a stream that already shipped deltas (they cannot be un-sent). One
@@ -993,7 +996,7 @@ function createPromptApp({
         for (;;) {
           attempts += 1;
           // eslint-disable-next-line no-await-in-loop
-          outcome = await runClaude({
+          outcome = await runAgent({
             bin: claudeBin,
             settings: claudeSettings,
             prompt,

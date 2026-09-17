@@ -20,6 +20,15 @@ uses [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Adapter API 3: the core runs prompt requests itself (`server/prompt/run.js`):
+  prompts, the answer schema, the tool plan, the child environment, time and
+  output limits, and answer validation. The adapter provides the executable,
+  the command line (`runner.launch`), the output decoder
+  (`runner.createDecoder`) and the naming of Home Assistant tools
+  (`runner.toolName`, `runner.toolBasename`). `runner.run`, `runner.shutdown`,
+  `runner.safeLangTag` and `runner.TIMEOUT_MS` are no longer adapter members.
+- Every property of the read answer schema is required, and the optional ones
+  are nullable; a `null` for an optional property is the same as leaving it out.
 - `app/package.json` allows `node-pty`'s install scripts by name, which npm 12
   needs to build the terminal's native module. node-gyp takes the local Node.js
   headers through its own `npm_package_config_node_gyp_*` settings.
