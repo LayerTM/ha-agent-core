@@ -23,17 +23,18 @@ layout: its engine adapter goes to `app/adapter/`, its console frontend to
 Everything engine-specific comes from one module the add-on provides at
 `app/adapter/index.js`. The core loads it in one place,
 `app/server/adapter-contract.js`, and refuses to start if its `apiVersion` is not
-`2` or a member is missing or of the wrong type:
+`3` or a member is missing or of the wrong type:
 
 | member | type | used for |
 |---|---|---|
 | `descriptor.engine` | string | the engine's stable name (`a-z`, `0-9`, `_`, `-`; at most 32), published as `engine` on `/api/status` |
 | `descriptor.parseVersion(stdout)` | function | the version in the agent's `--version` output, or `null` |
 | `descriptor.versionAlias` | optional string | one more `<name>_version` status key carrying `engine_version`, for clients that predate it |
-| `runner.run(options)` | function | one prompt run; resolves to the run outcome |
-| `runner.shutdown()` | function | stop every running agent process |
-| `runner.safeLangTag(raw)` | function | the language tag a run may use, or `''` |
-| `runner.TIMEOUT_MS` | number | the wall-clock ceiling of one request |
+| `runner.bin` | string | the agent executable a prompt run starts (`CLAUDE_PROMPT_BIN` overrides it) |
+| `runner.launch(spec, { env })` | function | `{ args, env }` for one run (see below) |
+| `runner.createDecoder(spec)` | function | a function turning one parsed line of the agent's JSON-lines output into a list of run events |
+| `runner.toolName(basename)` | function | the name the agent gives a tool of the `ha` MCP server |
+| `runner.toolBasename(name)` | function | the basename of such a tool name, or `null` for any other tool |
 | `prompt.limitsCredential({ oauthToken, homeDir })` | function | the access token the account-limits call uses, or `''` |
 | `prompt.fetchLimits(accessToken, fetch)` | function | the upstream account-limits request; resolves to the response |
 | `prompt.limitEntry(item)` | function | one upstream limit as a contract entry, or `null` |
@@ -47,6 +48,45 @@ Everything engine-specific comes from one module the add-on provides at
 | `console.updateCommand` | string | the command behind the console's update button |
 | `console.windowName`, `console.launcher` | strings | the agent's terminal tab |
 | `console.remoteWindow(env)` | optional function | `{ name, argv }` of an extra tab, or `null` |
+
+### Prompt runs
+
+The core runs every prompt-API request itself (`app/server/prompt/run.js`). It
+decides:
+- the answer schema, the system prompt and its directives;
+- what goes to the agent's stdin: a write run gets the confirmed intents, never
+  the prompt;
+- which Home Assistant tools the run may call, by basename, resolved against the
+  names the agent last published;
+- the wall-clock limit, the output caps and process-group termination;
+- the child's environment: `PATH`, `HOME`, `LANG`, `TERM`, plus what the adapter
+  adds, never a Supervisor or Home Assistant credential;
+- the validation of the answer.
+
+The adapter turns the run spec into a command line. Its `launch(spec, { env })`
+receives `mode`, `read`, `vision`, `imagePath`, `haAllowed` and
+`haDisallowed` (the tools the run may and may not call), `schema`,
+`systemPrompt`, `maxTurns`, `mcpConfigPath`, `settings`, `model` and `stream`.
+It must deny every tool call outside `haAllowed` (plus reading `imagePath` for a
+vision run).
+
+Its decoder reports these events:
+
+| event | fields | meaning |
+|---|---|---|
+| `init` | `tools?`, `mcpConnected?`, `model?` | the session started; `tools` are the names it publishes |
+| `tool-use` | `id`, `name` | the model called a tool |
+| `tool-result` | `id`, `isError` | that call's result |
+| `fragment-start`, `fragment` | `json` | streamed pieces of the structured answer |
+| `result` | `isError`, `deterministic`, `structured`, `text`, `numTurns?`, `costUsd?`, `tokens?` | the run ended |
+
+A missing optional field never widens what a run may do:
+- no tool list means no renamed-tool detection;
+- no cost means `null`;
+- no fragments means the answer arrives whole.
+
+Every property of the answer schema is required; a property that is optional in
+the answer is nullable there, and a `null` for it is treated as absent.
 
 `GET /api/status` identifies the engine with three fields: `engine`,
 `engine_version` (the parsed agent version, `""` when unknown; `version` is the

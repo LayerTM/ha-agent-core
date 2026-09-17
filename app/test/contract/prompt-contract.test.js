@@ -15,12 +15,13 @@ process.env.CLAUDE_PROMPT_RATE_BURST = '500';
 process.env.CLAUDE_PROMPT_RETRY_BACKOFF_MS = '0';
 process.env.CLAUDE_PROMPT_MIN_RETRY_BUDGET_MS = '1000';
 process.env.CLAUDE_PROMPT_MAX_ATTEMPTS = '2';
+process.env.CLAUDE_PROMPT_TIMEOUT_MS = '10000';
 
 const { useAdapter } = require('../../server/adapter-contract');
 const { createNeutralAdapter, okOutcome, errorOutcome, waitForAbort } = require('../fixtures/neutral-adapter');
 
-const TIMEOUT_MS = 5000;
-const { adapter, state } = createNeutralAdapter({ timeoutMs: TIMEOUT_MS });
+const TIMEOUT_MS = 10000;
+const { adapter, state, run: scriptedRun } = createNeutralAdapter();
 useAdapter(adapter);
 
 const { createPromptApp } = require('../../server/prompt/server');
@@ -43,6 +44,7 @@ function makeApp(overrides = {}) {
     addonVersion: 'contract',
     redact: buildRedactor([SECRET]),
     audit: (line) => auditLines.push(line),
+    runAgent: scriptedRun,
     ...overrides,
   });
 }
