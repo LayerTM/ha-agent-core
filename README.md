@@ -103,6 +103,38 @@ the answer is nullable there, and a `null` for it is treated as absent.
   - audit lines say `cost=unknown`;
   - a non-zero `chat_daily_budget_usd` keeps the prompt API from starting instead of pretending to enforce it.
 
+### Error answers
+
+Every error answer of the prompt API is `{ "error": "<message>", "code": "<code>" }`, plus:
+- `field`: the request field at fault;
+- `limit_bytes`: the size limit that was exceeded;
+- `domains`: the domains that need a confirmation.
+
+The message is for people and may change. The code is stable:
+
+| code | status | meaning |
+|---|---|---|
+| `unauthorized` | 401 | missing or wrong bearer token |
+| `forbidden` | 403 | the caller's address is not allowed |
+| `invalid_json` | 400 | the body is not JSON |
+| `invalid_body` | 400 | the body is not a JSON object |
+| `body_too_large` | 413 | the body is larger than `limit_bytes` |
+| `unknown_field` | 400 | `field` is not a request field |
+| `invalid_field` | 400 | `field` has a value it cannot take |
+| `mode_mismatch` | 400 | `field` is not valid in the requested mode |
+| `invalid_intents` | 400 | the intents are not acceptable |
+| `prompt_too_large` | 413 | the prompt is larger than `limit_bytes` |
+| `confirmation_required` | 403 | an unconfirmed write touches `domains` |
+| `rate_limited` | 429 | too many requests; see `Retry-After` |
+| `write_unavailable` | 503 | no Home Assistant MCP configuration for writes |
+| `busy` | 503 | the concurrent-run limit is reached |
+| `timeout` | 504 | the run passed its time limit |
+| `internal` | 500 | the run failed |
+| `usage_unavailable`, `limits_unavailable` | 503 | `/api/usage`, `/api/account_limits` have nothing to report |
+| `not_found` | 404 | no such route |
+
+`GET /api/status` publishes `prompt_max_bytes` and `body_max_bytes`, the limits the request is checked against.
+
 `GET /api/status` identifies the engine with three fields: `engine`,
 `engine_version` (the parsed agent version, `""` when unknown; `version` is the
 add-on's own) and `request_fields`, the body fields `POST /api/prompt` accepts,
