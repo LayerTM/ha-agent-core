@@ -118,7 +118,8 @@ jobs:
           i="$RUNNER_TEMP/installed"
           for f in app/server/adapter-contract.js app/server/prompt/server.js app/package-lock.json \
                    ha-tools/package-lock.json rootfs/usr/local/bin/cc-alerts \
-                   tools/verify-core.js tools/check-adapter-graph.js; do
+                   app/install-scripts.json tools/verify-core.js tools/check-adapter-graph.js \
+                   tools/check-install-scripts.js; do
             test -f "$i/$f" || { echo "::error::missing $f"; exit 1; }
           done
           if [ -e "$i/app/test" ] || [ -e "$i/test" ] || [ -e "$i/app/adapter" ]; then

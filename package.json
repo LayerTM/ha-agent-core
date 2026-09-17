@@ -21,10 +21,12 @@
     "app/server/",
     "app/package.json",
     "app/package-lock.json",
+    "app/install-scripts.json",
     "ha-tools/",
     "rootfs/",
     "tools/verify-core.js",
-    "tools/check-adapter-graph.js"
+    "tools/check-adapter-graph.js",
+    "tools/check-install-scripts.js"
   ],
   "scripts": {
     "test": "node --test \"test/**/*.test.js\"",

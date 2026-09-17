@@ -4,6 +4,21 @@ All notable changes to this project are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- `tools/check-install-scripts.js` and `app/install-scripts.json`: the install
+  scripts npm may run (`allowScripts`) are pinned by what they execute, so a
+  dependency update that changes them fails until it is reviewed.
+
+### Changed
+
+- `app/package.json` allows `node-pty`'s install scripts by name and the app is
+  installed with `npm ci --strict-allow-scripts`, which npm 12 needs to build
+  the terminal's native module. node-gyp takes the local Node headers through
+  its own `npm_package_config_node_gyp_*` settings.
+
 ## [0.2.0]
 
 ### Added

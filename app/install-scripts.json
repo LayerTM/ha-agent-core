@@ -1,0 +1,16 @@
+{
+  "node-pty": {
+    "version": "1.1.0",
+    "scripts": {
+      "install": "node scripts/prebuild.js || node-gyp rebuild",
+      "postinstall": "node scripts/post-install.js"
+    },
+    "files": {
+      "binding.gyp": "2e6fdfd713f8b3485dd4e2f4efe93bf5436a5ff4eec4deb45533b09b6932efff",
+      "deps/winpty/src/configurations.gypi": "f39946ce3b57a5518b917f2e7c854c38b37b9fa7e042ce2d447de9182035bbad",
+      "deps/winpty/src/winpty.gyp": "c67cd1b1d1e5aad4ac8795dccdb94df3bd43fd5f268cdeb7d4ce183bf6ce6315",
+      "scripts/post-install.js": "b15bb24cd3388b05392eeb200aa805e2827356818d111b93847e1b0f6a6ada46",
+      "scripts/prebuild.js": "7e604b10f7769d7dc95947d3481c00513b9e3bb6c561d5264506350a16a0381a"
+    }
+  }
+}

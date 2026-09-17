@@ -9,10 +9,10 @@ is unpacked or executed.
 | path | what |
 |---|---|
 | `app/server/` | the web console (terminal, tabs, uploads, restart) and the prompt API server |
-| `app/package.json`, `app/package-lock.json` | their dependencies, installed by the add-on with `npm ci` |
+| `app/package.json`, `app/package-lock.json`, `app/install-scripts.json` | their dependencies, installed by the add-on with `npm ci --strict-allow-scripts`, and the reviewed install scripts |
 | `ha-tools/` | the dashboard screenshot helper |
 | `rootfs/` | shared scripts: alerts, audit and backup hooks, Home Assistant helpers, shell configuration |
-| `tools/verify-core.js`, `tools/check-adapter-graph.js` | the checks an add-on runs when it assembles its image |
+| `tools/verify-core.js`, `tools/check-adapter-graph.js`, `tools/check-install-scripts.js` | the checks an add-on runs when it assembles its image |
 
 An add-on assembles its image from this tree plus its own files, in the same
 layout: its engine adapter goes to `app/adapter/`, its console frontend to
@@ -63,6 +63,27 @@ tree: it reads every file under `server/` and `adapter/`, follows only
 `Function`, the `vm` and `module` built-ins, `.mjs` and `.node` files, local
 requires of anything but `.js`, `.cjs` or `.json`, or outside those two
 directories), and reports cycles.
+
+## Install scripts
+
+npm runs a dependency's install scripts only for the packages named in the
+`allowScripts` field of `app/package.json` (currently `node-pty`, which compiles
+its native module); install with `npm ci --strict-allow-scripts`, so any other
+package with an install script fails the install instead of being left
+unbuilt. An entry names the package, not a version, so an update does not need
+a new approval as long as its install step is the same.
+`tools/check-install-scripts.js <dir>` holds it to that: for every allowed
+package it compares the lifecycle scripts, the files they run with `node`
+(and what those require by relative path) and the package's `.gyp`/`.gypi`
+files with the reviewed fingerprints in `install-scripts.json`, and fails
+naming each changed file. After reviewing a change,
+`tools/check-install-scripts.js <dir> --write` records it. Code a gyp file
+loads from another package, and the compiled sources, are pinned by the
+lockfile like every other dependency.
+
+node-gyp compiles against the headers of the Node that runs it when
+`npm_package_config_node_gyp_nodedir` points at that Node's prefix; nothing is
+downloaded then.
 
 ## The release archive
 
