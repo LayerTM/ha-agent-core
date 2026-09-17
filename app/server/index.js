@@ -11,7 +11,7 @@ const terminal = require('./terminal');
 const promptServer = require('./prompt');
 const { stampAssetVersion } = require('./shell');
 const sources = require('./sources');
-const { adapter } = require('./adapter-contract');
+const { adapter, branding } = require('./adapter-contract');
 
 const PORT = Number(process.env.CLAUDE_CONSOLE_PORT || 8099);
 const UPLOAD_DIR = process.env.UPLOAD_DIR || '/data/uploads';
@@ -159,7 +159,7 @@ async function main() {
 
   server.listen(PORT, () => {
     const { port } = /** @type {import('node:net').AddressInfo} */ (server.address());
-    console.log(`Claude Console listening on :${port}`);
+    console.log(`${branding().consoleName} listening on :${port}`);
   });
 
   // Companion prompt API for the claude_ha integration (separate listener,

@@ -3,7 +3,7 @@
 // Holds the ingress port while the add-on initializes.
 //
 // The console can only listen once initialization has finished — persistent
-// home, authentication, the Claude version check, the environment — and until
+// home, authentication, the engine version check, the environment — and until
 // it does, nothing answers on the ingress port at all, so Home Assistant's
 // panel has nothing to render. A restart therefore looked like a broken add-on
 // rather than a busy one, with no way to tell how long to wait or whether to
@@ -14,14 +14,15 @@
 // the console, and the page's own poll of /api/health carries it across: 503
 // while this is what is listening, 200 once the console is.
 //
-// Deliberately dependency-free (node:http, one file read): it must be able to
+// Deliberately dependency-free (node:http, two file reads): it must be able to
 // start before anything else in the add-on is ready, including npm's opinion of
-// whether node_modules is intact.
+// whether node_modules is intact, and it never loads the adapter's code.
 
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const sources = require('./sources');
+const { readBranding } = require('./branding');
 
 const PORT = Number(process.env.CLAUDE_CONSOLE_PORT || 8099);
 const DEV = process.env.CLAUDE_CONSOLE_DEV === '1';
@@ -34,7 +35,14 @@ try {
   page = fs.readFileSync(PAGE_FILE, 'utf8');
 } catch (err) {
   console.error(`starting page unavailable (${err.message}); serving plain text`);
-  page = '<!DOCTYPE html><meta charset="utf-8"><title>Claude Code</title>'
+  // A branding name needs no escaping (branding.js).
+  let title = 'Starting…';
+  try {
+    title = readBranding().productName;
+  } catch (brandingErr) {
+    console.error(`${brandingErr.message}; the page has no product name`);
+  }
+  page = `<!DOCTYPE html><meta charset="utf-8"><title>${title}</title>`
     + '<body style="background:#14141a;color:#ede9e0;font-family:system-ui;padding:24px">'
     + 'Starting the console…</body>';
 }

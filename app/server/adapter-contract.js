@@ -10,9 +10,12 @@
 //
 // The adapter is checked when it is first loaded: a wrong apiVersion, a missing
 // member or a member of the wrong type stops the add-on at startup instead of
-// failing on the first request that happens to need it.
+// failing on the first request that happens to need it. Its names are loaded
+// and checked with it, from app/adapter/branding.json (see branding.js).
 
-const API_VERSION = 3;
+const { readBranding, validateBranding } = require('./branding');
+
+const API_VERSION = 4;
 
 // member path -> expected typeof
 const REQUIRED = {
@@ -94,23 +97,36 @@ function validateAdapter(mod) {
 }
 
 let loaded = null;
+let names = null;
 
-// The validated adapter. Loaded from the assembled tree on first use.
+// The validated adapter. Loaded from the assembled tree on first use, together
+// with its names.
 function adapter() {
   if (!loaded) {
     // Supplied by the add-on that assembles the tree, so it does not exist here.
     // @ts-ignore
-    loaded = validateAdapter(require('../adapter'));
+    const mod = validateAdapter(require('../adapter'));
+    names = readBranding();
+    loaded = mod;
   }
   return loaded;
 }
 
-// For tests only: install an adapter before anything asked for one. There is
-// no fallback — without this call the real module path is the only source.
-function useAdapter(mod) {
+// The adapter's validated names: { productName, consoleName, agentName }.
+function branding() {
+  adapter();
+  return /** @type {{ productName: string, consoleName: string, agentName: string }} */ (names);
+}
+
+// For tests only: install an adapter and its names before anything asked for
+// them. There is no fallback — without this call the assembled tree is the only
+// source.
+function useAdapter(mod, brandingValue) {
   if (loaded) throw new Error('engine adapter: already loaded');
+  const branded = validateBranding(brandingValue);
   loaded = validateAdapter(mod);
+  names = branded;
   return loaded;
 }
 
-module.exports = { API_VERSION, REQUIRED, OPTIONAL, validateAdapter, adapter, useAdapter };
+module.exports = { API_VERSION, REQUIRED, OPTIONAL, validateAdapter, adapter, branding, useAdapter };

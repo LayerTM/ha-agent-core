@@ -1,7 +1,8 @@
 'use strict';
 
 // The startup placeholder runs before npm has installed anything and before the
-// adapter can be trusted to load: it must start from its own files alone.
+// adapter can be trusted to load: it must start from its own files alone. It
+// reads the adapter's names as data when they are there.
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
@@ -10,15 +11,22 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { reportedPort } = require('../fixtures/bound-port');
+const { NEUTRAL_BRANDING } = require('../fixtures/neutral-adapter');
 
 const SERVER = path.join(__dirname, '..', '..', 'server');
 
-test('the placeholder starts with no node_modules, no adapter and no page file', async (t) => {
+// Starts the placeholder from a tree holding only its own files, the adapter's
+// branding.json when given, and no page file. Resolves to its page and output.
+async function placeholderPage(t, branding) {
   const tree = fs.mkdtempSync(path.join(os.tmpdir(), 'core-starting-'));
   t.after(() => fs.rmSync(tree, { recursive: true, force: true }));
   fs.mkdirSync(path.join(tree, 'server'));
-  for (const name of ['starting.js', 'sources.js']) {
+  for (const name of ['starting.js', 'sources.js', 'branding.js']) {
     fs.copyFileSync(path.join(SERVER, name), path.join(tree, 'server', name));
+  }
+  if (branding) {
+    fs.mkdirSync(path.join(tree, 'adapter'));
+    fs.writeFileSync(path.join(tree, 'adapter', 'branding.json'), JSON.stringify(branding));
   }
   const child = spawn(process.execPath, [path.join(tree, 'server', 'starting.js')], {
     cwd: tree,
@@ -43,6 +51,17 @@ test('the placeholder starts with no node_modules, no adapter and no page file',
   assert.deepEqual(await health.json(), { ok: false, starting: true });
   const page = await fetch(`http://127.0.0.1:${port}/`);
   assert.equal(page.status, 200);
-  assert.match(await page.text(), /<title>Claude Code<\/title>[\s\S]*Starting the console/);
+  return { page: await page.text(), output };
+}
+
+test('the placeholder starts with no node_modules, no adapter and no page file', async (t) => {
+  const { page, output } = await placeholderPage(t, null);
+  assert.match(page, /<title>Starting…<\/title>[\s\S]*Starting the console/);
   assert.match(output, /starting page unavailable/);
+  assert.match(output, /branding: .*branding\.json cannot be read.*; the page has no product name/);
+});
+
+test('without a page file, the placeholder is titled with the adapter\'s product name', async (t) => {
+  const { page } = await placeholderPage(t, NEUTRAL_BRANDING);
+  assert.match(page, /<title>Neutral Agent<\/title>[\s\S]*Starting the console/);
 });

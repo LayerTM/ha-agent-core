@@ -32,8 +32,8 @@ test('the bootstrap refuses to start without the audit hook, then starts with it
 
   const { useAdapter } = require('../../server/adapter-contract');
   const { createNeutralAdapter, okTape } = require('../fixtures/neutral-adapter');
-  const { adapter, state } = createNeutralAdapter();
-  useAdapter(adapter);
+  const { adapter, state, branding } = createNeutralAdapter();
+  useAdapter(adapter, branding);
   const promptServer = require('../../server/prompt');
   assert.equal(promptServer.hasAuditHook('neutral-audit-hook'), true, 'the exported check is the adapter\'s');
   assert.equal(promptServer.hasAuditHook('{}'), false);

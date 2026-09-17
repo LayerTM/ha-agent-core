@@ -21,8 +21,8 @@ const { useAdapter } = require('../../server/adapter-contract');
 const { createNeutralAdapter, okOutcome, errorOutcome, waitForAbort } = require('../fixtures/neutral-adapter');
 
 const TIMEOUT_MS = 10000;
-const { adapter, state, run: scriptedRun } = createNeutralAdapter();
-useAdapter(adapter);
+const { adapter, state, run: scriptedRun, branding } = createNeutralAdapter();
+useAdapter(adapter, branding);
 
 const { createPromptApp } = require('../../server/prompt/server');
 const { buildRedactor } = require('../../server/prompt/security');

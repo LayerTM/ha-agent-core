@@ -15,6 +15,15 @@ uses [Semantic Versioning](https://semver.org/).
   An empty `engine_prompt_settings` is valid. The console runs from
   `/opt/agent-console`.
 
+### Changed
+
+- Adapter API 4: the adapter slot also holds `app/adapter/branding.json` with
+  `productName`, `consoleName` and `agentName`, checked when the adapter is
+  loaded. The daily budget notice, the console's listening line, the error for
+  closing the agent's tab and the fallback startup page use these names instead
+  of a fixed engine name. Without a page file and without the names, the startup
+  page is titled "Starting…".
+
 ## [0.3.0]
 
 ### Added
