@@ -5,17 +5,24 @@
 # Phase 1: initialization (persistent HOME, auth, env, instructions)
 # Phase 2: exec the Node web console (terminal server on the ingress port)
 #
-# Everything that depends on the engine comes from the add-on's
-# /usr/local/lib/engine-hooks.sh: the variables in ENGINE_VARIABLES and the
-# functions in ENGINE_HOOKS, called here in the order they are listed below.
+# Everything that depends on the engine comes from the add-on: its names from
+# the adapter's branding.json, the rest from /usr/local/lib/engine-hooks.sh —
+# the variables in ENGINE_VARIABLES and the functions in ENGINE_HOOKS, called
+# here in the order they are listed below.
 # ==============================================================================
+
+# A failing command ends the start, inside a hook and inside a command
+# substitution too. Set here rather than left to the interpreter: a hook call
+# must not be written as `hook || ...`, because bash ignores errexit in
+# everything such a call runs, so a hook's failing step would pass unnoticed.
+set -o errexit -o errtrace -o nounset -o pipefail
+shopt -s inherit_errexit
 
 # The console is installed here by every add-on.
 CONSOLE_DIR=/opt/agent-console
+BRANDING="${CONSOLE_DIR}/adapter/branding.json"
 
 ENGINE_VARIABLES=(
-    ENGINE_ADDON_NAME           # "Initializing <name> add-on..."
-    ENGINE_CONSOLE_NAME         # "Starting <name> on port ..."
     ENGINE_BIN_DIR              # put first on PATH
     ENGINE_PROMPT_BIN           # the agent executable of the prompt API
     ENGINE_INSTRUCTIONS_SOURCE  # the bundled instructions file
@@ -43,7 +50,12 @@ source /usr/local/lib/engine-hooks.sh || {
     bashio::log.error "Cannot load /usr/local/lib/engine-hooks.sh"
     exit 1
 }
+# productName: "Initializing <it> add-on..."; consoleName: "Starting <it> on port ..."
+product_name=$(jq -er '.productName | select(type == "string" and . != "")' "${BRANDING}" 2>/dev/null) || product_name=""
+console_name=$(jq -er '.consoleName | select(type == "string" and . != "")' "${BRANDING}" 2>/dev/null) || console_name=""
 missing=()
+[ -n "${product_name}" ] || missing+=("productName in ${BRANDING}")
+[ -n "${console_name}" ] || missing+=("consoleName in ${BRANDING}")
 for name in "${ENGINE_VARIABLES[@]}"; do
     [ -n "${!name:-}" ] || missing+=("variable ${name}")
 done
@@ -51,11 +63,11 @@ for name in "${ENGINE_HOOKS[@]}"; do
     [ "$(type -t "${name}")" = function ] || missing+=("function ${name}")
 done
 if [ "${#missing[@]}" -gt 0 ]; then
-    bashio::log.error "engine-hooks.sh does not define: ${missing[*]}"
+    bashio::log.error "The engine does not define: ${missing[*]}"
     exit 1
 fi
 
-bashio::log.info "Initializing ${ENGINE_ADDON_NAME} add-on..."
+bashio::log.info "Initializing ${product_name} add-on..."
 
 # --- Hold the ingress port while we initialize ---
 # Everything below takes time — the persistent home, authentication, the engine
@@ -70,24 +82,39 @@ CLAUDE_CONSOLE_PORT=8099 /usr/local/bin/node "${CONSOLE_DIR}/server/starting.js"
 starting_pid=$!
 # If initialization exits early the placeholder must not outlive it and keep the
 # port from the console's next attempt.
-trap 'kill "${starting_pid}" 2>/dev/null || true' EXIT
+# The hook that is running is named when the start ends in it.
+current_hook=""
+on_exit() {
+    local status=$?
+    kill "${starting_pid}" 2>/dev/null || true
+    if [ -n "${current_hook}" ]; then
+        bashio::log.error "${current_hook} failed (exit status ${status}); the add-on does not start"
+    fi
+}
+trap on_exit EXIT
+# run_hook NAME: a plain call, so errexit applies to every step of the hook.
+run_hook() {
+    current_hook="$1"
+    "$1"
+    current_hook=""
+}
 
 # --- Persistent HOME ---
 # Login state, sessions and updates live under /data/home, so they survive
 # restarts and add-on updates.
 mkdir -p /data/home
-engine_prepare_home
+run_hook engine_prepare_home
 
 export HOME=/data/home
 export PATH="${ENGINE_BIN_DIR}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export TERM=xterm-256color
 export LANG=C.UTF-8
-engine_env
+run_hook engine_env
 
-engine_sync_from_image
+run_hook engine_sync_from_image
 
 # --- Authentication ---
-engine_auth
+run_hook engine_auth
 
 # --- Home Assistant access token (LLAT) ---
 # Persists across add-on updates (stored by the Supervisor). Feeds the browser
@@ -130,13 +157,13 @@ if [ -n "${SUPERVISOR_TOKEN:-}" ]; then
 fi
 
 # --- Model override ---
-engine_model
+run_hook engine_model
 
 # --- Auto-update on startup ---
 if bashio::config.true 'auto_update'; then
-    engine_update
+    run_hook engine_update
 else
-    engine_update_disabled
+    run_hook engine_update_disabled
 fi
 
 # --- User environment variables (KEY=VALUE, one per entry) ---
@@ -154,7 +181,7 @@ done < <(config_list environment_vars)
 
 # --- Working directory, engine settings and instructions ---
 mkdir -p /data/workdir /data/uploads
-engine_provision
+run_hook engine_provision
 
 instructions="/data/workdir/${ENGINE_INSTRUCTIONS_FILE}"
 cp "${ENGINE_INSTRUCTIONS_SOURCE}" "${instructions}"
@@ -202,7 +229,7 @@ export CLAUDE_CONSOLE_PORT=8099
 export CLAUDE_CONSOLE_DEV=0
 export UPLOAD_DIR=/data/uploads
 export UPLOAD_RETENTION_DAYS=$(jq -r '.upload_retention_days // 14' /data/options.json 2>/dev/null || echo 14)
-engine_console_env
+run_hook engine_console_env
 
 # Prompt API — same authoritative treatment (CLAUDE_PROMPT_DEV would disable its
 # IP guard; the BIN path must not be redirectable via user env vars).
@@ -215,8 +242,10 @@ export CLAUDE_PROMPT_USAGE_BIN=/usr/local/bin/ha-usage
 # Prompt runs read no settings files, so whatever the console gets from its
 # settings is handed to them explicitly. An engine that restricts prompt runs
 # through its command line instead prints nothing. Assigned before the export,
-# so a failing hook ends the start instead of passing on an empty value.
+# which would hide the hook's exit status.
+current_hook=engine_prompt_settings
 CLAUDE_PROMPT_SETTINGS="$(engine_prompt_settings)"
+current_hook=""
 export CLAUDE_PROMPT_SETTINGS
 # NOT set: the prompt server derives Core's address itself and puts a loopback
 # relay in front of it (see app/server/prompt/core-target.js). Unset here, after
@@ -268,5 +297,5 @@ kill "${starting_pid}" 2>/dev/null || true
 wait "${starting_pid}" 2>/dev/null || true
 trap - EXIT
 
-bashio::log.info "Starting ${ENGINE_CONSOLE_NAME} on port ${CLAUDE_CONSOLE_PORT}..."
+bashio::log.info "Starting ${console_name} on port ${CLAUDE_CONSOLE_PORT}..."
 exec node "${CONSOLE_DIR}/server/index.js"

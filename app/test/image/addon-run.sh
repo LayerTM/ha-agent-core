@@ -13,7 +13,7 @@ P=/pins
 BASE_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 cp -a /src/rootfs/. /
-mkdir -p /opt/agent-console/server "${P}"
+mkdir -p /opt/agent-console/server /opt/agent-console/adapter "${P}"
 
 cat > /usr/local/bin/node <<'EOF'
 #!/bin/bash
@@ -35,12 +35,12 @@ chmod +x /usr/local/bin/node /usr/local/bin/provision-extras
 mkdir -p /usr/share/neutral
 printf 'Neutral instructions.\n' > /usr/share/neutral/AGENTS.md
 
-# engine_hooks [variable-or-function to leave out]
+# engine_hooks [what to leave out]: an ENGINE_* variable, a hook, a branding key,
+# emptyConsoleName, numberConsoleName, or branding.json
 engine_hooks() {
     local omit="${1:-}"
     {
-        for kv in 'ENGINE_ADDON_NAME=Neutral Agent' 'ENGINE_CONSOLE_NAME=Neutral Console' \
-            'ENGINE_BIN_DIR=/data/home/.neutral/bin' 'ENGINE_PROMPT_BIN=/data/home/.neutral/bin/neutral' \
+        for kv in 'ENGINE_BIN_DIR=/data/home/.neutral/bin' 'ENGINE_PROMPT_BIN=/data/home/.neutral/bin/neutral' \
             'ENGINE_INSTRUCTIONS_SOURCE=/usr/share/neutral/AGENTS.md' 'ENGINE_INSTRUCTIONS_FILE=AGENTS.md'; do
             [ "${kv%%=*}" = "${omit}" ] || printf "%s='%s'\n" "${kv%%=*}" "${kv#*=}"
         done
@@ -52,6 +52,15 @@ engine_hooks() {
         [ "${omit}" = engine_prompt_settings ] \
             || printf '%s\n' 'engine_prompt_settings() { echo engine_prompt_settings >> /pins/hooks.log; printf "%s" "${NEUTRAL_SETTINGS_VALUE}"; }'
     } > /usr/local/lib/engine-hooks.sh
+    local branding='{"productName":"Neutral Agent","consoleName":"Neutral Console","agentName":"Neutral"}'
+    case "${omit}" in
+        productName|consoleName) branding="$(jq -c --arg k "${omit}" 'del(.[$k])' <<< "${branding}")" ;;
+        emptyConsoleName) branding="$(jq -c '.consoleName = ""' <<< "${branding}")" ;;
+        numberConsoleName) branding="$(jq -c '.consoleName = 7' <<< "${branding}")" ;;
+        branding.json) branding="" ;;
+    esac
+    rm -f /opt/agent-console/adapter/branding.json
+    [ -z "${branding}" ] || printf '%s\n' "${branding}" > /opt/agent-console/adapter/branding.json
 }
 
 # options <json>: /data/options.json plus bashio's cached copy of it.
@@ -140,13 +149,16 @@ eq "no custom block without custom_instructions" "$(cat /data/workdir/AGENTS.md)
 [ -e /data/alerts-state.json ] && bad "alerts off drops the alerts state" || ok "alerts off drops the alerts state"
 
 echo "3. an incomplete engine-hooks.sh is refused before anything starts"
-for omit in engine_provision engine_prompt_settings ENGINE_PROMPT_BIN ENGINE_INSTRUCTIONS_FILE; do
+for omit in engine_provision engine_prompt_settings ENGINE_PROMPT_BIN ENGINE_INSTRUCTIONS_FILE productName consoleName emptyConsoleName numberConsoleName branding.json; do
     engine_hooks "${omit}"
     options '{}'
     run_service
     eq "without ${omit}: exits 1" "${STATUS}" 1
-    contains "without ${omit}: names it" "${P}/run.out" "engine-hooks.sh does not define: "
-    contains "without ${omit}: names it" "${P}/run.out" "${omit}"
+    contains "without ${omit}: says what is missing" "${P}/run.out" "The engine does not define: "
+    case "${omit}" in
+        emptyConsoleName|numberConsoleName|branding.json) contains "without ${omit}: names it" "${P}/run.out" "consoleName in /opt/agent-console/adapter/branding.json" ;;
+        *) contains "without ${omit}: names it" "${P}/run.out" "${omit}" ;;
+    esac
     [ -e "${P}/node.log" ] && bad "without ${omit}: nothing started" || ok "without ${omit}: nothing started"
     [ -e "${P}/hooks.log" ] && bad "without ${omit}: no hook ran" || ok "without ${omit}: no hook ran"
 done
@@ -159,20 +171,23 @@ contains "without engine-hooks.sh: says so" "${P}/run.out" "Cannot load /usr/loc
 
 echo "4. a failed start stops the placeholder"
 engine_hooks
-printf '%s\n' 'engine_auth() { echo engine_auth >> /pins/hooks.log; return 1; }' >> /usr/local/lib/engine-hooks.sh
+# The failing step is in the middle of the hook, not its last command.
+printf '%s\n' 'engine_auth() { echo engine_auth >> /pins/hooks.log; false; echo engine_auth continued >> /pins/hooks.log; }' >> /usr/local/lib/engine-hooks.sh
 options '{}'
 run_service
-eq "a failing hook ends the start" "$(tail -n1 "${P}/hooks.log")" engine_auth
+eq "a hook's failing step ends the start" "$(tail -n1 "${P}/hooks.log")" engine_auth
 [ "${STATUS}" -ne 0 ] && ok "with a non-zero status" || bad "with a non-zero status"
+contains "the failed hook is named" "${P}/run.out" "engine_auth failed (exit status 1); the add-on does not start"
 sleep 0.3
 eq "the placeholder was stopped" "$(tail -n1 "${P}/node.log")" "placeholder stopped"
 
 engine_hooks
-printf '%s\n' 'engine_prompt_settings() { echo engine_prompt_settings >> /pins/hooks.log; return 1; }' >> /usr/local/lib/engine-hooks.sh
+printf '%s\n' 'engine_prompt_settings() { echo engine_prompt_settings >> /pins/hooks.log; false; printf "%s" "{}"; }' >> /usr/local/lib/engine-hooks.sh
 options '{}'
 run_service
-eq "a failing engine_prompt_settings ends the start" "$(tail -n1 "${P}/hooks.log")" engine_prompt_settings
+eq "a failing step in engine_prompt_settings ends the start" "$(tail -n1 "${P}/hooks.log")" engine_prompt_settings
 [ "${STATUS}" -ne 0 ] && ok "with a non-zero status" || bad "with a non-zero status"
+contains "the failed hook is named" "${P}/run.out" "engine_prompt_settings failed (exit status 1); the add-on does not start"
 [ -e "${P}/console.env" ] && bad "and no console" || ok "and no console"
 
 if [ "${fails}" -ne 0 ]; then

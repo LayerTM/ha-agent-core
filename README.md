@@ -161,14 +161,14 @@ Assistant Core, applies `environment_vars` and `init_commands`, writes the
 instructions file, starts provisioning, the monitor, the digest and the alerts
 loop, and then runs the console from `/opt/agent-console`.
 
-Everything engine-specific comes from the add-on's
-`/usr/local/lib/engine-hooks.sh`. The script refuses to start, before anything
-runs, unless that file defines every variable and function below.
+Everything engine-specific comes from the add-on: `productName` and
+`consoleName` from its `app/adapter/branding.json` (the first and the last log
+line), everything else from its `/usr/local/lib/engine-hooks.sh`. The script
+refuses to start, before anything runs, unless both names are non-empty
+strings and the hooks file defines every variable and function below.
 
 | variable | meaning |
 |---|---|
-| `ENGINE_ADDON_NAME` | the add-on's name in the first log line |
-| `ENGINE_CONSOLE_NAME` | the console's name in the last log line |
 | `ENGINE_BIN_DIR` | the directory put first on `PATH` |
 | `ENGINE_PROMPT_BIN` | the agent executable of the prompt API (`CLAUDE_PROMPT_BIN`) |
 | `ENGINE_INSTRUCTIONS_SOURCE` | the bundled instructions file |
@@ -188,7 +188,10 @@ The functions are called in this order; each may log and export variables.
 | `engine_console_env` | with the console's environment |
 | `engine_prompt_settings` | prints `CLAUDE_PROMPT_SETTINGS`; an engine that restricts prompt runs on its command line prints nothing |
 
-A hook that fails ends the start, and the placeholder is stopped. The variables
+The script runs with `errexit`, `nounset` and `pipefail`, inherited by
+command substitutions, and calls every hook as a plain command: a failing step
+anywhere in a hook ends the start, the log names the hook, and the placeholder
+is stopped. The variables
 the script sets for the console after `environment_vars` (ports, `*_DEV`,
 `CLAUDE_PROMPT_BIN`, the unset `CLAUDE_PROMPT_HA_MCP_URL`) cannot be changed
 from the options.
