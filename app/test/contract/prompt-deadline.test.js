@@ -23,8 +23,8 @@ process.env.CLAUDE_PROMPT_MAX_ATTEMPTS = '3';
 const { useAdapter } = require('../../server/adapter-contract');
 const { createNeutralAdapter, okOutcome, errorOutcome } = require('../fixtures/neutral-adapter');
 
-const { adapter, state, run } = createNeutralAdapter();
-useAdapter(adapter);
+const { adapter, state, run, branding } = createNeutralAdapter();
+useAdapter(adapter, branding);
 
 const { createPromptApp } = require('../../server/prompt/server');
 

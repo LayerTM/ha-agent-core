@@ -6,7 +6,7 @@
  * server/ and, in an add-on, adapter/):
  *
  *   - the core loads the adapter in exactly one place, server/adapter-contract.js,
- *     and that module requires nothing else of the tree;
+ *     and that module requires nothing else of the tree but leaf modules;
  *   - adapter modules require only each other and the core's leaf modules, never
  *     the console, tmux or the prompt server — they return data, the core acts;
  *   - leaf modules require nothing of the tree;
@@ -30,7 +30,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const LOADER = 'server/adapter-contract.js';
-const LEAVES = new Set(['server/prompt/security.js']);
+const LEAVES = new Set(['server/prompt/security.js', 'server/branding.js']);
 const ROOTS = ['server', 'adapter'];
 const CODE_EXT = new Set(['.js', '.cjs']);
 const LOADABLE_EXT = new Set(['.js', '.cjs', '.json']);
@@ -277,7 +277,7 @@ function check(tree) {
 
     for (const target of targets) {
       if (LEAVES.has(rel)) problems.push(`${rel}: a leaf module requires ${target}`);
-      if (rel === LOADER && !isAdapter(target)) problems.push(`${rel}: the adapter loader requires ${target}`);
+      if (rel === LOADER && !isAdapter(target) && !LEAVES.has(target)) problems.push(`${rel}: the adapter loader requires ${target}`);
       if (isAdapter(target) && !isAdapter(rel) && rel !== LOADER) {
         problems.push(`${rel}: requires the adapter directly (only ${LOADER} may)`);
       }

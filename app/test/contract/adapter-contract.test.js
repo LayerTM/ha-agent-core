@@ -32,7 +32,7 @@ test('a module that is not an object, or has another apiVersion, is refused', ()
   for (const mod of [null, undefined, 'adapter', () => adapter]) {
     assert.throws(() => contract.validateAdapter(mod), /does not export an object/);
   }
-  for (const apiVersion of [undefined, 0, 1, 2, 4, '3']) {
+  for (const apiVersion of [undefined, 0, 1, 2, 3, 5, '4']) {
     assert.throws(() => contract.validateAdapter({ ...adapter, apiVersion }), /apiVersion/);
   }
 });
@@ -110,10 +110,13 @@ test('the optional remote window may be absent, but not malformed', () => {
   );
 });
 
-test('an adapter can be installed once, before first use, and only a valid one', () => {
-  const { adapter } = createNeutralAdapter();
-  assert.throws(() => contract.useAdapter({ ...adapter, apiVersion: 2 }), /apiVersion/);
-  assert.equal(contract.useAdapter(adapter), adapter);
+test('an adapter can be installed once, before first use, and only a valid one with valid names', () => {
+  const { adapter, branding } = createNeutralAdapter();
+  assert.throws(() => contract.useAdapter({ ...adapter, apiVersion: 2 }, branding), /apiVersion/);
+  assert.throws(() => contract.useAdapter(adapter), /branding: not an object/);
+  assert.throws(() => contract.useAdapter(adapter, { ...branding, agentName: '' }), /agentName/);
+  assert.equal(contract.useAdapter(adapter, branding), adapter);
   assert.equal(contract.adapter(), adapter);
-  assert.throws(() => contract.useAdapter(adapter), /already loaded/);
+  assert.deepEqual(contract.branding(), branding);
+  assert.throws(() => contract.useAdapter(adapter, branding), /already loaded/);
 });

@@ -30,8 +30,8 @@ test('a daily USD budget starts the prompt API only for an engine that reports c
 
   const { useAdapter } = require('../../server/adapter-contract');
   const { createNeutralAdapter } = require('../fixtures/neutral-adapter');
-  const { adapter } = createNeutralAdapter();
-  useAdapter(adapter);
+  const { adapter, branding } = createNeutralAdapter();
+  useAdapter(adapter, branding);
   const promptServer = require('../../server/prompt');
   const { result: stop, logged } = await captureLog(() => promptServer.start());
   assert.equal(typeof stop, 'function');

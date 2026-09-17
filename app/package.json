@@ -13,6 +13,7 @@
     "test": "node --test \"test/**/*.test.js\"",
     "test:alerts": "bash test/cc-alerts.test.sh",
     "test:config": "bash test/config-list.test.sh",
+    "test:image": "bash test/image.test.sh",
     "test:monitor": "bash test/cc-monitor.test.sh",
     "test:audit": "bash test/cc-hook-audit.test.sh",
     "test:statusline": "bash test/cc-statusline.test.sh",

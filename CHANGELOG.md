@@ -6,6 +6,34 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `rootfs/usr/local/bin/addon-run`, the add-on's start script. The engine
+  provides its names in `app/adapter/branding.json` and its paths and start-up
+  steps in `/usr/local/lib/engine-hooks.sh`; the script checks that every one is
+  defined before it starts anything.
+  An empty `engine_prompt_settings` is valid. The console runs from
+  `/opt/agent-console`.
+
+### Changed
+
+- Adapter API 4: the adapter slot also holds `app/adapter/branding.json` with
+  `productName`, `consoleName` and `agentName`, checked when the adapter is
+  loaded. The daily budget notice, the console's listening line, the error for
+  closing the agent's tab and the fallback startup page use these names instead
+  of a fixed engine name. Without a page file and without the names, the startup
+  page is titled "Starting…".
+- The notification titles of `ha-notify`, the agent's attention hook, the
+  safety backup hook and the home alerts loop come from `branding.json`
+  (`rootfs/usr/local/lib/addon-branding.sh`), and are `Agent` when it cannot be
+  read. Stored names (the `claude-auto-` backups, the backup marker, the
+  notification id prefix) are unchanged.
+
+### Fixed
+
+- Every command under `rootfs/usr/local/bin` is executable in the release
+  archive; most were packed with mode 644.
+
 ## [0.3.0]
 
 ### Added

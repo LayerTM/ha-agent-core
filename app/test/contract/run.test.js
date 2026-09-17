@@ -15,8 +15,8 @@ process.env.CLAUDE_PROMPT_TIMEOUT_MS = '10000';
 const { useAdapter } = require('../../server/adapter-contract');
 const { createNeutralAdapter } = require('../fixtures/neutral-adapter');
 
-const { adapter, state } = createNeutralAdapter();
-useAdapter(adapter);
+const { adapter, state, branding } = createNeutralAdapter();
+useAdapter(adapter, branding);
 
 const core = require('../../server/prompt/run');
 

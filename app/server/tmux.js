@@ -2,7 +2,7 @@
 
 const { execFile } = require('node:child_process');
 const fs = require('node:fs');
-const { adapter } = require('./adapter-contract');
+const { adapter, branding } = require('./adapter-contract');
 
 const MAIN = 'main';
 const CLAUDE_WINDOW = '0';
@@ -78,7 +78,7 @@ async function newShellWindow() {
 
 async function killWindow(index) {
   if (String(index) === CLAUDE_WINDOW) {
-    throw new Error('The Claude window cannot be closed');
+    throw new Error(`The ${branding().agentName} window cannot be closed`);
   }
   await run(['kill-window', '-t', `${MAIN}:${index}`]);
 }

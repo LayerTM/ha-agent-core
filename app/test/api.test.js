@@ -23,8 +23,8 @@ process.env.CC_ALERTS_STATE_PATH = STATE;
 delete process.env.SUPERVISOR_TOKEN;
 
 // The console reads its engine values from the adapter; a neutral one here.
-const { adapter: neutral } = require('./fixtures/neutral-adapter').createNeutralAdapter();
-require('../server/adapter-contract').useAdapter(neutral);
+const { adapter: neutral, branding: neutralBranding } = require('./fixtures/neutral-adapter').createNeutralAdapter();
+require('../server/adapter-contract').useAdapter(neutral, neutralBranding);
 
 const express = require('express');
 const { createRouter } = require('../server/api');
@@ -57,6 +57,12 @@ test('GET /health → { ok: true }', async () => {
   const { status, body } = await getJson('/health');
   assert.equal(status, 200);
   assert.deepEqual(body, { ok: true });
+});
+
+test('DELETE /tabs/0 refuses to close the agent\'s tab and names the agent', async () => {
+  const r = await fetch(`${BASE}/tabs/0`, { method: 'DELETE' });
+  assert.equal(r.status, 400);
+  assert.deepEqual(await r.json(), { error: 'The Neutral window cannot be closed' });
 });
 
 test('GET /status surfaces quick_prompts (trimmed, strings-only, capped)', async () => {

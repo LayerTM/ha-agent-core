@@ -51,6 +51,7 @@ test('each forbidden edge is reported', (t) => {
     ['server/api.js', "require('../adapter');\n", /server\/api\.js: requires the adapter directly/],
     ['server/prompt/security.js', "require('./history');\n", /a leaf module requires server\/prompt\/history\.js/],
     ['server/adapter-contract.js', "require('./tmux');\n", /the adapter loader requires server\/tmux\.js/],
+    ['server/branding.js', "require('./sources');\n", /a leaf module requires server\/sources\.js/],
     ['server/shell.js', 'const name = "./tmux"; require(name);\n', /unsupported loading form: require\(\) with an argument that is not a string literal/],
     ['server/shell.js', "require('./missing');\n", /does not resolve to a file/],
   ];

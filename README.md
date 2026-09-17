@@ -17,14 +17,16 @@ is unpacked or executed.
 
 An add-on assembles its image from this tree plus its own files, in the same
 layout: its engine adapter goes to `app/adapter/`, its console frontend to
-`app/public/`, its own scripts next to the core's under `rootfs/`.
+`app/public/`, its own scripts next to the core's under `rootfs/`. The `app/`
+tree is installed at `/opt/agent-console`.
 
 ## The engine adapter
 
 Everything engine-specific comes from one module the add-on provides at
 `app/adapter/index.js`. The core loads it in one place,
 `app/server/adapter-contract.js`, and refuses to start if its `apiVersion` is not
-`3` or a member is missing or of the wrong type:
+`4`, a member is missing or of the wrong type, or its names are not valid (see
+[Names](#names)):
 
 | member | type | used for |
 |---|---|---|
@@ -49,6 +51,24 @@ Everything engine-specific comes from one module the add-on provides at
 | `console.updateCommand` | string | the command behind the console's update button |
 | `console.windowName`, `console.launcher` | strings | the agent's terminal tab |
 | `console.remoteWindow(env)` | optional function | `{ name, argv }` of an extra tab, or `null` |
+
+### Names
+
+The add-on names its engine in `app/adapter/branding.json`, a JSON object with
+exactly these keys:
+
+| key | used for | Claude Code add-on |
+|---|---|---|
+| `productName` | the first line the start script logs; the startup page title when the page file is missing; the default title of `ha-notify` and the agent's attention notifications | `Claude Code` |
+| `consoleName` | the last line the start script logs; the console's listening line | `Claude Console` |
+| `agentName` | the daily budget notice; the error for closing the agent's tab; the titles of the backup and home alert notifications | `Claude` |
+
+Every value is 1 to 64 characters, without surrounding spaces, control
+characters, quotes, `<`, `>`, `&`, `\` or `` ` ``, so it is used as it is in pages,
+log lines and shell strings. The file is data: the startup placeholder reads it
+without loading the adapter's code, and the shell scripts read it through
+`rootfs/usr/local/lib/addon-branding.sh`. A notification whose names cannot be
+read is still sent, titled `Agent`; the start script refuses to start instead.
 
 ### Prompt runs
 
@@ -165,8 +185,9 @@ add-on's own) and `request_fields`, the body fields `POST /api/prompt` accepts,
 taken from the same list the request is validated against. A client sends a
 field only when it is listed there.
 
-The adapter may require its own modules and `app/server/prompt/security.js`, and
-nothing else of the core; the core returns to the adapter only through these
+The adapter may require its own modules and the core's leaf modules
+`app/server/prompt/security.js` and `app/server/branding.js`, and nothing else
+of the core; the core returns to the adapter only through these
 members. `tools/check-adapter-graph.js <app dir>` checks that on an assembled
 tree: it reads every file under `server/` and `adapter/`, follows only
 `require('<string literal>')`, refuses every other way to load or evaluate code
@@ -174,6 +195,50 @@ tree: it reads every file under `server/` and `adapter/`, follows only
 `Function`, the `vm` and `module` built-ins, `.mjs` and `.node` files, local
 requires of anything but `.js`, `.cjs` or `.json`, or outside those two
 directories), and reports cycles.
+
+## The start script
+
+`rootfs/usr/local/bin/addon-run` is the add-on's single longrun service; the
+add-on's s6 `run` script is `exec /usr/local/bin/addon-run`. It holds the
+ingress port with the startup placeholder, prepares `/data`, resolves Home
+Assistant Core, applies `environment_vars` and `init_commands`, writes the
+instructions file, starts provisioning, the monitor, the digest and the alerts
+loop, and then runs the console from `/opt/agent-console`.
+
+Everything engine-specific comes from the add-on: `productName` and
+`consoleName` from its `app/adapter/branding.json` (the first and the last log
+line), everything else from its `/usr/local/lib/engine-hooks.sh`. The script
+refuses to start, before anything runs, unless both names are non-empty
+strings and the hooks file defines every variable and function below.
+
+| variable | meaning |
+|---|---|
+| `ENGINE_BIN_DIR` | the directory put first on `PATH` |
+| `ENGINE_PROMPT_BIN` | the agent executable of the prompt API (`CLAUDE_PROMPT_BIN`) |
+| `ENGINE_INSTRUCTIONS_SOURCE` | the bundled instructions file |
+| `ENGINE_INSTRUCTIONS_FILE` | its name in `/data/workdir` and, when absent there, `/homeassistant` |
+
+The functions are called in this order; each may log and export variables.
+
+| function | called |
+|---|---|
+| `engine_prepare_home` | after `/data/home` is created, before `HOME` points at it |
+| `engine_env` | after `HOME`, `PATH`, `TERM` and `LANG` are set |
+| `engine_sync_from_image` | next |
+| `engine_auth` | next |
+| `engine_model` | after Home Assistant Core is resolved |
+| `engine_update` or `engine_update_disabled` | as the `auto_update` option says |
+| `engine_provision` | after `environment_vars`, once `/data/workdir` and `/data/uploads` exist |
+| `engine_console_env` | with the console's environment |
+| `engine_prompt_settings` | prints `CLAUDE_PROMPT_SETTINGS`; an engine that restricts prompt runs on its command line prints nothing |
+
+The script runs with `errexit`, `nounset` and `pipefail`, inherited by
+command substitutions, and calls every hook as a plain command: a failing step
+anywhere in a hook ends the start, the log names the hook, and the placeholder
+is stopped. The variables
+the script sets for the console after `environment_vars` (ports, `*_DEV`,
+`CLAUDE_PROMPT_BIN`, the unset `CLAUDE_PROMPT_HA_MCP_URL`) cannot be changed
+from the options.
 
 ## Install scripts
 
@@ -344,7 +409,7 @@ node tools/pack.js --out dist
 
 ## Development
 
-Requires Node.js 22 or later (CI uses Node.js 26), Python 3, bash, jq and a C/C++ toolchain for node-gyp where node-pty has no prebuild.
+Requires Node.js 22 or later (CI uses Node.js 26), Python 3, bash, jq, Docker (for `test:image`, which runs the start and notification scripts in the add-on base image, `app/test/image/Dockerfile`) and a C/C++ toolchain for node-gyp where node-pty has no prebuild.
 
 The tests in `app/test/contract/` run the prompt API and the console against a
 neutral test adapter (`app/test/fixtures/neutral-adapter.js`) that records what
@@ -355,7 +420,7 @@ tools/npm-ci-checked.sh
 npm test
 npm run lint
 npm run typecheck
-(cd app && ../tools/npm-ci-checked.sh && npm test && npm run test:alerts && npm run test:config && npm run lint && npm run typecheck)
+(cd app && ../tools/npm-ci-checked.sh && npm test && npm run test:alerts && npm run test:config && npm run test:image && npm run lint && npm run typecheck)
 python .github/scripts/secret_scan.py .
 python .github/scripts/hygiene_scan.py .
 ```

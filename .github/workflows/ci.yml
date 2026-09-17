@@ -68,6 +68,8 @@ jobs:
         run: npm run test:alerts
       - name: Run config-list tests (bash + jq)
         run: npm run test:config
+      - name: Run the start and notification scripts in the add-on base image
+        run: npm run test:image
 
   app-lint:
     name: Core app lint & types
