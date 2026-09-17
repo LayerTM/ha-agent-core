@@ -46,6 +46,8 @@ jobs:
   app:
     name: Core app
     runs-on: ubuntu-latest
+    env:
+      INSTALL_SCRIPTS_UNREVIEWED: ${{ github.event.pull_request.user.login == 'dependabot[bot]' && 'build' || '' }}
     defaults:
       run:
         working-directory: app
@@ -66,6 +68,8 @@ jobs:
   app-lint:
     name: Core app lint & types
     runs-on: ubuntu-latest
+    env:
+      INSTALL_SCRIPTS_UNREVIEWED: ${{ github.event.pull_request.user.login == 'dependabot[bot]' && 'build' || '' }}
     defaults:
       run:
         working-directory: app
@@ -80,6 +84,43 @@ jobs:
         run: npm run lint
       - name: Type-check (tsc --checkJs)
         run: npm run typecheck
+
+  # Whether the install code the app's allowed install scripts would run is the
+  # reviewed one, decided without running any of it: the packages are only
+  # unpacked. The verdict is published for the auto-merge workflow, which holds
+  # back a Dependabot update that changes it; for such an update this job stays
+  # green, for anything else a difference fails it.
+  install-scripts:
+    name: Install scripts
+    runs-on: ubuntu-latest
+    env:
+      DEPENDABOT: ${{ github.event.pull_request.user.login == 'dependabot[bot]' }}
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "26"
+      - name: Unpack the dependencies without running anything
+        run: npm ci --ignore-scripts
+      - name: Compare the install code with the reviewed record
+        run: |
+          if node ../tools/check-install-scripts.js . --verdict "$RUNNER_TEMP/install-scripts-verdict.json"; then
+            exit 0
+          fi
+          if [ "$DEPENDABOT" = true ]; then
+            echo "::notice::the install code changed; this update needs a review before it can merge"
+            exit 0
+          fi
+          exit 1
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: install-scripts-verdict
+          path: ${{ runner.temp }}/install-scripts-verdict.json
+          if-no-files-found: error
 
   # The release archive is built twice from the same commit on each architecture
   # and must come out byte-identical; the result is then installed with the

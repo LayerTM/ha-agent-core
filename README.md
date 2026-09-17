@@ -68,22 +68,32 @@ directories), and reports cycles.
 
 npm runs a dependency's install scripts only for the packages named in the
 `allowScripts` field of `app/package.json` (currently `node-pty`, which compiles
-its native module); install with `npm ci --strict-allow-scripts`, so any other
-package with an install script fails the install instead of being left
-unbuilt. An entry names the package, not a version, so an update does not need
-a new approval as long as its install step is the same.
-`tools/check-install-scripts.js <dir>` holds it to that: for every allowed
-package it compares the lifecycle scripts, the files they run with `node`
-(and what those require by relative path) and the package's `.gyp`/`.gypi`
-files with the reviewed fingerprints in `install-scripts.json`, and fails
-naming each changed file. After reviewing a change,
-`tools/check-install-scripts.js <dir> --write` records it. Code a gyp file
-loads from another package, and the compiled sources, are pinned by the
-lockfile like every other dependency.
+its native module). An entry names the package, not a version; what that allows
+is pinned by `tools/check-install-scripts.js`, which fingerprints the code the
+allowed install step runs:
+- the lifecycle scripts, and the files they run with `node`;
+- the package's `.gyp`/`.gypi` files;
+- every module those load, transitively, including other packages (node-pty's
+  build loads `node-addon-api`).
 
-node-gyp compiles against the headers of the Node that runs it when
-`npm_package_config_node_gyp_nodedir` points at that Node's prefix; nothing is
-downloaded then.
+It compares that fingerprint with the reviewed one in `install-scripts.json`
+and names every file that differs; after a review,
+`tools/check-install-scripts.js <dir> --write` records it.
+
+The app is installed in this order, so none of that code runs before it is
+checked (`.github/scripts/npm-ci-local-headers.sh`):
+1. `npm ci --ignore-scripts`;
+2. the check;
+3. `npm rebuild --strict-allow-scripts`, which also fails on any other package
+   with an install script;
+4. loading each allowed package and starting a terminal through node-pty.
+
+node-gyp compiles against the headers of the Node that runs it
+(`npm_package_config_node_gyp_nodedir`), so nothing is downloaded.
+
+A Dependabot update that changes the fingerprint is not merged automatically:
+its pull request is labelled `needs review` until the new install code has been
+reviewed and recorded.
 
 ## The release archive
 

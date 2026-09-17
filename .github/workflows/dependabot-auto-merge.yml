@@ -4,8 +4,13 @@ name: Dependabot auto-merge
 # required status checks pass. Major version bumps are left for manual review.
 #
 # Safe use of pull_request_target: this job never checks out or executes the
-# PR's code — it only reads Dependabot's metadata and enables auto-merge, which
-# then waits for the branch-protection required checks before merging.
+# PR's code — it only reads Dependabot's metadata and the pull request's CI
+# verdict on install code (a JSON file), and enables auto-merge, which then waits
+# for the branch-protection required checks before merging.
+#
+# An update that changes the code an allowed install script runs is not merged:
+# the pull request is labelled "needs review" and waits for the install code to
+# be reviewed and recorded. A verdict that cannot be read counts as a change.
 #
 # A merge made with the workflow token raises no push event, so once the pull
 # request has merged this job starts the main-measured workflow, which runs CI
@@ -24,7 +29,7 @@ jobs:
   auto-merge:
     if: ${{ github.actor == 'dependabot[bot]' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 80
     steps:
       - name: Fetch Dependabot metadata
         id: metadata
@@ -33,12 +38,42 @@ jobs:
         # github-actions updater keep the pin current.
         uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
 
-      - name: Enable auto-merge for known minor/patch updates
-        id: enable
+      - name: Read the install-code verdict of this pull request's CI
+        id: verdict
         # Fail-closed allowlist: only explicitly-recognized minor/patch updates
         # auto-merge. Majors — and any PR whose update-type can't be determined —
         # fall through to manual review instead of merging by default.
         if: ${{ contains(fromJSON('["version-update:semver-minor", "version-update:semver-patch"]'), steps.metadata.outputs.update-type) }}
+        run: |
+          reviewed=false
+          run_id=""
+          for _ in $(seq 1 60); do
+            run="$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$SHA&event=pull_request&per_page=1" \
+              --jq '.workflow_runs[0] | select(.) | "\(.id) \(.status)"')" || run=""
+            if [ "${run#* }" = completed ]; then run_id="${run%% *}"; break; fi
+            sleep 30
+          done
+          if [ -n "$run_id" ] && gh run download "$run_id" --repo "$REPO" -n install-scripts-verdict -D "$RUNNER_TEMP/verdict"; then
+            if jq -e '.reviewed == true' "$RUNNER_TEMP/verdict/install-scripts-verdict.json" >/dev/null; then
+              reviewed=true
+            fi
+          fi
+          if [ "$reviewed" = true ]; then
+            gh pr edit "$PR_URL" --remove-label "needs review" >/dev/null 2>&1 || true
+          else
+            gh pr edit "$PR_URL" --add-label "needs review"
+            echo "::notice::the install code changed, or its verdict could not be read; not merging this update"
+          fi
+          echo "reviewed=$reviewed" >> "$GITHUB_OUTPUT"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Enable auto-merge
+        id: enable
+        if: ${{ steps.verdict.outputs.reviewed == 'true' }}
         run: gh pr merge --auto --squash "$PR_URL"
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}

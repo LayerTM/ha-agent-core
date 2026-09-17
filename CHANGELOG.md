@@ -8,16 +8,20 @@ uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- `tools/check-install-scripts.js` and `app/install-scripts.json`: the install
-  scripts npm may run (`allowScripts`) are pinned by what they execute, so a
-  dependency update that changes them fails until it is reviewed.
+- `tools/check-install-scripts.js` and `app/install-scripts.json`: the code an
+  allowed install script runs — its scripts, gyp files and every module they
+  load, including other packages — is checked against a reviewed fingerprint
+  before any of it runs.
 
 ### Changed
 
-- `app/package.json` allows `node-pty`'s install scripts by name and the app is
-  installed with `npm ci --strict-allow-scripts`, which npm 12 needs to build
-  the terminal's native module. node-gyp takes the local Node headers through
-  its own `npm_package_config_node_gyp_*` settings.
+- `app/package.json` allows `node-pty`'s install scripts by name, which npm 12
+  needs to build the terminal's native module. The app is installed with
+  scripts disabled, checked, then built with `npm rebuild --strict-allow-scripts`
+  and smoke-tested; node-gyp takes the local Node headers through its own
+  `npm_package_config_node_gyp_*` settings.
+- A Dependabot update that changes install code is labelled `needs review`
+  instead of being merged automatically.
 
 ## [0.2.0]
 
