@@ -30,10 +30,12 @@
 //    this process.
 //
 // The relay is deliberately narrow: loopback only, one bearer token, and an
-// exact allowlist of the two paths the add-on actually uses.
+// exact allowlist of the two paths the add-on actually uses. On the MCP path it
+// also decides which JSON-RPC methods pass, in both directions (mcp-filter.js).
 
 const http = require('node:http');
 const https = require('node:https');
+const { MAX_BODY_BYTES, judgeClientBody, filterServerJson, createSseFilter } = require('./mcp-filter');
 
 // Exactly what the add-on needs, and nothing else.
 const MCP_PATH = '/api/mcp';
@@ -65,6 +67,24 @@ function allowed(method, pathname) {
   if (pathname === MCP_PATH) return MCP_METHODS.has(method);
   if (method === 'GET' && CAMERA_PATH_RE.test(pathname)) return true;
   return false;
+}
+
+// The whole body of a message, or null once it passes MAX_BODY_BYTES.
+function readBody(stream, done) {
+  const chunks = [];
+  let size = 0;
+  let over = false;
+  stream.on('data', (chunk) => {
+    if (over) return;
+    size += chunk.length;
+    if (size > MAX_BODY_BYTES) {
+      over = true;
+      chunks.length = 0;
+      return;
+    }
+    chunks.push(chunk);
+  });
+  stream.on('end', () => done(over ? null : Buffer.concat(chunks)));
 }
 
 function deny(res, status, message) {
@@ -110,10 +130,33 @@ async function startCoreRelay({ coreOrigin, haToken, relayToken, log = () => {} 
       return;
     }
 
+    if (pathname === MCP_PATH && req.method === 'POST') {
+      readBody(req, (body) => {
+        if (body === null) {
+          deny(res, 413, 'request body too large');
+          return;
+        }
+        const verdict = judgeClientBody(body.toString('utf8'));
+        if (verdict.forward === true) {
+          forward(req, res, pathname, body);
+          return;
+        }
+        res.writeHead(verdict.status, verdict.type ? { 'content-type': verdict.type } : {});
+        res.end(verdict.body);
+      });
+      return;
+    }
+    forward(req, res, pathname, null);
+  });
+
+  // The request to Core, with the Home Assistant token in place of the relay's.
+  // `body` is the already-read MCP request body, or null to stream the request.
+  function forward(req, res, pathname, body) {
     const headers = { authorization: `Bearer ${haToken}` };
     for (const [name, value] of Object.entries(req.headers)) {
       if (FORWARD_TO_CORE.has(name)) headers[name] = value;
     }
+    if (body !== null) headers['content-length'] = String(body.length);
 
     const upstream = transport.request(
       {
@@ -141,9 +184,42 @@ async function startCoreRelay({ coreOrigin, haToken, relayToken, log = () => {} 
         for (const [name, value] of Object.entries(upRes.headers)) {
           if (FORWARD_TO_CLIENT.has(name)) out[name] = value;
         }
-        res.writeHead(upRes.statusCode, out);
-        // Piped, not buffered: MCP streams server-sent events over this hop.
-        upRes.pipe(res);
+        const type = String(upRes.headers['content-type'] || '');
+        if (pathname !== MCP_PATH || !(upRes.statusCode >= 200 && upRes.statusCode < 300)) {
+          res.writeHead(upRes.statusCode, out);
+          upRes.pipe(res);
+        } else if (type.startsWith('text/event-stream')) {
+          // Streamed, not buffered: each allowed event goes on as soon as it is
+          // complete.
+          delete out['content-length'];
+          res.writeHead(upRes.statusCode, out);
+          upRes.setEncoding('utf8');
+          const sse = createSseFilter((chunk) => res.write(chunk));
+          upRes.on('data', (chunk) => sse.push(chunk));
+          upRes.on('end', () => { sse.end(); res.end(); });
+        } else if (type.startsWith('application/json')) {
+          readBody(upRes, (raw) => {
+            const kept = raw === null ? '' : filterServerJson(raw.toString('utf8'));
+            if (kept === '') {
+              delete out['content-type'];
+              delete out['content-length'];
+              res.writeHead(202, out);
+              res.end();
+              return;
+            }
+            out['content-length'] = String(Buffer.byteLength(kept));
+            res.writeHead(upRes.statusCode, out);
+            res.end(kept);
+          });
+        } else {
+          // A success the agent cannot read as JSON-RPC carries nothing it may
+          // see: its status passes, its body does not.
+          upRes.resume();
+          delete out['content-length'];
+          delete out['content-type'];
+          res.writeHead(upRes.statusCode, out);
+          res.end();
+        }
       },
     );
 
@@ -153,8 +229,9 @@ async function startCoreRelay({ coreOrigin, haToken, relayToken, log = () => {} 
       else res.end();
     });
 
-    req.pipe(upstream);
-  });
+    if (body !== null) upstream.end(body);
+    else req.pipe(upstream);
+  }
 
   await /** @type {Promise<void>} */ (new Promise((resolve, reject) => {
     server.once('error', reject);
