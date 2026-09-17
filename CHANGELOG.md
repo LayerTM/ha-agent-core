@@ -21,6 +21,13 @@ uses [Semantic Versioning](https://semver.org/).
   with an IPv6 address in brackets (`listening on [::]:8099`). Before, they read
   `listening on :<port>`. `CLAUDE_CONSOLE_HOST` and `CLAUDE_PROMPT_HOST` choose
   the address; without them the servers listen where they did before.
+- Adapter API 5: `agent-usage` names the engine's transcript files
+  (`--files`) and parses their lines (`--parse`, with a state per file), and
+  no longer prints all usage at once. `ha-usage` and `/api/usage` read only what
+  was appended since the last call, from the transcripts and from the audit
+  log. The totals are kept in `/data/usage-cache.json`, so the usage of a
+  deleted transcript stays counted. When the cache is lost, the report says so
+  with `history_reset` and `history_since`.
 - Adapter API 5: the console pages move to `app/templates/` and carry the
   engine's names and colours as placeholders, filled in once when the console
   starts; only the rendered pages are served. `app/public/` may no longer hold

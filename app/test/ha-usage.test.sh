@@ -33,14 +33,42 @@ check() { if [ "$2" = "$3" ]; then pass "$1"; else fail "$1" "$2" "$3"; fi; }
 
 today="$(date -u '+%Y-%m-%d')"
 
-# agent-usage: prints ${USAGE_LINES}, or `--source`'s ${USAGE_SOURCE}; exits
-# ${USAGE_RC} (3 = not reported). Every call is recorded.
+# agent-usage: `--files` lists ${USAGE_LINES} (plus ${USAGE_MORE} when set),
+# `--parse` passes each line's JSON through (an object as one record, a list as
+# it is, anything else as none) and records the state it was handed per file,
+# `--source` prints ${USAGE_SOURCE}; exits ${USAGE_RC} (3 = not reported).
+# Every call is recorded.
 cat > "${work}/agent-usage" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${USAGE_CALLS}"
 [ -z "${USAGE_SLEEP:-}" ] || sleep "${USAGE_SLEEP}"
 [ "${USAGE_RC:-0}" = 0 ] || { printf 'reader broke\nsecond line\033[31m\n' >&2; exit "${USAGE_RC}"; }
-if [ "${1:-}" = --source ]; then printf '%s\n' "${USAGE_SOURCE}"; else cat "${USAGE_LINES}"; fi
+case "${1:-}" in
+    --source) printf '%s\n' "${USAGE_SOURCE}" ;;
+    --files) printf '%s\0' "${USAGE_LINES}" ${USAGE_MORE:+"${USAGE_MORE}"} ;;
+    --parse) exec python3 -c '
+import json, os, sys
+states = open(os.environ["USAGE_STATES"], "a")
+count = 0
+for raw in sys.stdin:
+    frame = json.loads(raw)
+    if frame[0] == "S":
+        states.write(json.dumps(frame[2]) + "\n")
+        count = (frame[2] or 0)
+        print("null")
+    elif frame[0] == "L":
+        count += 1
+        try:
+            ev = json.loads(frame[1])
+        except ValueError:
+            ev = None
+        print(json.dumps([ev] if isinstance(ev, dict) else ev if isinstance(ev, list) else []))
+    else:
+        print(json.dumps({"state": count}))
+    sys.stdout.flush()
+' ;;
+    *) exit 64 ;;
+esac
 STUB
 chmod +x "${work}/agent-usage"
 
@@ -80,7 +108,8 @@ printf '%s 10:00:09  prompt[read] caller=a status=200 tokens=ctl\001x:0:1:0:0 co
 # report [args…]: ha-usage with the stub; USAGE_RC and DATA pick the case.
 report() {
     : > "${work}/calls"
-    CC_USAGE_AGENT_CMD="${work}/agent-usage" USAGE_CALLS="${work}/calls" USAGE_LINES="${work}/lines" \
+    CC_USAGE_AGENT_CMD="${work}/agent-usage" USAGE_CALLS="${work}/calls" USAGE_LINES="${USAGE_LINES:-${work}/lines}" \
+    USAGE_STATES="${work}/states" \
     USAGE_SOURCE="${USAGE_SOURCE:-/data/home/.agent/sessions}" USAGE_RC="${USAGE_RC:-0}" \
     CC_AUDIT_DATA_DIR="${DATA:-${work}}" python3 "${bin}" "$@"
 }
@@ -88,7 +117,7 @@ report() {
 echo "ha-usage — console usage from agent-usage, chat spend from prompt[ lines only"
 out="$(report --json)"
 check "the report runs" "$?" 0
-check "agent-usage is asked for its lines and its source" "$(paste -sd' ' "${work}/calls")" " --source"
+check "agent-usage is asked for its files, to parse them, and for its source" "$(paste -sd' ' "${work}/calls")" "--files --parse --source"
 check "it is available, and says where it reads" \
     "$(printf '%s' "${out}" | jq -c '[.available, .projects]')" '[true,"/data/home/.agent/sessions"]'
 check "cost today: prompt lines only; the hook's, the backup's and a CR-split line's numbers ignored" \
@@ -117,7 +146,7 @@ out="$(USAGE_RC=3 report --json)"
 check "the report runs" "$?" 0
 check "it is not available, not zero spend, and not an error" \
     "$(printf '%s' "${out}" | jq -c '[.available, .projects, .error]')" '[false,"",null]'
-check "agent-usage is asked once" "$(paste -sd' ' "${work}/calls")" ""
+check "agent-usage is asked once" "$(paste -sd' ' "${work}/calls")" "--files"
 check "the prompt lines still count" "$(printf '%s' "${out}" | jq -c '[.tokens.today.input, .prompt_api_cost_usd.today, .messages.all_time]')" '[908,0.0634,0]'
 text="$(USAGE_RC=3 report)"
 case "${text}" in
@@ -171,8 +200,264 @@ empty="$(CC_USAGE_AGENT_CMD="${work}/agent-usage" USAGE_CALLS="${work}/calls" \
 check "runs without either source" "$?" 0
 check "and reports zero" "$(printf '%s' "${empty}" | jq -c '[.tokens.all_time.input, .prompt_api_cost_usd.total == 0, .available]')" '[0,true,true]'
 
-if [ "${ran}" -lt 30 ]; then
-    echo "FAIL: only ${ran} ha-usage assertions ran — expected at least 30"
+echo "ha-usage — incremental reading and the cache"
+cd_="${work}/c"; mkdir -p "${cd_}/s"
+: > "${cd_}/claude-audit.log"
+A="${cd_}/s/a.jsonl"; B="${cd_}/s/b.jsonl"
+creport() { DATA="${cd_}" USAGE_LINES="${A}" USAGE_MORE="${CMORE-${B}}" report --json; }
+cache() { jq -c "$1" "${cd_}/usage-cache.json"; }
+input() { printf '%s' "$1" | jq -r '.tokens.all_time.input'; }
+{ usage 1 0 0 0 m; usage 2 0 0 0 m; } > "${A}"
+usage 4 0 0 0 m > "${B}"
+out="$(creport)"
+check "first call counts both files" "$(input "${out}")" 7
+check "and reads every byte" "$(cache .last_read_bytes)" "$(( $(wc -c < "${A}") + $(wc -c < "${B}") ))"
+out="$(creport)"
+check "a second call reads nothing" "$(cache .last_read_bytes)" 0
+check "and gives the same totals" "$(input "${out}")" 7
+line="$(usage 8 0 0 0 m)"
+printf '%s\n' "${line}" >> "${A}"
+out="$(creport)"
+check "an appended line is counted" "$(input "${out}")" 15
+check "and only its bytes are read" "$(cache .last_read_bytes)" "$(( ${#line} + 1 ))"
+check "the parser was handed its state from the last call" "$(tail -n 1 "${work}/states")" 2
+printf '%s' "$(usage 16 0 0 0 m)" >> "${A}"
+out="$(creport)"
+check "a partial last line waits" "$(input "${out}")" 15
+check "and is not consumed" "$(cache .last_read_bytes)" 0
+printf '\n' >> "${A}"
+out="$(creport)"
+check "once complete it is counted" "$(input "${out}")" 31
+{ usage 32 0 0 0 m; } > "${A}.new" && cat "${A}.new" > "${A}" && rm "${A}.new"
+out="$(creport)"
+check "a file rewritten shorter in place is counted again from its start" "$(input "${out}")" 36
+# Past the hashed start: cut back but starting the same (only the size shows it),
+# and rewritten as long but starting differently (only the start shows it).
+save_a="$(cat "${A}")"
+python3 -c '
+import json, sys
+with open(sys.argv[1], "w") as fh:
+    for i in range(80):
+        fh.write(json.dumps({"day": sys.argv[2], "model": "pad", "input": 1, "output": 0, "cache_read": 0, "cache_write": 0}) + "\n")
+' "${A}" "${today}"
+out="$(creport)"
+check "a long file is counted" "$(input "${out}")" 84
+python3 -c '
+import sys
+p = sys.argv[1]
+data = open(p).read().splitlines(True)
+open(p, "r+").truncate(sum(len(l) for l in data[:60]))
+' "${A}"
+out="$(creport)"
+check "cut back past its hashed start, it is counted again" "$(input "${out}")" 64
+python3 -c '
+import sys
+p = sys.argv[1]
+data = open(p).read()
+open(p, "r+").write(data.replace("\"input\": 1,", "\"input\": 2,", 1))
+' "${A}"
+out="$(creport)"
+check "rewritten in place with a different start, it is counted again" "$(input "${out}")" 65
+printf '%s\n' "${save_a}" > "${A}"
+out="$(creport)"
+check "and back to the short file" "$(input "${out}")" 36
+cp "${A}" "${A}.copy"; usage 64 0 0 0 m >> "${A}.copy"; mv "${A}.copy" "${A}"
+out="$(creport)"
+check "a file replaced by one that carries it and more is not counted twice" "$(input "${out}")" 100
+usage 128 0 0 0 m > "${A}.other"; mv "${A}.other" "${A}"
+out="$(creport)"
+check "a file replaced by different content: the old days stay, the new ones add" "$(input "${out}")" 228
+rm "${B}"
+out="$(CMORE= creport)"
+check "a deleted file keeps its days" "$(input "${out}")" 228
+check "and is not listed as a source any more" "$(cache '[.sources[] | select(.kind == "console")] | length')" 1
+printf '%s 10:00:01  prompt[read] caller=a status=200 tokens=chat:1000:0:0:0 cost=$0.5000\n' "${today}" >> "${cd_}/claude-audit.log"
+out="$(CMORE= creport)"
+check "an appended audit line is counted" "$(printf '%s' "${out}" | jq -c '[.tokens.all_time.input, .prompt_api_cost_usd.total]')" '[1228,0.5]'
+mv "${cd_}/claude-audit.log" "${cd_}/claude-audit.log.1"; : > "${cd_}/claude-audit.log"
+out="$(CMORE= creport)"
+check "a rotated audit log keeps its days" "$(printf '%s' "${out}" | jq -c '[.tokens.all_time.input, .prompt_api_cost_usd.total]')" '[1228,0.5]'
+printf 'not json' > "${cd_}/usage-cache.json"
+out="$(CMORE= creport)"
+check "an unreadable cache falls back to the previous one; an audit log counted since is gone, so a possible loss is said" "$(printf '%s' "${out}" | jq -c '[.tokens.all_time.input, .history_reset]')" '[1228,true]'
+printf 'not json' > "${cd_}/usage-cache.json"; printf '{"version":0}' > "${cd_}/usage-cache.json.1"
+out="$(CMORE= creport)"
+check "without a readable cache the files still there are counted, and the loss is said" \
+    "$(printf '%s' "${out}" | jq -c '[.tokens.all_time.input, .history_reset, .history_since]')" "[128,true,\"${today}\"]"
+out="$(CMORE= creport)"
+check "and stays said" "$(printf '%s' "${out}" | jq -c '.history_reset')" true
+
+python3 -c '
+import fcntl, os, sys, time
+fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)
+fcntl.flock(fd, fcntl.LOCK_EX)
+open(sys.argv[2], "w").close()
+time.sleep(3)
+' "${cd_}/usage-cache.lock" "${work}/locked" &
+holder=$!
+while [ ! -e "${work}/locked" ]; do sleep 0.05; done
+out="$(CMORE= CC_USAGE_READER_TIMEOUT_MS=500 creport)"
+check "while another call holds the cache, the report says it is busy and keeps what the cache has" \
+    "$(printf '%s' "${out}" | jq -c '[.available, .error, .history_reset]')" '[false,"the usage cache is busy",true]'
+wait "${holder}"
+
+echo "ha-usage — what the fingerprint sees, a lost generation, a crash between renames, a line too long"
+fd_="${work}/f"; mkdir -p "${fd_}"; : > "${fd_}/claude-audit.log"
+F="${fd_}/t.jsonl"
+freport() { DATA="${fd_}" USAGE_LINES="${F}" CMORE= report --json; }
+rec() { usage "$1" 0 0 0 fp; }
+{ printf '%4096s\n' ''; rec 10; } > "${F}"
+check "a record past the first 4 KB is counted" "$(input "$(freport)")" 10
+python3 -c '
+import sys
+p, old, new = sys.argv[1:4]
+data = open(p).read()
+open(p, "r+").write(data.replace(old, new))
+' "${F}" '"input":10,' '"input":90,'
+check "rewritten in place within the last 4 KB counted: seen, counted again" "$(input "$(freport)")" 90
+python3 -c '
+import json, sys
+with open(sys.argv[1], "w") as fh:
+    fh.write(json.dumps({"day": sys.argv[2], "model": "fp", "input": 1, "output": 0, "cache_read": 0, "cache_write": 0}) + "\n")
+    fh.write(" " * 20000 + "\n")
+    fh.write(json.dumps({"day": sys.argv[2], "model": "fp", "input": 2, "output": 0, "cache_read": 0, "cache_write": 0}) + "\n")
+    fh.write(" " * 20000 + "\n")
+' "${F}" "${today}"
+check "rewritten from the start, a file of 40 KB is counted again" "$(input "$(freport)")" 3
+python3 -c '
+import sys
+p = sys.argv[1]
+data = open(p).read()
+open(p, "r+").write(data.replace("\"input\": 2,", "\"input\": 7,"))
+' "${F}"
+check "a change in the middle, outside both fingerprinted ends, is not seen (the files are append-only)" "$(input "$(freport)")" 3
+
+rm -f "${fd_}"/usage-cache.json*
+rec 10 > "${F}"; freport > /dev/null
+rec 20 >> "${F}"
+check "an append on top" "$(input "$(freport)")" 30
+rm "${F}"; printf '{broken' > "${fd_}/usage-cache.json"
+out="$(freport)"
+check "back on the previous generation with a counted file gone: its days are kept and the possible loss is said" \
+    "$(printf '%s' "${out}" | jq -c '[.tokens.all_time.input, .history_reset, .history_since]')" "[10,true,\"${today}\"]"
+
+rm -f "${fd_}"/usage-cache.json*
+rm -f "${F}"; freport > /dev/null
+rec 50 > "${F}"
+check "a file born after the previous generation is counted" "$(input "$(freport)")" 50
+rm "${F}"; printf '{broken' > "${fd_}/usage-cache.json"
+check "lost with the current generation, it cannot be counted, and the report says history may be lost" \
+    "$(freport | jq -c '[.tokens.all_time.input, .history_reset]')" '[0,true]'
+cat > "${work}/crash.py" <<'PY'
+import json, os, runpy, sys
+ha, data, case = sys.argv[1:4]
+os.environ["CC_AUDIT_DATA_DIR"] = data
+m = runpy.run_path(ha)
+g = m["_save"].__globals__
+cache_file = g["CACHE_FILE"]
+good = m["_fresh"]()
+good["retired"]["console"]["days"] = {"2026-09-17": {"kept": [30, 0, 0, 0, 1, 0]}}
+if case == "recovered":
+    open(cache_file + ".1", "w").write(json.dumps(good))
+    open(cache_file, "w").write("{broken")
+else:
+    open(cache_file, "w").write(json.dumps(good))
+    for name in (cache_file + ".1",):
+        if os.path.exists(name):
+            os.remove(name)
+loaded = m["_load"]()
+real = os.replace
+calls = []
+def crash(a, b):
+    # Every rename but the last one, which puts the new generation in place.
+    calls.append(b)
+    if b == cache_file:
+        raise RuntimeError("crash")
+    return real(a, b)
+g["os"].replace = crash
+try:
+    m["_save"](loaded)
+except RuntimeError:
+    pass
+g["os"].replace = real
+after = m["_load"]()
+print(json.dumps([after["_from"], after["retired"]["console"]["days"] != {}, after["history_reset"]], separators=(",", ":")))
+PY
+rm -f "${fd_}"/usage-cache.json*
+check "a crash while saving a recovered cache keeps the previous generation" \
+    "$(CC_AUDIT_DATA_DIR="${fd_}" python3 "${work}/crash.py" "${bin}" "${fd_}" recovered)" '["previous",true,true]'
+rm -f "${fd_}"/usage-cache.json*
+check "a crash between the two renames leaves the previous generation to load" \
+    "$(CC_AUDIT_DATA_DIR="${fd_}" python3 "${work}/crash.py" "${bin}" "${fd_}" current)" '["previous",true,true]'
+
+rm -f "${fd_}"/usage-cache.json*
+rec 3 > "${F}"
+python3 -c '
+import sys
+with open(sys.argv[1], "a") as fh:
+    fh.write("x" * (5 * 1024 * 1024) + "\n")
+' "${F}"
+check "a 5 MB line across rounds is read" "$(input "$(freport)")" 3
+off="$(jq '[.sources[] | select(.kind == "console") | .offset] | .[0]' "${fd_}/usage-cache.json")"
+python3 -c '
+import sys
+with open(sys.argv[1], "a") as fh:
+    fh.write("y" * (33 * 1024 * 1024) + "\n")
+' "${F}"
+rec 4 >> "${F}"
+out="$(freport)"
+check "a line longer than 32 MB stops the file with an error" \
+    "$(printf '%s' "${out}" | jq -c '[.available, (.error | endswith("has a line longer than 32 MB"))]')" '[false,true]'
+check "and leaves its offset where it was" \
+    "$(jq '[.sources[] | select(.kind == "console") | .offset] | .[0]' "${fd_}/usage-cache.json")" "${off}"
+check "and its state" "$(jq -c '[.sources[] | select(.kind == "console") | .state] | .[0]' "${fd_}/usage-cache.json")" 2
+rec 5 > "${F}"
+python3 -c '
+import sys
+with open(sys.argv[1], "a") as fh:
+    fh.write("z" * (33 * 1024 * 1024))
+' "${F}"
+out="$(freport)"
+check "an unfinished line already longer than 32 MB is an error too, not a buffer that grows" \
+    "$(printf '%s' "${out}" | jq -c '[.available, (.error | endswith("has a line longer than 32 MB"))]')" '[false,true]'
+rm -f "${F}"
+
+echo "ha-usage — two calls at once, a large history, a 1 GB file"
+rm -f "${cd_}"/usage-cache.json*
+python3 -c '
+import json, sys
+with open(sys.argv[1], "w") as fh:
+    for i in range(30000):
+        fh.write(json.dumps({"day": "2026-09-%02d" % (1 + i % 28), "model": "m%d" % (i % 5), "input": i, "output": 1,
+                             "cache_read": 0, "cache_write": 0}) + "\n")
+' "${A}"
+( CMORE= creport > "${work}/p1" ) & ( CMORE= creport > "${work}/p2" ) & wait
+check "two calls at once agree" "$(input "$(cat "${work}/p1")"):$(input "$(cat "${work}/p2")")" "449985000:449985000"
+out="$(CMORE= creport)"
+check "and the cache after them is exact, not doubled" "$(input "${out}")" 449985000
+check "30000 lines: the totals equal a full count" "$(printf '%s' "${out}" | jq -r '.tokens.all_time.output')" 30000
+big="${cd_}/s/big.jsonl"
+python3 -c '
+import hashlib, json, os, sys
+path, cache = sys.argv[1], sys.argv[2]
+size = 1024 ** 3
+with open(path, "wb") as fh:
+    fh.truncate(size)
+st = os.stat(path)
+c = json.load(open(cache))
+c["sources"]["console:%d:%d" % (st.st_dev, st.st_ino)] = {"kind": "console", "path": path, "offset": size,
+    "fingerprint": hashlib.sha256(bytes(4096) + b"\0" + bytes(4096)).hexdigest(), "state": None, "days": {}, "cost_seen": False}
+json.dump(c, open(cache, "w"))
+' "${big}" "${cd_}/usage-cache.json"
+line="$(usage 5 0 0 0 big)"
+printf '%s\n' "${line}" >> "${big}"
+out="$(CMORE="${big}" creport)"
+check "after 1 GB already counted, a call reads only the appended bytes" "$(cache .last_read_bytes)" "$(( ${#line} + 1 ))"
+check "and counts them" "$(printf '%s' "${out}" | jq -r '.by_model_recent.big.input // .tokens.all_time.input')" 5
+rm -f "${big}"
+
+if [ "${ran}" -lt 70 ]; then
+    echo "FAIL: only ${ran} ha-usage assertions ran — expected at least 70"
     exit 1
 fi
 if [ "${fails}" -eq 0 ]; then

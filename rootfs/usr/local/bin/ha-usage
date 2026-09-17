@@ -3,16 +3,37 @@
 
 Each run is counted once, by whoever runs it:
 
-- Console sessions: the engine's ``agent-usage`` prints one JSON line per agent
-  message, ``{"day", "model", "input", "output", "cache_read", "cache_write"}``,
-  where ``input`` counts only the input tokens not read from cache. It exits 3
-  when the engine does not report usage; the report then says
-  ``"available": false``. If it fails or runs out of time, the report says
+- Console sessions: the engine's ``agent-usage`` names its transcript files
+  (``--files``, NUL-separated) and parses their lines (``--parse``, framed as
+  below); it exits 3 when the engine does not report usage, and the report then
+  says ``"available": false``. If it fails or runs out of time, the report says
   ``"available": false`` with a short ``"error"``, and still carries the prompt
   API usage. ``agent-usage --source`` prints where it reads from.
 - Prompt API runs leave no session file the engine reads. Their tokens and cost
   come only from the ``prompt[...]`` lines the prompt server writes to
   ``/data/claude-audit.log``.
+
+Both are read incrementally, and both are append-only: a line once written is
+never changed. ``/data/usage-cache.json`` keeps, per file (device and inode),
+the bytes already counted, a fingerprint of them (the first 4 KB and the 4 KB
+before the counted end), the parser's state and the per-day, per-model totals.
+A call reads only what was appended since, and only whole lines. A file that
+shrank, or whose fingerprint changed, is counted again from the start; a change
+elsewhere in counted bytes breaks the append-only rule and is not seen. A file
+that is gone keeps its days, so the history outlives the files. A cache that
+cannot be read falls back to the previous generation, and the report then says
+``"history_reset": true`` with ``"history_since"`` (the first day it still has),
+as it does when no generation can be read.
+A line longer than 32 MB stops the reading of its file with an error.
+
+``agent-usage --parse`` reads one JSON array per line:
+``["S", id, state]`` starts a file's new lines (``state`` is what the parser
+returned for that file last time, or null), ``["L", text]`` is one line,
+``["E", id]`` ends them. It writes exactly one line per line it reads: ``null``
+for S, a JSON list of usage records for L, ``{"state": ...}`` (at most 64 KB)
+for E. A usage record is ``{"day", "model", "input", "output", "cache_read",
+"cache_write"}``, where ``input`` counts only the input tokens not read from
+cache.
 
 Usage:
     ha-usage [DAYS]          # recent window for the per-model breakdown (default 7)
@@ -21,11 +42,16 @@ Usage:
 
 from __future__ import annotations
 
+import fcntl
+import hashlib
 import json
 import os
+import queue
 import re
+import stat
 import subprocess
 import sys
+import threading
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -33,7 +59,7 @@ from datetime import datetime, timezone
 # The engine's usage reader. Overridable so the parsing can be tested.
 AGENT_USAGE = os.environ.get("CC_USAGE_AGENT_CMD", "/usr/local/bin/agent-usage")
 NOT_REPORTED = 3
-# The time agent-usage may take, both calls together. The prompt server passes
+# The time agent-usage may take, all calls together. The prompt server passes
 # the budget it keeps inside its own limit for this script; the default is for a
 # run from the shell.
 READER_TIMEOUT_S = int(os.environ.get("CC_USAGE_READER_TIMEOUT_MS", "20000")) / 1000
@@ -41,7 +67,17 @@ READER_TIMEOUT_S = int(os.environ.get("CC_USAGE_READER_TIMEOUT_MS", "20000")) / 
 CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
 BRANDING_FILE = "/opt/agent-console/adapter/branding.json"
 # Same override convention as cc-hook-audit, so the parsing can be tested.
-AUDIT_LOG = os.path.join(os.environ.get("CC_AUDIT_DATA_DIR", "/data"), "claude-audit.log")
+DATA_DIR = os.environ.get("CC_AUDIT_DATA_DIR", "/data")
+AUDIT_LOG = os.path.join(DATA_DIR, "claude-audit.log")
+CACHE_FILE = os.path.join(DATA_DIR, "usage-cache.json")
+LOCK_FILE = os.path.join(DATA_DIR, "usage-cache.lock")
+CACHE_VERSION = 1
+# How much of a file's start identifies it, how much is read per parser round,
+# and how large a parser's state may be.
+HEAD_BYTES = 4096
+CHUNK_BYTES = 4 * 1024 * 1024
+MAX_LINE_BYTES = 32 * 1024 * 1024
+STATE_MAX_BYTES = 64 * 1024
 
 # A line the prompt server wrote: its own timestamp, then `prompt[<kind>]`. Only
 # these carry chat spend. Anything else in the log — a hook's record of a tool
@@ -54,10 +90,21 @@ DAY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # The report's token keys, which are also the order of the counts in an audit
 # line's tokens field.
 TOKEN_KEYS = ("input", "output", "cache_read", "cache_write")
+# A day's totals for one model: the four token counts, the console messages and
+# the prompt API cost in millionths of a dollar. Cost without a model is kept
+# under the model "".
+MESSAGES, COST = 4, 5
+FIELDS = 6
+NO_MODEL = ""
+KINDS = ("console", "audit")
 
 
 class UsageError(Exception):
     """agent-usage failed in a way other than "not reported"."""
+
+
+class NotReported(Exception):
+    """agent-usage exited 3: the engine does not report its usage."""
 
 
 def _clean(text: str, limit: int) -> str:
@@ -73,117 +120,473 @@ def _today() -> str:
     return datetime.now(timezone.utc).date().isoformat()
 
 
-def _agent_usage(deadline: float, *args: str) -> tuple[bool, str]:
-    """(reported, stdout) of one agent-usage call that must end by `deadline`."""
+def _left(deadline: float) -> float:
     left = deadline - time.monotonic()
     if left <= 0:
         raise UsageError("agent-usage ran out of time")
+    return left
+
+
+def _agent_usage(deadline: float, *args: str) -> str:
+    """stdout of one agent-usage call that must end by `deadline`."""
     try:
         done = subprocess.run([AGENT_USAGE, *args], capture_output=True, text=True,
-                              errors="replace", timeout=left)
+                              errors="replace", timeout=_left(deadline))
     except subprocess.TimeoutExpired as err:
         raise UsageError("agent-usage ran out of time") from err
     except OSError as err:
         raise UsageError(f"agent-usage could not run: {err.strerror}") from err
     if done.returncode == NOT_REPORTED:
-        return False, ""
+        raise NotReported()
     if done.returncode != 0:
         raise UsageError(f"agent-usage exited {done.returncode}: {done.stderr.strip()[-200:]}")
-    return True, done.stdout
+    return done.stdout
 
 
-def collect_console():
-    """(available, source, error, by_day, by_day_model, msgs_by_day) from agent-usage.
+# --- totals ---------------------------------------------------------------
 
-    A reader that fails leaves the console usage out and says why; it never
-    takes the rest of the report with it.
-    """
-    empty = (defaultdict(lambda: defaultdict(int)), defaultdict(lambda: defaultdict(int)), defaultdict(int))
-    deadline = time.monotonic() + READER_TIMEOUT_S
-    try:
-        available, out = _agent_usage(deadline)
-        if not available:
-            return (False, "", None, *empty)
-        reported, source = _agent_usage(deadline, "--source")
-    except UsageError as err:
-        return (False, "", _clean(str(err), 240), *empty)
-    by_day, by_day_model, msgs_by_day = empty
-    for line in out.split("\n"):
+def _add(days: dict, day: str, model: str, values) -> None:
+    row = days.setdefault(day, {}).setdefault(model, [0] * FIELDS)
+    for i, v in enumerate(values):
+        row[i] += v
+
+
+def _merge(into: dict, days: dict) -> None:
+    for day, models in days.items():
+        for model, row in models.items():
+            _add(into, day, model, row)
+
+
+def _console_record(ev) -> tuple[str, str, list[int]] | None:
+    if not isinstance(ev, dict):
+        return None
+    counts = [ev.get(k, 0) for k in TOKEN_KEYS]
+    if not all(isinstance(v, int) and not isinstance(v, bool) and v >= 0 for v in counts):
+        return None
+    day = ev.get("day")
+    day = day if isinstance(day, str) and DAY.fullmatch(day) else "unknown"
+    model = ev.get("model")
+    model = _clean(model, 100) if isinstance(model, str) and model else "unknown"
+    return day, model, counts + [1, 0]
+
+
+def _audit_line(line: str, days: dict) -> bool:
+    """Adds one audit line's chat spend; True when it carried a cost."""
+    head = PROMPT_LINE.match(line)
+    if not head:
+        return False
+    day = head.group(1)
+    costs = COST_FIELD.findall(line)
+    if costs:
+        _add(days, day, NO_MODEL, [0, 0, 0, 0, 0, round(float(costs[-1]) * 1_000_000)])
+    tokens = TOKENS_FIELD.search(line)
+    for entry in tokens.group(1).split(",") if tokens else []:
+        parts = entry.rsplit(":", 4)
+        if len(parts) != 5 or not all(p.isdigit() for p in parts[1:]):
+            continue
+        # The model the audit line names; an empty one would read as "no model".
+        model = _clean(parts[0], 100) or "unknown"
+        _add(days, day, model, [int(p) for p in parts[1:]] + [0, 0])
+    return bool(costs)
+
+
+# --- the cache --------------------------------------------------------------
+
+def _fresh() -> dict:
+    return {"version": CACHE_VERSION, "sources": {}, "retired": {k: {"days": {}, "cost_seen": False} for k in KINDS},
+            "history_reset": False, "last_read_bytes": 0}
+
+
+def _valid_days(days) -> bool:
+    return isinstance(days, dict) and all(
+        isinstance(d, str) and isinstance(models, dict) and all(
+            isinstance(m, str) and isinstance(row, list) and len(row) == FIELDS
+            and all(isinstance(v, int) and not isinstance(v, bool) and v >= 0 for v in row)
+            for m, row in models.items())
+        for d, models in days.items())
+
+
+def _valid(cache) -> bool:
+    if not isinstance(cache, dict) or cache.get("version") != CACHE_VERSION:
+        return False
+    if not isinstance(cache.get("history_reset"), bool) or not isinstance(cache.get("sources"), dict):
+        return False
+    retired = cache.get("retired")
+    if not isinstance(retired, dict) or set(retired) != set(KINDS):
+        return False
+    if not all(isinstance(r, dict) and _valid_days(r.get("days")) and isinstance(r.get("cost_seen"), bool)
+               for r in retired.values()):
+        return False
+    for src in cache["sources"].values():
+        if not (isinstance(src, dict) and src.get("kind") in KINDS and isinstance(src.get("path"), str)
+                and isinstance(src.get("offset"), int) and src["offset"] >= 0
+                and isinstance(src.get("fingerprint"), str) and _valid_days(src.get("days"))
+                and isinstance(src.get("cost_seen"), bool)):
+            return False
+    return True
+
+
+def _load() -> dict:
+    """The cache, else the previous generation; a fresh one that says so when
+    either was there and neither could be read. `_from` says which it is."""
+    existed = False
+    for name, origin in ((CACHE_FILE, "current"), (CACHE_FILE + ".1", "previous")):
         try:
-            ev = json.loads(line)
-        except ValueError:
+            with open(name, encoding="utf-8") as fh:
+                existed = True
+                cache = json.load(fh)
+        except FileNotFoundError:
             continue
-        if not isinstance(ev, dict):
+        except (OSError, ValueError):
+            existed = True
             continue
-        counts = [ev.get(k, 0) for k in TOKEN_KEYS]
-        if not all(isinstance(v, int) and not isinstance(v, bool) and v >= 0 for v in counts):
-            continue
-        day = ev.get("day")
-        day = day if isinstance(day, str) and DAY.fullmatch(day) else "unknown"
-        model = ev.get("model")
-        model = _clean(model, 100) if isinstance(model, str) and model else "unknown"
-        msgs_by_day[day] += 1
-        for k, v in zip(TOKEN_KEYS, counts):
-            by_day[day][k] += v
-            by_day_model[(day, model)][k] += v
-    source = _clean(source.strip(), 500) if reported else ""
-    return True, source, None, by_day, by_day_model, msgs_by_day
+        if _valid(cache):
+            cache["_from"] = origin
+            if origin == "previous":
+                # What the lost generation counted since cannot be told apart
+                # from what was never there: a file born and gone in between
+                # leaves no trace. So a fallback always says history may be lost.
+                cache["history_reset"] = True
+            return cache
+    cache = _fresh()
+    cache["history_reset"] = existed
+    cache["_from"] = "fresh"
+    return cache
 
 
-def collect_chat():
-    """Chat spend from the prompt server's audit lines.
+def _save(cache: dict) -> None:
+    """Writes the cache atomically. A valid current generation becomes .1 only
+    once the new one is on disk; a current file that could not be read is
+    replaced and never moved over the previous generation."""
+    origin = cache.pop("_from", "fresh")
+    tmp = f"{CACHE_FILE}.tmp.{os.getpid()}"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(cache, fh, separators=(",", ":"))
+        fh.flush()
+        os.fsync(fh.fileno())
+    if origin == "current":
+        # A crash between these leaves no current file and a valid .1.
+        os.replace(CACHE_FILE, CACHE_FILE + ".1")
+    os.replace(tmp, CACHE_FILE)
 
-    Returns (by_day, by_day_model, today_cost, total_cost, seen). A line written
-    before tokens were recorded counts its cost and no tokens.
-    """
-    by_day: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
-    by_day_model: dict[tuple[str, str], dict[str, int]] = defaultdict(lambda: defaultdict(int))
-    today = _today()
-    today_cost = total_cost = 0.0
-    seen = False
-    try:
-        # newline="\n": a record ends at a newline only. A carriage return inside
-        # a recorded argument must not start a line that could pass for ours.
-        fh = open(AUDIT_LOG, encoding="utf-8", errors="ignore", newline="\n")
-    except OSError:
-        return by_day, by_day_model, 0.0, 0.0, False
-    with fh:
-        for line in fh:
-            line = line.rstrip("\n")
-            head = PROMPT_LINE.match(line)
-            if not head:
+
+def _lock(deadline: float):
+    fd = os.open(LOCK_FILE, os.O_RDWR | os.O_CREAT, 0o600)
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fd
+        except BlockingIOError:
+            if deadline - time.monotonic() <= 0:
+                os.close(fd)
+                raise UsageError("the usage cache is busy")
+            time.sleep(0.05)
+
+
+def _fingerprint(path: str, length: int) -> str:
+    """Hash of the first 4 KB and the last 4 KB of the file's first `length` bytes."""
+    with open(path, "rb") as fh:
+        first = fh.read(min(length, HEAD_BYTES))
+        fh.seek(max(0, length - HEAD_BYTES))
+        last = fh.read(length - max(0, length - HEAD_BYTES))
+    return hashlib.sha256(first + b"\0" + last).hexdigest()
+
+
+def _chunks(path: str, offset: int, size: int, deadline: float):
+    """(end offset, whole lines) rounds from `offset` up to `size`; a last line
+    without its newline is left for a later call. A line longer than
+    MAX_LINE_BYTES, or the deadline, ends it with an error before that line."""
+    with open(path, "rb") as fh:
+        fh.seek(offset)
+        pos = offset
+        carry = b""
+        while pos < size:
+            if time.monotonic() >= deadline:
+                raise UsageError("usage reading ran out of time")
+            block = fh.read(min(CHUNK_BYTES, size - pos))
+            if not block:
+                return
+            pos += len(block)
+            data = carry + block
+            cut = data.rfind(b"\n")
+            if cut < 0:
+                carry = data
+                if len(carry) > MAX_LINE_BYTES:
+                    raise UsageError(f"{_clean(path, 200)} has a line longer than 32 MB")
                 continue
-            day = head.group(1)
-            costs = COST_FIELD.findall(line)
-            if costs:
-                seen = True
-                amt = float(costs[-1])
-                total_cost += amt
-                if day == today:
-                    today_cost += amt
-            tokens = TOKENS_FIELD.search(line)
-            for entry in tokens.group(1).split(",") if tokens else []:
-                parts = entry.rsplit(":", 4)
-                if len(parts) != 5 or not all(p.isdigit() for p in parts[1:]):
+            carry = data[cut + 1:]
+            end = pos - len(carry)
+            lines = data[:cut].split(b"\n")
+            if max(map(len, lines)) > MAX_LINE_BYTES:
+                raise UsageError(f"{_clean(path, 200)} has a line longer than 32 MB")
+            yield end, [line.decode("utf-8", "replace") for line in lines]
+
+
+def _track(cache: dict, kind: str, path: str) -> tuple[str, dict, int] | None:
+    """(identity, source, size) of a file to read now, the source reset when the
+    file is not the one counted before; None when it cannot be read."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    if not stat.S_ISREG(st.st_mode):
+        return None
+    sid = f"{kind}:{st.st_dev}:{st.st_ino}"
+    src = cache["sources"].get(sid)
+    try:
+        if src is not None and (st.st_size < src["offset"]
+                                or _fingerprint(path, src["offset"]) != src["fingerprint"]):
+            src = None
+        if src is None:
+            src = {"kind": kind, "path": path, "offset": 0, "fingerprint": _fingerprint(path, 0), "state": None,
+                   "days": {}, "cost_seen": False}
+            cache["sources"][sid] = src
+    except OSError:
+        return None
+    src["path"] = path
+    return sid, src, st.st_size
+
+
+def _retire(cache: dict, kind: str, listed: set[str]) -> None:
+    """Sources of `kind` no longer listed: a file rewritten in place under the
+    same path (the new file starts as the old one did) is dropped, as the new
+    one is counted in full; any other keeps its days."""
+    by_path = {cache["sources"][sid]["path"]: sid for sid in listed}
+    for sid in [s for s, src in cache["sources"].items() if src["kind"] == kind and s not in listed]:
+        src = cache["sources"].pop(sid)
+        successor = by_path.get(src["path"])
+        if successor is not None:
+            try:
+                if _fingerprint(src["path"], src["offset"]) == src["fingerprint"]:
                     continue
-                model, counts = _clean(parts[0], 100), [int(p) for p in parts[1:]]
-                for key, value in zip(TOKEN_KEYS, counts):
-                    by_day[day][key] += value
-                    by_day_model[(day, model)][key] += value
-    return by_day, by_day_model, today_cost, total_cost, seen
+            except OSError:
+                pass
+        retired = cache["retired"][kind]
+        _merge(retired["days"], src["days"])
+        retired["cost_seen"] = retired["cost_seen"] or src["cost_seen"]
+
+
+def _advance(src: dict, path: str, end: int) -> None:
+    src["offset"] = end
+    src["fingerprint"] = _fingerprint(path, end)
+
+
+class _Parser:
+    """One `agent-usage --parse` process for a call."""
+
+    def __init__(self, deadline: float):
+        self.deadline = deadline
+        try:
+            self.proc = subprocess.Popen([AGENT_USAGE, "--parse"], stdin=subprocess.PIPE,
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        except OSError as err:
+            raise UsageError(f"agent-usage could not run: {err.strerror}") from err
+        self.out: queue.Queue = queue.Queue()
+        self.err = b""
+        self.timer = threading.Timer(max(0.0, deadline - time.monotonic()), self.proc.kill)
+        self.timer.daemon = True
+        self.timer.start()
+        threading.Thread(target=self._read, daemon=True).start()
+        threading.Thread(target=self._read_err, daemon=True).start()
+
+    def _read(self):
+        for line in self.proc.stdout:
+            self.out.put(line)
+        self.out.put(None)
+
+    def _read_err(self):
+        self.err = self.proc.stderr.read()[-2000:]
+
+    def _failed(self) -> UsageError:
+        self.proc.kill()
+        rc = self.proc.wait()
+        if time.monotonic() >= self.deadline:
+            return UsageError("agent-usage ran out of time")
+        if rc == NOT_REPORTED:
+            return UsageError("agent-usage --parse exited 3")
+        tail = self.err.decode("utf-8", "replace").strip()[-200:]
+        return UsageError(f"agent-usage exited {rc}: {tail}" if rc else "agent-usage --parse broke its framing")
+
+    def _next(self):
+        try:
+            raw = self.out.get(timeout=max(0.0, self.deadline - time.monotonic()) + 0.5)
+        except queue.Empty:
+            raw = None
+        if raw is None:
+            raise self._failed()
+        try:
+            return json.loads(raw)
+        except ValueError:
+            raise self._failed() from None
+
+    def round(self, sid: str, state, lines: list[str]):
+        """(records per line, new state) for one round of a file's lines."""
+        try:
+            payload = [json.dumps(["S", sid, state])] + [json.dumps(["L", l]) for l in lines] + [json.dumps(["E", sid])]
+            self.proc.stdin.write(("\n".join(payload) + "\n").encode("utf-8"))
+            self.proc.stdin.flush()
+        except (BrokenPipeError, OSError):
+            raise self._failed() from None
+        if self._next() is not None:
+            raise self._failed()
+        records = []
+        for _ in lines:
+            got = self._next()
+            if not isinstance(got, list):
+                raise self._failed()
+            records.append(got)
+        end = self._next()
+        if not isinstance(end, dict) or "state" not in end:
+            raise self._failed()
+        if len(json.dumps(end["state"])) > STATE_MAX_BYTES:
+            raise UsageError("agent-usage returned a state larger than 64 KB")
+        return records, end["state"]
+
+    def close(self):
+        self.timer.cancel()
+        try:
+            self.proc.stdin.close()
+        except OSError:
+            pass
+        try:
+            rc = self.proc.wait(timeout=max(0.0, self.deadline - time.monotonic()) + 0.5)
+        except subprocess.TimeoutExpired:
+            raise self._failed() from None
+        if rc != 0:
+            raise self._failed()
+
+
+def _read_audit(cache: dict, deadline: float) -> int:
+    read = 0
+    listed = set()
+    tracked = _track(cache, "audit", AUDIT_LOG) if os.path.exists(AUDIT_LOG) else None
+    if tracked:
+        sid, src, size = tracked
+        listed.add(sid)
+        for end, lines in _chunks(AUDIT_LOG, src["offset"], size, deadline):
+            for line in lines:
+                # A record ends at a newline only; a carriage return inside a
+                # recorded argument must not start a line that passes for ours.
+                if _audit_line(line, src["days"]):
+                    src["cost_seen"] = True
+            read += end - src["offset"]
+            _advance(src, AUDIT_LOG, end)
+    _retire(cache, "audit", listed)
+    return read
+
+
+def _read_console(cache: dict, deadline: float) -> int:
+    """Reads the engine's files; raises NotReported or UsageError. Rounds that
+    finished stay in the cache even when a later one fails."""
+    listing = _agent_usage(deadline, "--files")
+    paths = []
+    for p in listing.split("\0"):
+        p = p.strip("\n")
+        if p and os.path.isabs(p) and p not in paths:
+            paths.append(p)
+    read = 0
+    listed = set()
+    plans = []
+    for path in paths:
+        tracked = _track(cache, "console", path)
+        if tracked:
+            listed.add(tracked[0])
+            plans.append((path, *tracked))
+    _retire(cache, "console", listed)
+    parser = None
+    try:
+        for path, sid, src, size in plans:
+            if src["offset"] >= size:
+                continue
+            for end, lines in _chunks(path, src["offset"], size, deadline):
+                if parser is None:
+                    parser = _Parser(deadline)
+                records, state = parser.round(sid, src["state"], lines)
+                days = {}
+                for per_line in records:
+                    for ev in per_line:
+                        rec = _console_record(ev)
+                        if rec:
+                            _add(days, *rec)
+                _merge(src["days"], days)
+                src["state"] = state
+                read += end - src["offset"]
+                _advance(src, path, end)
+        if parser is not None:
+            parser.close()
+    finally:
+        cache["last_read_bytes"] = cache.get("last_read_bytes", 0) + read
+    return read
 
 
 def collect_all():
-    """Console usage plus chat audit lines, merged by day and by model."""
-    available, source, error, by_day, by_day_model, msgs_by_day = collect_console()
-    chat_day, chat_model, today_cost, total_cost, seen = collect_chat()
-    for day, tots in chat_day.items():
-        for k, v in tots.items():
-            by_day[day][k] += v
-    for key, tots in chat_model.items():
-        for k, v in tots.items():
-            by_day_model[key][k] += v
-    return available, source, error, by_day, by_day_model, msgs_by_day, (today_cost, total_cost, seen)
+    """(available, source, error, by_day, by_day_model, msgs_by_day, costs, history)."""
+    deadline = time.monotonic() + READER_TIMEOUT_S
+    persist = os.path.isdir(DATA_DIR)
+    lock = None
+    available, error, source = True, None, ""
+    try:
+        if persist:
+            lock = _lock(deadline)
+        cache = _load() if persist else _fresh()
+        cache["last_read_bytes"] = 0
+        try:
+            cache["last_read_bytes"] = _read_audit(cache, deadline)
+        except OSError:
+            pass
+        except UsageError as err:
+            error = _clean(str(err), 240)
+        try:
+            _read_console(cache, deadline)
+            source = _clean(_agent_usage(deadline, "--source").strip(), 500)
+        except NotReported:
+            available = False
+        except UsageError as err:
+            available, error = False, _clean(str(err), 240)
+        if persist:
+            _save(cache)
+        cache.pop("_from", None)
+    except UsageError as err:
+        # The cache is busy: report what it held, without the new lines.
+        cache = _load() if persist else _fresh()
+        available, error = False, _clean(str(err), 240)
+    finally:
+        if lock is not None:
+            os.close(lock)
+
+    console, audit = {}, {}
+    seen = False
+    for src in cache["sources"].values():
+        _merge(console if src["kind"] == "console" else audit, src["days"])
+        seen = seen or (src["kind"] == "audit" and src["cost_seen"])
+    _merge(console, cache["retired"]["console"]["days"])
+    _merge(audit, cache["retired"]["audit"]["days"])
+    seen = seen or cache["retired"]["audit"]["cost_seen"]
+
+    by_day = defaultdict(lambda: defaultdict(int))
+    by_day_model = defaultdict(lambda: defaultdict(int))
+    msgs_by_day = defaultdict(int)
+    today = _today()
+    today_cost = total_cost = 0
+    for part, include in ((console, available), (audit, True)):
+        if not include:
+            continue
+        for day, models in part.items():
+            for model, row in models.items():
+                msgs_by_day[day] += row[MESSAGES]
+                total_cost += row[COST]
+                if day == today:
+                    today_cost += row[COST]
+                if model == NO_MODEL:
+                    continue
+                for k, v in zip(TOKEN_KEYS, row):
+                    by_day[day][k] += v
+                    by_day_model[(day, model)][k] += v
+    known = sorted(d for d in list(console) + list(audit) if DAY.fullmatch(d))
+    history = {"history_reset": True, "history_since": known[0] if known else None} if cache["history_reset"] else {}
+    return (available, source, error, by_day, by_day_model, msgs_by_day,
+            (today_cost / 1_000_000, total_cost / 1_000_000, seen), history)
 
 
 def window_days(n: int) -> list[str]:
@@ -222,7 +625,7 @@ def line_for(label: str, totals: dict[str, int]) -> str:
 def build_report(days: int) -> tuple[dict, bool, bool]:
     """The report /api/usage returns, whether any usage was recorded at all, and
     whether any prompt line carried a cost."""
-    available, source, error, by_day, by_day_model, msgs_by_day, costs = collect_all()
+    available, source, error, by_day, by_day_model, msgs_by_day, costs, history = collect_all()
     today = _today()
     recent = window_days(days)
     today_cost, total_cost, seen = costs
@@ -241,6 +644,7 @@ def build_report(days: int) -> tuple[dict, bool, bool]:
             "all_time": sum(msgs_by_day.values()),
         },
         "prompt_api_cost_usd": {"today": round(today_cost, 4), "total": round(total_cost, 4)},
+        **history,
         "available": available,
         "error": error,
     }

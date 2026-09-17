@@ -281,12 +281,49 @@ The functions are called in this order; each may log and export variables.
 The engine also installs two commands, which the start script requires to be
 executable.
 
-`/usr/local/bin/agent-usage` reports the agent's console usage for
-`/api/usage` and `ha-usage`: one JSON line per agent message,
-`{"day": "YYYY-MM-DD", "model", "input", "output", "cache_read", "cache_write"}`,
-where `input` counts only the input tokens not read from cache. With
-`--source` it prints where it reads from. It exits 3 when the engine does not
-report usage; the report then carries `"available": false`. If it fails or
+`/usr/local/bin/agent-usage` gives the core the agent's console usage for
+`/api/usage` and `ha-usage`. The engine parses; the core reads the files, only
+what was appended since the last call, and keeps the totals.
+
+- `agent-usage --files` prints the absolute paths of the engine's transcript
+  files, each followed by a NUL byte.
+- `agent-usage --parse` reads one JSON array per line and writes exactly one
+  line for each:
+  - `["S", id, state]` starts a file's new lines and is answered with `null`.
+    `state` is what the parser returned for that file last time, or `null`
+    the first time and whenever the file is counted again from its start.
+  - `["L", text]` is one line of the file, without its newline, and is
+    answered with a JSON list of usage records, possibly empty.
+  - `["E", id]` ends the file's lines and is answered with
+    `{"state": <any JSON, at most 64 KB>}`, which the core keeps for the next
+    call.
+
+  A usage record is
+  `{"day": "YYYY-MM-DD", "model", "input", "output", "cache_read", "cache_write"}`,
+  where `input` counts only the input tokens not read from cache. A record
+  depends only on the file's earlier lines, through `state`.
+- `agent-usage --source` prints where the files are.
+
+Any of them exits 3 when the engine does not report usage; the report then
+carries `"available": false`.
+
+The transcript files must be append-only: a line once written does not change.
+The core keeps its totals in `/data/usage-cache.json`, per file (device and
+inode), with a fingerprint of the bytes it has counted (their first and last
+4 KB), and keeps the previous version as `usage-cache.json.1`:
+- a file that grew is read from where the last call stopped, whole lines only;
+- a file that shrank, or whose fingerprint changed, is counted again from its
+  start; a change elsewhere in counted bytes is not seen;
+- a line longer than 32 MB stops the reading of that file with an error, and
+  the file is not read past it;
+- a file that is gone keeps its days, so usage history outlives the transcripts.
+
+The prompt server's audit log is read the same way. If the current cache
+cannot be read, the core continues from the previous version; a new version
+never replaces the last readable one before it is written. Whenever the current
+version is lost, the report carries `"history_reset": true` and
+`"history_since"`, the first day it still has: what the lost version counted
+since cannot be known. If it fails or
 takes longer than its budget (20 of the 30 seconds the prompt server gives
 `ha-usage`), the report carries `"available": false` and a one-line `"error"`,
 and still reports the prompt API usage. Model names and the source are kept to
