@@ -5,17 +5,19 @@
 // An add-on that builds on this core places its adapter at app/adapter/index.js
 // in the assembled tree. Every core module that needs an engine-specific value
 // asks this module for it; nothing else in the core requires the adapter, and
-// the adapter may require only core leaf modules (server/prompt/security.js),
-// so the graph stays acyclic.
+// the adapter may require only core leaf modules (server/prompt/security.js,
+// server/branding.js, server/theme.js), so the graph stays acyclic.
 //
 // The adapter is checked when it is first loaded: a wrong apiVersion, a missing
 // member or a member of the wrong type stops the add-on at startup instead of
 // failing on the first request that happens to need it. Its names are loaded
-// and checked with it, from app/adapter/branding.json (see branding.js).
+// and checked with it, from app/adapter/branding.json (see branding.js), and so
+// are its colours, from app/adapter/theme.json when it ships one (see theme.js).
 
 const { readBranding, validateBranding } = require('./branding');
+const { NEUTRAL, readTheme, validateTheme } = require('./theme');
 
-const API_VERSION = 4;
+const API_VERSION = 5;
 
 // member path -> expected typeof
 const REQUIRED = {
@@ -98,6 +100,7 @@ function validateAdapter(mod) {
 
 let loaded = null;
 let names = null;
+let palette = null;
 
 // The validated adapter. Loaded from the assembled tree on first use, together
 // with its names.
@@ -107,26 +110,35 @@ function adapter() {
     // @ts-ignore
     const mod = validateAdapter(require('../adapter'));
     names = readBranding();
+    palette = readTheme();
     loaded = mod;
   }
   return loaded;
 }
 
-// The adapter's validated names: { productName, consoleName, agentName }.
+// The adapter's validated names: { productName, consoleName, agentName, cliName, tabGlyph }.
 function branding() {
   adapter();
-  return /** @type {{ productName: string, consoleName: string, agentName: string }} */ (names);
+  return /** @type {{ productName: string, consoleName: string, agentName: string, cliName: string, tabGlyph: string }} */ (names);
 }
 
-// For tests only: install an adapter and its names before anything asked for
-// them. There is no fallback — without this call the assembled tree is the only
-// source.
-function useAdapter(mod, brandingValue) {
+// The adapter's validated colours, or the core's neutral ones: { ui, terminal, search }.
+function theme() {
+  adapter();
+  return /** @type {Record<string, Record<string, string>>} */ (palette);
+}
+
+// For tests only: install an adapter, its names and its colours (the neutral
+// ones when not given) before anything asked for them. There is no fallback —
+// without this call the assembled tree is the only source.
+function useAdapter(mod, brandingValue, themeValue = NEUTRAL) {
   if (loaded) throw new Error('engine adapter: already loaded');
   const branded = validateBranding(brandingValue);
+  const coloured = validateTheme(themeValue);
   loaded = validateAdapter(mod);
   names = branded;
+  palette = coloured;
   return loaded;
 }
 
-module.exports = { API_VERSION, REQUIRED, OPTIONAL, validateAdapter, adapter, branding, useAdapter };
+module.exports = { API_VERSION, REQUIRED, OPTIONAL, validateAdapter, adapter, branding, theme, useAdapter };

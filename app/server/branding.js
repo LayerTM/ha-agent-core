@@ -1,6 +1,7 @@
 'use strict';
 
 // The engine's names, as the add-on declares them in app/adapter/branding.json.
+// The console pages use them too (console-assets.js).
 //
 // Data, not code, and read without loading the adapter: the startup placeholder
 // runs before the adapter may be loaded, and the start script reads the same
@@ -17,6 +18,8 @@ const KEYS = Object.freeze({
   productName: 'the add-on and its page title, e.g. "Claude Code"',
   consoleName: 'the web console, e.g. "Claude Console"',
   agentName: 'the agent the console runs, e.g. "Claude"',
+  cliName: 'the agent\'s command-line tool, as the update menu names it, e.g. "Claude CLI"',
+  tabGlyph: 'the mark before the agent\'s tab name, e.g. "✳"',
 });
 
 // 1-64 characters, no control characters and none of < > & " ' \ `

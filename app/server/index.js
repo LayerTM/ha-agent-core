@@ -9,9 +9,10 @@ const tmux = require('./tmux');
 const { createRouter } = require('./api');
 const terminal = require('./terminal');
 const promptServer = require('./prompt');
-const { stampAssetVersion } = require('./shell');
+const { pageValues } = require('./pages');
+const { loadConsoleAssets, mountConsoleAssets } = require('./console-assets');
 const sources = require('./sources');
-const { adapter, branding } = require('./adapter-contract');
+const { adapter, branding, theme } = require('./adapter-contract');
 
 const PORT = Number(process.env.CLAUDE_CONSOLE_PORT || 8099);
 const UPLOAD_DIR = process.env.UPLOAD_DIR || '/data/uploads';
@@ -51,21 +52,15 @@ const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 // fresh shell always fetches matching assets while an unchanged version still
 // hits cache.
 const ASSET_VERSION = process.env.ADDON_VERSION || String(Date.now());
-const INDEX_HTML = path.join(PUBLIC_DIR, 'index.html');
 
-async function serveIndex(req, res) {
-  let html;
-  try {
-    html = await fsp.readFile(INDEX_HTML, 'utf8');
-  } catch (err) {
-    console.error('serveIndex: failed to read index.html:', err.message);
-    res.status(500).send('index unavailable');
-    return;
-  }
-  res.setHeader('Cache-Control', 'no-store');
-  res.type('html').send(stampAssetVersion(html, ASSET_VERSION));
-}
-app.get(['/', '/index.html'], serveIndex);
+// The pages carry the engine's names and colours, filled in here once; the
+// icons are the add-on's. Either failing stops the start (console-assets.js).
+const consoleAssets = loadConsoleAssets({
+  publicDir: PUBLIC_DIR,
+  iconDir: path.join(__dirname, '..', 'adapter', 'icons'),
+  values: pageValues({ branding: branding(), theme: theme(), console: adapter().console }),
+});
+mountConsoleAssets(app, consoleAssets, { assetVersion: ASSET_VERSION });
 
 app.use(express.static(PUBLIC_DIR, {
   index: 'index.html',

@@ -12,7 +12,7 @@
     "node": ">=22"
   },
   "haAgentCore": {
-    "adapterApi": 4
+    "adapterApi": 5
   },
   "files": [
     "LICENSE",
