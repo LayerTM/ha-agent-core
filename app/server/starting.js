@@ -74,7 +74,8 @@ server.on('error', (err) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`Startup placeholder listening on :${PORT}`);
+  const { port } = /** @type {import('node:net').AddressInfo} */ (server.address());
+  console.log(`Startup placeholder listening on :${port}`);
 });
 
 // The run script stops this before the console binds the port. Exit at once

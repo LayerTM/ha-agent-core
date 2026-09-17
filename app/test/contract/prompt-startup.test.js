@@ -7,29 +7,19 @@
 const { test, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
+const { captureLog, reportedPort } = require('../fixtures/bound-port');
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'core-startup-'));
 const OPTIONS = path.join(TMP, 'options.json');
 const TOKEN = 'startup-token-0123456789abcdef';
 
-function freePort() {
-  return new Promise((resolve) => {
-    const probe = net.createServer().listen(0, '127.0.0.1', () => {
-      const { port } = probe.address();
-      probe.close(() => resolve(port));
-    });
-  });
-}
-
 after(() => fs.rmSync(TMP, { recursive: true, force: true }));
 
 test('the bootstrap refuses to start without the audit hook, then starts with it', async () => {
-  const port = await freePort();
   // Read by the bootstrap at load time.
-  process.env.CLAUDE_PROMPT_PORT = String(port);
+  process.env.CLAUDE_PROMPT_PORT = '0';
   process.env.CLAUDE_PROMPT_DEV = '1';
   process.env.CLAUDE_PROMPT_DATA = TMP;
   process.env.CLAUDE_PROMPT_OPTIONS = OPTIONS;
@@ -50,9 +40,9 @@ test('the bootstrap refuses to start without the audit hook, then starts with it
 
   // Without the hook: nothing listens, nothing is written.
   process.env.CLAUDE_PROMPT_SETTINGS = 'no hook here';
-  const noop = await promptServer.start();
-  assert.equal(typeof noop, 'function');
-  await assert.rejects(fetch(`http://127.0.0.1:${port}/api/status`));
+  const refused = await captureLog(() => promptServer.start());
+  assert.equal(typeof refused.result, 'function');
+  assert.equal(reportedPort(refused.logged.join('\n'), 'prompt server'), null, 'nothing listens');
   assert.deepEqual(state.mcpConfigs, []);
   // Old transcripts are removed before the gate, whether or not the API starts.
   assert.deepEqual(state.removedSessions, [{
@@ -60,8 +50,11 @@ test('the bootstrap refuses to start without the audit hook, then starts with it
   }]);
 
   process.env.CLAUDE_PROMPT_SETTINGS = 'neutral-audit-hook';
-  const shutdown = await promptServer.start();
+  const started = await captureLog(() => promptServer.start());
+  const shutdown = started.result;
+  const port = reportedPort(started.logged.join('\n'), 'prompt server');
   try {
+    assert.ok(port, started.logged.join('\n'));
     // No Home Assistant token → no relay → the adapter is told to remove its config.
     assert.deepEqual(state.mcpConfigs, [{ dir: path.join(TMP, 'claude-prompt'), url: '', bearer: '' }]);
     const denied = await fetch(`http://127.0.0.1:${port}/api/status`);
