@@ -93,7 +93,7 @@ engine_hooks
 SETTINGS_VALUE='{"hooks":"neutral"}'
 options '{"auto_update":true,"custom_instructions":"Be brief.","upload_retention_days":3,
   "environment_vars":["FOO=bar=baz","malformed","CLAUDE_CONSOLE_DEV=1","CLAUDE_PROMPT_BIN=/tmp/evil","CLAUDE_PROMPT_HA_MCP_URL=http://evil"],
-  "init_commands":["true secret-value && touch /pins/init-ran"],"plugins":["p1"],"skills_git":"https://example.invalid/s.git"}'
+  "init_commands":["false first-fails","true secret-value && touch /pins/init-ran"],"plugins":["p1"],"skills_git":"https://example.invalid/s.git"}'
 mkdir -p /homeassistant
 run_service
 eq "exits 0 (the console's exec)" "${STATUS}" 0
@@ -120,7 +120,8 @@ eq "ports and data paths" "$(for k in CLAUDE_CONSOLE_PORT CLAUDE_PROMPT_PORT CLA
 eq "the instructions are the bundled file plus the user's block" "$(cat /data/workdir/AGENTS.md)" \
     "$(printf 'Neutral instructions.\n\n\n---\n\n# User Custom Instructions\n\nBe brief.')"
 eq "they are copied to /homeassistant when absent" "$(cat /homeassistant/AGENTS.md)" "$(cat /data/workdir/AGENTS.md)"
-[ -f /pins/init-ran ] && ok "init commands run" || bad "init commands run"
+[ -f /pins/init-ran ] && ok "init commands run, also after one failed" || bad "init commands run, also after one failed"
+contains "a failed init command is reported by its first word" "${P}/run.out" "Init command failed: false"
 contains "only the first word of an init command is logged" "${P}/run.out" "Running init command: true ..."
 lacks "the rest of it is not" "${P}/run.out" "secret-value"
 contains "provisioning gets the options and HA_URL" "${P}/provision.out" "plugins=p1 skills=https://example.invalid/s.git ha_url=http://homeassistant:8123"
@@ -135,7 +136,7 @@ done
 echo "2. auto_update off, an empty prompt setting, existing /homeassistant instructions"
 SETTINGS_VALUE=''
 # The add-on declares custom_instructions with the default "", so it is always present.
-options '{"auto_update":false,"proactive_alerts":false,"custom_instructions":""}'
+options '{"auto_update":false,"proactive_alerts":false,"custom_instructions":"","environment_vars":[],"init_commands":[],"monitoring_interval_hours":0,"daily_digest_time":""}'
 mkdir -p /homeassistant && printf 'mine\n' > /homeassistant/AGENTS.md
 printf '{}' > /data/alerts-state.json
 run_service
