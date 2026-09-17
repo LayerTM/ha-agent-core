@@ -5,9 +5,10 @@
 #   1. tools/check-install-scripts.js compares the lockfile with the reviewed
 #      record (install-scripts.json) — pure data, nothing is unpacked yet;
 #   2. npm ci --ignore-scripts unpacks the packages without running anything;
-#   3. npm rebuild runs the install scripts of the packages package.json
-#      `allowScripts` names, and --strict-allow-scripts fails on any other
-#      package that has one;
+#   3. tools/build-allowed-packages.js runs the install scripts of the packages
+#      package.json `allowScripts` names, in a staging directory that holds
+#      only their reviewed closures, with npm and node-gyp by absolute path
+#      (npm rebuild --strict-allow-scripts); nothing else ever runs a script;
 #   4. tools/smoke-allowed-packages.js loads every allowed package and starts a
 #      terminal through node-pty.
 #
@@ -41,7 +42,14 @@ if ! node "$tools/check-install-scripts.js" .; then
 fi
 
 npm ci --ignore-scripts
-npm rebuild --strict-allow-scripts
+
+# The image's npm-cli.js: NPM_CLI when the image names it, otherwise the real
+# path of the npm on the caller's PATH.
+if [ -z "${NPM_CLI:-}" ]; then
+  NPM_CLI="$(node -p 'require("fs").realpathSync(process.argv[1])' "$(command -v npm)")"
+fi
+export NPM_CLI
+node "$tools/build-allowed-packages.js"
 
 if [ -e "$devdir" ]; then
   echo "node-gyp downloaded headers instead of using $nodedir" >&2

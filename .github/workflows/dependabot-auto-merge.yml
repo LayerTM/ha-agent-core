@@ -9,10 +9,14 @@ name: Dependabot auto-merge
 # manifests and lockfiles, fetched as data through the API; none of its code is
 # checked out or run.
 #
-# Every new head is judged again (a newer run cancels an older one). Auto-merge is
-# enabled for that exact head commit only; for anything else — a major update, a
-# changed or unknown install-code verdict, an error — auto-merge is turned off
-# and the pull request is labelled "needs review".
+# Every event on a Dependabot pull request, whoever caused it, first turns
+# auto-merge off; nothing before that can fail. Only then is the new head judged
+# (a newer run cancels an older one), and only as the last step, for a push by
+# Dependabot itself, is auto-merge enabled again — for that exact head commit.
+# Anything else — a major update, a push by someone else, a changed or unknown
+# install-code verdict, a refused enable, any failure — leaves auto-merge off; an
+# install-code verdict other than "reviewed" also labels the pull request
+# "needs review".
 #
 # A merge made with the workflow token raises no push event, so once the pull
 # request has merged this job starts the main-measured workflow, which runs CI
@@ -35,28 +39,45 @@ concurrency:
 
 jobs:
   auto-merge:
-    if: ${{ github.actor == 'dependabot[bot]' }}
+    if: ${{ github.event.pull_request.user.login == 'dependabot[bot]' }}
     runs-on: ubuntu-latest
     timeout-minutes: 50
     steps:
+      - name: Turn auto-merge off until this head is judged
+        run: |
+          if ! gh pr merge --disable-auto "$PR_URL"; then
+            armed="$(gh pr view "$PR_URL" --json autoMergeRequest --jq '.autoMergeRequest != null')"
+            if [ "$armed" != false ]; then
+              echo "::error::auto-merge could not be turned off"
+              exit 1
+            fi
+          fi
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Fetch Dependabot metadata
         id: metadata
+        if: ${{ github.actor == 'dependabot[bot]' }}
         # Pinned to an immutable commit SHA (this job runs with write scope in a
         # pull_request_target context). The version comment lets Dependabot's
         # github-actions updater keep the pin current.
         uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
 
       - name: Check out the base branch
+        if: ${{ steps.metadata.conclusion == 'success' }}
         uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           persist-credentials: false
       - uses: actions/setup-node@v7
+        if: ${{ steps.metadata.conclusion == 'success' }}
         with:
           node-version: "26"
 
       - name: Decide on this head
         id: decide
+        if: ${{ steps.metadata.conclusion == 'success' }}
         run: |
           set -uo pipefail
           decision=hold
@@ -96,39 +117,41 @@ jobs:
           REPO: ${{ github.repository }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Enable auto-merge for this head, or turn it off
-        id: apply
-        if: ${{ always() && steps.metadata.conclusion == 'success' }}
+      - name: Label an update whose install code is not the reviewed one
+        if: ${{ always() && steps.decide.outputs.reviewed != 'true' }}
         run: |
-          set -uo pipefail
-          if [ "$DECISION" = merge ]; then
-            gh pr edit "$PR_URL" --remove-label "needs review" >/dev/null 2>&1 || true
-            gh pr merge --auto --squash --match-head-commit "$HEAD_SHA" "$PR_URL"
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          echo "enabled=false" >> "$GITHUB_OUTPUT"
-          # Turning auto-merge off must succeed, or it must already be off.
-          if ! gh pr merge --disable-auto "$PR_URL"; then
-            armed="$(gh pr view "$PR_URL" --json autoMergeRequest --jq '.autoMergeRequest != null')"
-            if [ "$armed" != false ]; then
-              echo "::error::auto-merge could not be turned off"
-              exit 1
-            fi
-          fi
-          if [ "$REVIEWED" != true ]; then
-            gh pr edit "$PR_URL" --add-label "needs review"
-            echo "::notice::the install code of this update is not the reviewed one; it waits for a review"
-          fi
+          gh pr edit "$PR_URL" --add-label "needs review"
+          echo "::notice::the install code of this update is not the reviewed one, or could not be judged; it waits for a review"
         env:
-          DECISION: ${{ steps.decide.outputs.decision }}
-          REVIEWED: ${{ steps.decide.outputs.reviewed }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Enable auto-merge for this head
+        id: enable
+        if: ${{ steps.decide.outputs.decision == 'merge' }}
+        run: |
+          gh pr edit "$PR_URL" --remove-label "needs review" >/dev/null 2>&1 || true
+          gh pr merge --auto --squash --match-head-commit "$HEAD_SHA" "$PR_URL"
+        env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Leave auto-merge off after any failure
+        if: ${{ failure() || cancelled() }}
+        run: |
+          gh pr merge --disable-auto "$PR_URL" || true
+          gh pr edit "$PR_URL" --add-label "needs review" || true
+          if [ "$(gh pr view "$PR_URL" --json autoMergeRequest --jq '.autoMergeRequest != null')" != false ]; then
+            echo "::error::auto-merge is still on after a failure"
+            exit 1
+          fi
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Measure main once the pull request has merged
-        if: ${{ steps.apply.outputs.enabled == 'true' }}
+        if: ${{ steps.enable.conclusion == 'success' }}
         run: |
           answered=0
           for _ in $(seq 1 80); do

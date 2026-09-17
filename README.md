@@ -13,7 +13,7 @@ is unpacked or executed.
 | `ha-tools/` | the dashboard screenshot helper |
 | `rootfs/` | shared scripts: alerts, audit and backup hooks, Home Assistant helpers, shell configuration |
 | `tools/verify-core.js`, `tools/check-adapter-graph.js` | the checks an add-on runs when it assembles its image |
-| `tools/npm-ci-checked.sh`, `tools/check-install-scripts.js`, `tools/smoke-allowed-packages.js` | the dependency install an add-on runs in `app/` and `ha-tools/` |
+| `tools/npm-ci-checked.sh`, `tools/check-install-scripts.js`, `tools/build-allowed-packages.js`, `tools/smoke-allowed-packages.js` | the dependency install an add-on runs in `app/` and `ha-tools/` |
 
 An add-on assembles its image from this tree plus its own files, in the same
 layout: its engine adapter goes to `app/adapter/`, its console frontend to
@@ -88,17 +88,26 @@ Dependencies are installed with `tools/npm-ci-checked.sh`, run in the directory
 that holds the lockfile:
 1. the check, before anything is unpacked;
 2. `npm ci --ignore-scripts`;
-3. `npm rebuild --strict-allow-scripts`, which also fails on any other package
-   with an install script;
+3. `tools/build-allowed-packages.js`: the reviewed closures, and nothing else,
+   are copied into a staging directory, `npm rebuild --strict-allow-scripts`
+   runs there, and the built packages are copied back. The rebuild uses npm and
+   its node-gyp by absolute path, a PATH of the Node.js and system directories,
+   and an empty HOME and npm configuration. A package outside a closure, even
+   one that provides a `node-gyp` command, cannot be reached from an install
+   script. Nothing else ever runs a dependency's script;
 4. loading each allowed package, and starting a terminal through node-pty.
 
 node-gyp compiles against the headers of the Node.js that runs it
 (`npm_package_config_node_gyp_nodedir`), so nothing is downloaded.
 
-A Dependabot update is merged automatically only when the base branch's checker
-and records accept the update's lockfiles, which are read as data and never run,
-and only for the head commit that was judged. Otherwise auto-merge is turned off
-and the pull request is labelled `needs review`.
+On a Dependabot pull request, every event turns auto-merge off first.
+Auto-merge is enabled again only when:
+- the event is Dependabot's own push of a minor or patch update;
+- the base branch's checker and records accept the update's lockfiles, which
+  are read as data and never run.
+
+It is enabled for the head commit that was judged, and nothing else. An update
+whose install code is not the reviewed one is labelled `needs review`.
 
 ## The release archive
 
