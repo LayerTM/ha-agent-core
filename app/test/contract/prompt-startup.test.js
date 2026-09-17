@@ -2,7 +2,7 @@
 
 // Starting the prompt server through its bootstrap, with a neutral adapter: the
 // audit gate stays the core's, the adapter writes its MCP config where the core
-// says, and shutdown reaches the adapter's runner.
+// says, and a prompt runs through the core's run() and the adapter's agent.
 
 const { test, after } = require('node:test');
 const assert = require('node:assert/strict');
@@ -35,11 +35,13 @@ test('the bootstrap refuses to start without the audit hook, then starts with it
   process.env.CLAUDE_PROMPT_OPTIONS = OPTIONS;
   process.env.HOME = path.join(TMP, 'home');
   process.env.NEUTRAL_AGENT_KEY = 'neutral-env-secret-0123456789';
+  // The neutral agent is a node script; the adapter passes the script itself.
+  process.env.CLAUDE_PROMPT_BIN = process.execPath;
   delete process.env.SUPERVISOR_TOKEN;
   fs.writeFileSync(OPTIONS, JSON.stringify({ prompt_api: true, api_token: TOKEN, ha_token: '', prompt_ha_token: '' }));
 
   const { useAdapter } = require('../../server/adapter-contract');
-  const { createNeutralAdapter } = require('../fixtures/neutral-adapter');
+  const { createNeutralAdapter, okTape } = require('../fixtures/neutral-adapter');
   const { adapter, state } = createNeutralAdapter();
   useAdapter(adapter);
   const promptServer = require('../../server/prompt');
@@ -70,11 +72,7 @@ test('the bootstrap refuses to start without the audit hook, then starts with it
     assert.equal(body.ha_mcp, false);
     assert.equal(body.ready, false);
     // The adapter's secrets reach the redactor: an echoed secret is not echoed back.
-    state.script.push(() => ({
-      status: 'ok', text: `key ${process.env.NEUTRAL_AGENT_KEY}`, proposal: null, automation: null,
-      toolsUsed: [], numTurns: 1, costUsd: 0, tokens: [], truncated: false,
-      mcpFailed: false, mcpConnected: null, haTools: null,
-    }));
+    state.tapes.push(okTape(`key ${process.env.NEUTRAL_AGENT_KEY}`));
     const answer = await fetch(`http://127.0.0.1:${port}/api/prompt`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
@@ -82,9 +80,8 @@ test('the bootstrap refuses to start without the audit hook, then starts with it
     });
     assert.equal(answer.status, 200);
     assert.equal((await answer.json()).text, 'key [REDACTED]');
-    assert.equal(state.runs[0].settings, 'neutral-audit-hook');
+    assert.equal(state.launches[0].settings, 'neutral-audit-hook');
   } finally {
     shutdown();
   }
-  assert.equal(state.shutdowns, 1);
 });

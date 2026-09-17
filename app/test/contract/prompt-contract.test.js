@@ -15,12 +15,13 @@ process.env.CLAUDE_PROMPT_RATE_BURST = '500';
 process.env.CLAUDE_PROMPT_RETRY_BACKOFF_MS = '0';
 process.env.CLAUDE_PROMPT_MIN_RETRY_BUDGET_MS = '1000';
 process.env.CLAUDE_PROMPT_MAX_ATTEMPTS = '2';
+process.env.CLAUDE_PROMPT_TIMEOUT_MS = '10000';
 
 const { useAdapter } = require('../../server/adapter-contract');
 const { createNeutralAdapter, okOutcome, errorOutcome, waitForAbort } = require('../fixtures/neutral-adapter');
 
-const TIMEOUT_MS = 5000;
-const { adapter, state } = createNeutralAdapter({ timeoutMs: TIMEOUT_MS });
+const TIMEOUT_MS = 10000;
+const { adapter, state, run: scriptedRun } = createNeutralAdapter();
 useAdapter(adapter);
 
 const { createPromptApp } = require('../../server/prompt/server');
@@ -43,6 +44,7 @@ function makeApp(overrides = {}) {
     addonVersion: 'contract',
     redact: buildRedactor([SECRET]),
     audit: (line) => auditLines.push(line),
+    runAgent: scriptedRun,
     ...overrides,
   });
 }
@@ -103,7 +105,7 @@ test('a request without the bearer token is refused before anything runs', async
   for (const auth of [null, 'Bearer wrong-token-0123456789abcdef', TOKEN, `Basic ${TOKEN}`]) {
     const res = await post({ prompt: 'hello' }, { auth });
     assert.equal(res.status, 401, String(auth));
-    assert.deepEqual(await res.json(), { error: 'unauthorized' });
+    assert.deepEqual(await res.json(), { error: 'unauthorized', code: 'unauthorized' });
   }
   const status = await fetch(`${base}/api/status`);
   assert.equal(status.status, 401);
@@ -111,31 +113,51 @@ test('a request without the bearer token is refused before anything runs', async
   assert.ok(auditLines.every((line) => line.startsWith('prompt[deny] reason=401')));
 });
 
-test('a malformed body is refused before anything runs', async () => {
+test('a malformed body is refused before anything runs, with a code a client can map', async () => {
+  /** @type {Array<[{ raw?: string, body?: any }, number, object]>} */
   const cases = [
-    [{ raw: '[1]' }, 400, 'body must be a JSON object'],
-    [{ raw: '{"prompt":' }, 400, 'invalid JSON body'],
-    [{ body: { prompt: 'x', extra: 1 } }, 400, 'unknown field: extra'],
-    [{ body: { prompt: 'x', mode: 'admin' } }, 400, 'mode must be "read" or "write"'],
-    [{ body: { prompt: '   ' } }, 400, 'prompt must be a non-empty string'],
-    [{ body: { prompt: 'x'.repeat(8 * 1024 + 1) } }, 413, 'prompt too large (max 8 KB)'],
-    [{ body: { prompt: 'x', conversation_id: 7 } }, 400, 'conversation_id must be a string'],
-    [{ body: { prompt: 'x', surface: 'screen' } }, 400, 'surface must be "voice" or "text"'],
-    [{ body: { prompt: 'x', edit_automation: [] } }, 400, 'edit_automation must be a JSON object'],
-    [{ body: { prompt: 'x', stream: 'yes' } }, 400, 'stream must be a boolean'],
-    [{ body: { prompt: 'x', image_entity: 'light.kitchen' } }, 400, 'image_entity must be a camera.<id> entity'],
-    [{ body: { prompt: 'x', intents: INTENT } }, 400, 'intents is only valid with mode "write"'],
-    [{ body: { prompt: 'x', confirmation: 'auto' } }, 400, 'confirmation is only valid with mode "write"'],
-    [{ body: { mode: 'write', intents: INTENT, stream: true } }, 400, 'stream is only valid with mode "read"'],
-    [{ body: { mode: 'write', intents: INTENT, image_entity: 'camera.door' } }, 400, 'image_entity is only valid with mode "read"'],
-    [{ body: { mode: 'write', intents: INTENT, confirmation: 'maybe' } }, 400, 'confirmation must be "auto" or "confirmed"'],
+    [{ raw: '[1]' }, 400, { error: 'body must be a JSON object', code: 'invalid_body' }],
+    [{ raw: '{"prompt":' }, 400, { error: 'invalid JSON body', code: 'invalid_json' }],
+    [{ raw: JSON.stringify({ prompt: 'x'.repeat(64 * 1024) }) }, 413, { error: 'body too large', code: 'body_too_large', limit_bytes: 64 * 1024 }],
+    [{ body: { prompt: 'x', extra: 1 } }, 400, { error: 'unknown field: extra', code: 'unknown_field', field: 'extra' }],
+    [{ body: { prompt: 'x', mode: 'admin' } }, 400, { error: 'mode must be "read" or "write"', code: 'invalid_field', field: 'mode' }],
+    [{ body: { prompt: '   ' } }, 400, { error: 'prompt must be a non-empty string', code: 'invalid_field', field: 'prompt' }],
+    [{ body: { mode: 'write', intents: INTENT, prompt: 7 } }, 400, { error: 'prompt must be a string', code: 'invalid_field', field: 'prompt' }],
+    [{ body: { prompt: 'x'.repeat(8 * 1024 + 1) } }, 413, { error: 'prompt too large (max 8 KB)', code: 'prompt_too_large', limit_bytes: 8 * 1024 }],
+    [{ body: { prompt: 'x', conversation_id: 7 } }, 400, { error: 'conversation_id must be a string', code: 'invalid_field', field: 'conversation_id' }],
+    [{ body: { prompt: 'x', language: 7 } }, 400, { error: 'language must be a string', code: 'invalid_field', field: 'language' }],
+    [{ body: { prompt: 'x', surface: 'screen' } }, 400, { error: 'surface must be "voice" or "text"', code: 'invalid_field', field: 'surface' }],
+    [{ body: { prompt: 'x', edit_automation: [] } }, 400, { error: 'edit_automation must be a JSON object', code: 'invalid_field', field: 'edit_automation' }],
+    [{ body: { prompt: 'x', stream: 'yes' } }, 400, { error: 'stream must be a boolean', code: 'invalid_field', field: 'stream' }],
+    [{ body: { prompt: 'x', image_entity: 'light.kitchen' } }, 400, { error: 'image_entity must be a camera.<id> entity', code: 'invalid_field', field: 'image_entity' }],
+    [{ body: { prompt: 'x', intents: INTENT } }, 400, { error: 'intents is only valid with mode "write"', code: 'mode_mismatch', field: 'intents' }],
+    [{ body: { prompt: 'x', confirmation: 'auto' } }, 400, { error: 'confirmation is only valid with mode "write"', code: 'mode_mismatch', field: 'confirmation' }],
+    [{ body: { mode: 'write', intents: INTENT, stream: true } }, 400, { error: 'stream is only valid with mode "read"', code: 'mode_mismatch', field: 'stream' }],
+    [{ body: { mode: 'write', intents: INTENT, image_entity: 'camera.door' } }, 400, { error: 'image_entity is only valid with mode "read"', code: 'mode_mismatch', field: 'image_entity' }],
+    [{ body: { mode: 'write', intents: INTENT, confirmation: 'maybe' } }, 400, { error: 'confirmation must be "auto" or "confirmed"', code: 'invalid_field', field: 'confirmation' }],
+    [{ body: { mode: 'write', intents: [] } }, 400, { error: 'intents must be an array of 1-5 entries', code: 'invalid_intents', field: 'intents' }],
   ];
-  for (const [req, status, error] of cases) {
+  for (const [req, status, expected] of cases) {
     const res = await post(req.body, { raw: req.raw });
-    assert.equal(res.status, status, error);
-    assert.equal((await res.json()).error, error);
+    assert.equal(res.status, status, expected.error);
+    assert.deepEqual(await res.json(), expected);
   }
   assert.equal(state.runs.length, 0);
+});
+
+test('every error answer goes through the one table of codes', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', '..', 'server', 'prompt', 'server.js'), 'utf8');
+  assert.deepEqual(source.match(/\.status\(\s*[45]\d\d\s*\)\s*\.json\(/g), null,
+    'an error status is sent only by sendError, so it always carries a code');
+});
+
+test('status publishes the size limits the prompt request is held to', async () => {
+  const res = await fetch(`${base}/api/status`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+  const body = await res.json();
+  assert.equal(body.prompt_max_bytes, 8 * 1024);
+  assert.equal(body.body_max_bytes, 64 * 1024);
+  const atLimit = await post({ prompt: 'x'.repeat(body.prompt_max_bytes) });
+  assert.equal(atLimit.status, 200, 'a prompt of exactly the limit is accepted');
 });
 
 test('a write whose intents are not acceptable is refused before anything runs', async () => {
@@ -145,7 +167,9 @@ test('a write whose intents are not acceptable is refused before anything runs',
   }
   const auto = await post({ mode: 'write', confirmation: 'auto', intents: [{ intent: 'HassTurnOff', targets: ['lock.front_door'] }] });
   assert.equal(auto.status, 403);
-  assert.deepEqual(await auto.json(), { error: 'sensitive action requires explicit confirmation', domains: ['lock'] });
+  assert.deepEqual(await auto.json(), {
+    error: 'sensitive action requires explicit confirmation', code: 'confirmation_required', domains: ['lock'],
+  });
   const noMcp = await post({ mode: 'write', intents: INTENT }, { url: noMcpBase });
   assert.equal(noMcp.status, 503);
   assert.equal(state.runs.length, 0);
@@ -257,7 +281,7 @@ test('a run that reports a timeout answers 504', async () => {
   state.script.push(() => okOutcome({ status: 'timeout', text: '' }));
   const res = await post({ prompt: 'slow' });
   assert.equal(res.status, 504);
-  assert.deepEqual(await res.json(), { error: 'timeout' });
+  assert.deepEqual(await res.json(), { error: 'timeout', code: 'timeout' });
   assert.equal(state.runs.length, 1);
 });
 
@@ -286,7 +310,7 @@ test('a failed write is reported as a failure and never repeated', async () => {
     state.script.push(() => errorOutcome(reason, { toolsUsed: ['ha'] }), () => okOutcome());
     const res = await post({ mode: 'write', intents: INTENT });
     assert.equal(res.status, 500, reason);
-    assert.deepEqual(await res.json(), { error: 'internal error' });
+    assert.deepEqual(await res.json(), { error: 'internal error', code: 'internal' });
     assert.equal(state.runs.length, 1, `${reason}: a write ran twice`);
     state.script.length = 0;
   }
@@ -352,7 +376,7 @@ test('at most two runs at once; a third request is refused without dispatch', as
   }
   const third = await post({ prompt: 'three' });
   assert.equal(third.status, 503);
-  assert.deepEqual(await third.json(), { error: 'busy' });
+  assert.deepEqual(await third.json(), { error: 'busy', code: 'busy' });
   assert.equal(state.runs.length, 2);
   release.forEach((fn) => fn());
   assert.equal((await first).status, 200);

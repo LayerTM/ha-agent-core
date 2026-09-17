@@ -8,6 +8,11 @@ uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Every error answer of the prompt API carries a stable `code` next to its
+  `error` message, and `field` or `limit_bytes` where they apply.
+  `GET /api/status` publishes `prompt_max_bytes` and `body_max_bytes`.
+- `tools/npm-ci-checked.sh` accepts `--omit=dev`, `--omit=optional` and
+  `--omit=peer` for its `npm ci` step, and no other argument.
 - `tools/check-install-scripts.js` and `app/install-scripts.json`: the packages
   whose install scripts npm may run, together with everything they depend on,
   are pinned by registry tarball and integrity and checked from the lockfile
@@ -20,6 +25,22 @@ uses [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Adapter API 3: the core runs prompt requests itself (`server/prompt/run.js`):
+  prompts, the answer schema, the tool plan, the child environment, time and
+  output limits, and answer validation. The adapter provides the executable,
+  the command line (`runner.launch`), the output decoder
+  (`runner.createDecoder`) and the naming of Home Assistant tools
+  (`runner.toolName`, `runner.toolBasename`). `runner.run`, `runner.shutdown`,
+  `runner.safeLangTag` and `runner.TIMEOUT_MS` are no longer adapter members.
+- Every property of the read answer schema is required, and the optional ones
+  are nullable; a `null` for an optional property is the same as leaving it out.
+- Account limits come from `prompt.limitsSource`, which replaces
+  `prompt.limitsCredential`, `prompt.fetchLimits` and `prompt.limitEntry`; the
+  core validates every entry. The redactor applies every credential format it
+  knows for every engine, now including OpenAI keys; the optional
+  `prompt.secretPatterns` adds more. With the optional `descriptor.reportsCost` unset, no budget is
+  published or enforced, audit lines say `cost=unknown`, and a non-zero daily
+  USD budget keeps the prompt API from starting.
 - `app/package.json` allows `node-pty`'s install scripts by name, which npm 12
   needs to build the terminal's native module. node-gyp takes the local Node.js
   headers through its own `npm_package_config_node_gyp_*` settings.

@@ -29,7 +29,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const { checkDir } = require('./check-install-scripts.js');
+const { checkDir, omittedByInstall } = require('./check-install-scripts.js');
 
 const SYSTEM_PATH = ['/usr/local/bin', '/usr/bin', '/bin'];
 
@@ -54,10 +54,21 @@ function main() {
     for (const problem of problems) process.stderr.write(`install scripts: ${problem}\n`);
     if (process.env.INSTALL_SCRIPTS_UNREVIEWED !== 'build') return 1;
   }
-  const names = Object.keys(closures);
+  // An allowed package the install left out on purpose (INSTALL_OMIT, from
+  // npm ci --omit) has nothing to build; one that should be there and is not
+  // is an install that went wrong.
+  const lock = JSON.parse(fs.readFileSync(path.join(dir, 'package-lock.json'), 'utf8'));
+  const names = [];
+  for (const name of Object.keys(closures)) {
+    if (omittedByInstall(lock, `node_modules/${name}`, process.env.INSTALL_OMIT)) continue;
+    if (!fs.existsSync(path.join(dir, 'node_modules', name, 'package.json'))) {
+      process.stderr.write(`build-allowed-packages: ${name} should be installed and is not\n`);
+      return 1;
+    }
+    names.push(name);
+  }
   if (names.length === 0) return 0;
 
-  const lock = JSON.parse(fs.readFileSync(path.join(dir, 'package-lock.json'), 'utf8'));
   const stage = fs.mkdtempSync(path.join(os.tmpdir(), 'allowed-build-'));
   try {
     // npm also searches every parent of the stage for node_modules/.bin, so no

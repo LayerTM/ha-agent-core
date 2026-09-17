@@ -1,6 +1,6 @@
 'use strict';
 
-// One request has one wall-clock budget (the adapter's TIMEOUT_MS) across all its
+// One request has one wall-clock budget (the core's TIMEOUT_MS) across all its
 // attempts. Under a controlled clock: a retry gets exactly what is left after
 // the first attempt AND the backoff, and no retry starts once too little is left.
 
@@ -12,8 +12,9 @@ const path = require('node:path');
 
 const BACKOFF_MS = 250;
 const MIN_RETRY_BUDGET_MS = 1000;
-const TIMEOUT_MS = 5000;
+const TIMEOUT_MS = 10000;
 // Read by the server at load time.
+process.env.CLAUDE_PROMPT_TIMEOUT_MS = String(TIMEOUT_MS);
 process.env.CLAUDE_PROMPT_RATE_BURST = '500';
 process.env.CLAUDE_PROMPT_RETRY_BACKOFF_MS = String(BACKOFF_MS);
 process.env.CLAUDE_PROMPT_MIN_RETRY_BUDGET_MS = String(MIN_RETRY_BUDGET_MS);
@@ -22,7 +23,7 @@ process.env.CLAUDE_PROMPT_MAX_ATTEMPTS = '3';
 const { useAdapter } = require('../../server/adapter-contract');
 const { createNeutralAdapter, okOutcome, errorOutcome } = require('../fixtures/neutral-adapter');
 
-const { adapter, state } = createNeutralAdapter({ timeoutMs: TIMEOUT_MS });
+const { adapter, state, run } = createNeutralAdapter();
 useAdapter(adapter);
 
 const { createPromptApp } = require('../../server/prompt/server');
@@ -45,6 +46,7 @@ before(async () => {
     addonVersion: 'deadline',
     redact: (text) => text,
     audit: () => {},
+    runAgent: run,
   });
   server = await new Promise((resolve) => {
     const s = app.listen(0, '127.0.0.1', () => resolve(s));

@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { test } = require('node:test');
 
-const { check, checkDir, write, RECORD } = require('../tools/check-install-scripts.js');
+const { check, checkDir, write, omittedByInstall, RECORD } = require('../tools/check-install-scripts.js');
 const { tempDir } = require('./helpers.js');
 
 const CHECKER = path.join(__dirname, '..', 'tools', 'check-install-scripts.js');
@@ -210,4 +210,21 @@ test('the core records the closures its own install scripts run', () => {
   const record = JSON.parse(fs.readFileSync(path.join(root, 'app', RECORD), 'utf8')).packages;
   assert.deepEqual(Object.keys(record), ['node-pty']);
   assert.ok('node_modules/node-addon-api' in record['node-pty']);
+});
+
+test('what an install with --omit leaves out follows the lockfile flags', () => {
+  const lock = { packages: {
+    'node_modules/d': { dev: true }, 'node_modules/o': { optional: true }, 'node_modules/p': { peer: true },
+    'node_modules/do': { devOptional: true }, 'node_modules/prod': {},
+  } };
+  const out = (key, omit) => omittedByInstall(lock, key, omit);
+  assert.equal(out('node_modules/d', 'dev'), true);
+  assert.equal(out('node_modules/d', 'optional,peer'), false);
+  assert.equal(out('node_modules/o', 'optional'), true);
+  assert.equal(out('node_modules/p', 'peer'), true);
+  assert.equal(out('node_modules/do', 'dev'), false);
+  assert.equal(out('node_modules/do', 'dev,optional'), true);
+  assert.equal(out('node_modules/prod', 'dev,optional,peer'), false);
+  assert.equal(out('node_modules/missing', 'dev'), false);
+  assert.equal(out('node_modules/d', undefined), false);
 });

@@ -32,7 +32,7 @@ test('a module that is not an object, or has another apiVersion, is refused', ()
   for (const mod of [null, undefined, 'adapter', () => adapter]) {
     assert.throws(() => contract.validateAdapter(mod), /does not export an object/);
   }
-  for (const apiVersion of [undefined, 0, 1, 3, '2']) {
+  for (const apiVersion of [undefined, 0, 1, 2, 4, '3']) {
     assert.throws(() => contract.validateAdapter({ ...adapter, apiVersion }), /apiVersion/);
   }
 });
@@ -92,8 +92,9 @@ test('the version alias may be absent, but only a separate *_version key when pr
 
 test('a required member of the wrong type, or an empty string, is refused', () => {
   const { adapter } = createNeutralAdapter();
-  assert.throws(() => contract.validateAdapter({ ...adapter, runner: { ...adapter.runner, run: 'run' } }), /runner\.run must be a function/);
-  assert.throws(() => contract.validateAdapter({ ...adapter, runner: { ...adapter.runner, TIMEOUT_MS: '5000' } }), /TIMEOUT_MS must be a number/);
+  assert.throws(() => contract.validateAdapter({ ...adapter, runner: { ...adapter.runner, createDecoder: 'decode' } }), /runner\.createDecoder must be a function/);
+  assert.throws(() => contract.validateAdapter({ ...adapter, runner: { ...adapter.runner, launch: {} } }), /runner\.launch must be a function/);
+  assert.throws(() => contract.validateAdapter({ ...adapter, runner: { ...adapter.runner, bin: '' } }), /runner\.bin must be a non-empty string/);
   assert.throws(() => contract.validateAdapter({ ...adapter, console: { ...adapter.console, launcher: '' } }), /console\.launcher must be a non-empty string/);
   assert.throws(() => contract.validateAdapter({ ...adapter, prompt: null }), /prompt\./);
 });
@@ -111,7 +112,7 @@ test('the optional remote window may be absent, but not malformed', () => {
 
 test('an adapter can be installed once, before first use, and only a valid one', () => {
   const { adapter } = createNeutralAdapter();
-  assert.throws(() => contract.useAdapter({ ...adapter, apiVersion: 1 }), /apiVersion/);
+  assert.throws(() => contract.useAdapter({ ...adapter, apiVersion: 2 }), /apiVersion/);
   assert.equal(contract.useAdapter(adapter), adapter);
   assert.equal(contract.adapter(), adapter);
   assert.throws(() => contract.useAdapter(adapter), /already loaded/);
