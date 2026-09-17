@@ -72,6 +72,9 @@ function createNeutralAdapter() {
     tapes: [], // queued tapes for the agent process; empty → okTape()
     mcpConfigs: [],
     removedSessions: [],
+    limits: null,
+    limitsAsked: [],
+    limitsRead: [],
   };
   async function run(opts) {
     state.runs.push(opts);
@@ -120,9 +123,24 @@ function createNeutralAdapter() {
       },
     },
     prompt: {
-      limitsCredential() { return ''; },
-      async fetchLimits() { throw new Error('neutral adapter has no account limits'); },
-      limitEntry(item) { return item; },
+      // Whatever a test puts in state.limits: null (no credential), or
+      // { mode, key, entries } where `entries` may be a function of the fetch.
+      limitsSource(credentials) {
+        state.limitsAsked.push(credentials);
+        const cfg = state.limits;
+        if (!cfg) return null;
+        if (cfg.throws) throw new Error('neutral limits source failed');
+        if (!('entries' in cfg)) return { mode: cfg.mode, key: cfg.key };
+        return {
+          mode: cfg.mode,
+          key: cfg.key,
+          async read(fetch) {
+            state.limitsRead.push(fetch);
+            return typeof cfg.entries === 'function' ? cfg.entries(fetch) : cfg.entries;
+          },
+        };
+      },
+      secretPatterns: [/\bneutral-key-[A-Za-z0-9]{8,}/g],
       authConfigured() { return true; },
       async writeMcpConfig({ dir, url, bearer }) {
         state.mcpConfigs.push({ dir, url, bearer });

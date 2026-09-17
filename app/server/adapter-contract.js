@@ -23,9 +23,7 @@ const REQUIRED = {
   'runner.createDecoder': 'function',
   'runner.toolName': 'function',
   'runner.toolBasename': 'function',
-  'prompt.limitsCredential': 'function',
-  'prompt.fetchLimits': 'function',
-  'prompt.limitEntry': 'function',
+  'prompt.limitsSource': 'function',
   'prompt.authConfigured': 'function',
   'prompt.writeMcpConfig': 'function',
   'prompt.hasAuditHook': 'function',
@@ -42,6 +40,8 @@ const REQUIRED = {
 const OPTIONAL = {
   'console.remoteWindow': 'function',
   'descriptor.versionAlias': 'string',
+  'descriptor.reportsCost': 'boolean',
+  'prompt.secretPatterns': 'object',
 };
 
 // The engine name is published on /api/status and stored by clients, so it is a
@@ -83,6 +83,11 @@ function validateAdapter(mod) {
   const alias = member(mod, 'descriptor.versionAlias');
   if (typeof alias === 'string' && (!VERSION_ALIAS_RE.test(alias) || CORE_VERSION_KEYS.has(alias))) {
     problems.push('descriptor.versionAlias must be a lower-case <name>_version key other than engine_version');
+  }
+  const patterns = member(mod, 'prompt.secretPatterns');
+  if (patterns !== undefined
+      && !(Array.isArray(patterns) && patterns.every((re) => re instanceof RegExp && re.global))) {
+    problems.push('prompt.secretPatterns must be a list of global regular expressions');
   }
   if (problems.length) throw new Error(`engine adapter: ${problems.join('; ')}`);
   return mod;
