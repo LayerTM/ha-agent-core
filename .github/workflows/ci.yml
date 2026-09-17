@@ -12,6 +12,12 @@ on:
 permissions:
   contents: read
 
+# A Dependabot update whose install code is not the reviewed one is still built
+# and tested here, as an untrusted test; the auto-merge workflow keeps it from
+# merging. Everything else must match the record (tools/npm-ci-checked.sh).
+env:
+  INSTALL_SCRIPTS_UNREVIEWED: ${{ github.event.pull_request.user.login == 'dependabot[bot]' && 'build' || '' }}
+
 jobs:
   test:
     name: Tests
@@ -22,7 +28,7 @@ jobs:
         with:
           node-version: "26"
       - name: Install dependencies
-        run: npm ci
+        run: tools/npm-ci-checked.sh
       - name: Run tests
         run: npm test
 
@@ -35,7 +41,7 @@ jobs:
         with:
           node-version: "26"
       - name: Install dependencies
-        run: npm ci
+        run: tools/npm-ci-checked.sh
       - name: Lint (eslint)
         run: npm run lint
       - name: Type-check (tsc --checkJs)
@@ -55,7 +61,7 @@ jobs:
         with:
           node-version: "26"
       - name: Install dependencies
-        run: ../.github/scripts/npm-ci-local-headers.sh
+        run: ../tools/npm-ci-checked.sh
       - name: Run tests
         run: npm test
       - name: Run alerts loop tests (bash + jq)
@@ -75,7 +81,7 @@ jobs:
         with:
           node-version: "26"
       - name: Install dependencies
-        run: ../.github/scripts/npm-ci-local-headers.sh
+        run: ../tools/npm-ci-checked.sh
       - name: Lint (eslint)
         run: npm run lint
       - name: Type-check (tsc --checkJs)
@@ -118,7 +124,9 @@ jobs:
           i="$RUNNER_TEMP/installed"
           for f in app/server/adapter-contract.js app/server/prompt/server.js app/package-lock.json \
                    ha-tools/package-lock.json rootfs/usr/local/bin/cc-alerts \
-                   tools/verify-core.js tools/check-adapter-graph.js; do
+                   app/install-scripts.json tools/verify-core.js tools/check-adapter-graph.js \
+                   tools/build-allowed-packages.js tools/check-install-scripts.js tools/npm-ci-checked.sh \
+                   tools/smoke-allowed-packages.js; do
             test -f "$i/$f" || { echo "::error::missing $f"; exit 1; }
           done
           if [ -e "$i/app/test" ] || [ -e "$i/test" ] || [ -e "$i/app/adapter" ]; then
