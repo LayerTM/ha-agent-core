@@ -55,11 +55,20 @@ function createAuditSink(file, { now = () => new Date(), appendFile = fs.appendF
   };
 
   return {
-    // One line, timestamped as the audit hook timestamps its own. Never awaited,
-    // never throws: a caller narrating a request cannot be made to handle a disk.
+    // One line, timestamped as the audit hook timestamps its own. Never throws:
+    // a caller narrating a request cannot be made to handle a disk, and none of
+    // them awaits this. The returned promise settles when the WRITE did, and
+    // never rejects — it exists so a test can read the state after the write
+    // rather than after a sleep, which is a race the runner wins sometimes.
     append(line) {
       const ts = now().toISOString().replace('T', ' ').slice(0, 19);
-      appendFile(file, `${ts}  ${line}\n`, (err) => (err ? failed(err) : wrote()));
+      return new Promise((resolve) => {
+        appendFile(file, `${ts}  ${line}\n`, (err) => {
+          if (err) failed(err);
+          else wrote();
+          resolve(code === null);
+        });
+      });
     },
 
     // Is the record being kept? Asked at the moment an action is about to be

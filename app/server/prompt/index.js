@@ -192,7 +192,10 @@ async function start() {
   // read-only or unwritable /data is a boot fact and a chat request is the wrong
   // way for a user to discover one. The probe writes no byte into the log.
   const auditSink = createAuditSink(auditFile);
-  const audit = (line) => auditSink.append(line);
+  // The line is fire-and-forget for every caller: `append` never rejects, and
+  // nothing here awaits the disk. Whether the record is still being kept is read
+  // separately, by whoever is about to act.
+  const audit = (line) => { auditSink.append(line); };
   if (await auditSink.probe()) log(`audit log ${auditFile} is writable`);
   else log(`audit log ${auditFile} cannot be written (${auditSink.state().code}) — Home Assistant actions are not being recorded, so acting is refused until a write succeeds`);
 

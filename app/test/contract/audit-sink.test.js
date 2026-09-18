@@ -14,13 +14,13 @@ const path = require('node:path');
 const { createAuditSink } = require('../../server/prompt/audit');
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'core-audit-'));
-const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
 
 test('a line that is written leaves the record kept, and the hook shape intact', async () => {
   const file = path.join(tmp(), 'claude-audit.log');
   const sink = createAuditSink(file, { announce: () => {} });
-  sink.append('HassTurnOn run=9f2c1a04b7e2: {"name":"desk lamp"}');
-  await settle();
+  // Awaited on the sink's own promise rather than after a sleep: a sleep long
+  // enough on this machine is a race a slower runner wins.
+  await sink.append('HassTurnOn run=9f2c1a04b7e2: {"name":"desk lamp"}');
   assert.deepEqual(sink.state(), { recording: true, code: null, failures: 0, writes: 1 });
   assert.match(
     fs.readFileSync(file, 'utf8'),
@@ -36,8 +36,7 @@ test('a write that fails is announced with its errno, once, and stops the record
   const announced = [];
   const sink = createAuditSink(file, { announce: (line) => announced.push(line) });
 
-  sink.append('HassTurnOn run=1: {}');
-  await settle();
+  await sink.append('HassTurnOn run=1: {}');
   // The oracle: the reading is taken where the next action is decided, not from
   // the log. Reading the log cannot tell a swallowed failure from a line that was
   // never generated — both give an absent line — so the errno must be here.
@@ -49,9 +48,8 @@ test('a write that fails is announced with its errno, once, and stops the record
   assert.match(announced[0], /NOT being recorded/);
 
   // A full disk must not turn one outage into one stderr line per call.
-  sink.append('HassTurnOff run=2: {}');
-  sink.append('HassTurnOff run=3: {}');
-  await settle();
+  await sink.append('HassTurnOff run=2: {}');
+  await sink.append('HassTurnOff run=3: {}');
   assert.equal(sink.state().failures, 3);
   assert.equal(announced.length, 1, 'the announcement became the flood it reports');
 });
@@ -62,13 +60,11 @@ test('a write that succeeds again ends the outage, and says so', async () => {
   fs.mkdirSync(file);
   const announced = [];
   const sink = createAuditSink(file, { announce: (line) => announced.push(line) });
-  sink.append('HassTurnOn run=1: {}');
-  await settle();
+  await sink.append('HassTurnOn run=1: {}');
   assert.equal(sink.state().recording, false);
 
   fs.rmdirSync(file);
-  sink.append('HassTurnOn run=2: {}');
-  await settle();
+  await sink.append('HassTurnOn run=2: {}');
   assert.deepEqual(sink.state(), { recording: true, code: null, failures: 1, writes: 1 });
   assert.equal(announced.length, 2);
   assert.match(announced[1], /writable again \(was EISDIR\)/);
@@ -85,8 +81,7 @@ test('the boot probe reads the real open mode and writes no byte into the log', 
 
   // A log with history: byte-identical across a successful probe, so a boot fact
   // never becomes a line in the one file a user reads.
-  fresh.append('HassTurnOn run=1: {}');
-  await settle();
+  await fresh.append('HassTurnOn run=1: {}');
   const before = fs.readFileSync(file);
   assert.equal(await fresh.probe(), true);
   assert.deepEqual(fs.readFileSync(file), before);
