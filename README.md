@@ -470,8 +470,8 @@ and then once a day:
    that took a listed path since — and nothing at all if any file, or the audit
    log, could not be read.
 
-Their usage stays counted either way. Its output goes to
-`/data/usage-upkeep.log`.
+Their usage stays counted either way. Its output goes to the add-on's own log,
+tagged `[usage-upkeep]`, like every background loop's.
 
 | store | bound |
 |---|---|
