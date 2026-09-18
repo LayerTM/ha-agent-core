@@ -33,6 +33,7 @@
 // exact allowlist of the two paths the add-on actually uses. On the MCP path it
 // also decides which JSON-RPC methods pass, in both directions (mcp-filter.js).
 
+const crypto = require('node:crypto');
 const http = require('node:http');
 const https = require('node:https');
 const { MAX_BODY_BYTES, judgeClientBody, filterServerJson, createSseFilter } = require('./mcp-filter');
@@ -106,11 +107,21 @@ function deny(res, status, message) {
  * @param {object} opts
  * @param {string} opts.coreOrigin  Origin derived from the Supervisor (never user input).
  * @param {string} opts.haToken     The Home Assistant LLAT. Stays in this process.
- * @param {string} opts.relayToken  Per-boot bearer the local client must present.
  * @param {(msg: string) => void} [opts.log]
- * @returns {Promise<{url: string, port: number, close: () => void}>}
+ * @returns {Promise<{
+ *   url: string, port: number, issue: (runId: string) => string,
+ *   revoke: (token: string) => void, close: () => void,
+ * }>}
+ *
+ * The bearer is per RUN, not per boot: `issue(runId)` mints one and `revoke`
+ * takes it back, so every request the relay serves names the run that made it.
+ * One relay serves them all, and the core permits two runs at once, so a bearer
+ * is the only thing that can tell them apart without asking Home Assistant for
+ * something Home Assistant never promised.
  */
-async function startCoreRelay({ coreOrigin, haToken, relayToken, log = () => {} }) {
+async function startCoreRelay({ coreOrigin, haToken, log = () => {} }) {
+  /** @type {Map<string, string>} bearer -> run id */
+  const runs = new Map();
   const target = new URL(coreOrigin);
   const secure = target.protocol === 'https:';
   const transport = secure ? https : http;
@@ -127,7 +138,10 @@ async function startCoreRelay({ coreOrigin, haToken, relayToken, log = () => {} 
     const auth = req.headers.authorization || '';
     // Constant-time comparison is not warranted here: the token never leaves
     // loopback, and an attacker able to time it is already inside the container.
-    if (auth !== `Bearer ${relayToken}`) {
+    // A lookup rather than a comparison, because the answer is WHICH run this is,
+    // not merely whether it may pass; an unknown bearer is refused as before.
+    const runId = auth.startsWith('Bearer ') ? runs.get(auth.slice(7)) : undefined;
+    if (runId === undefined) {
       deny(res, 401, 'unauthorized');
       req.resume();
       return;
@@ -261,7 +275,16 @@ async function startCoreRelay({ coreOrigin, haToken, relayToken, log = () => {} 
   return {
     url: `http://127.0.0.1:${port}`,
     port,
+    issue(runId) {
+      const token = crypto.randomBytes(32).toString('base64url');
+      runs.set(token, runId);
+      return token;
+    },
+    revoke(token) {
+      runs.delete(token);
+    },
     close() {
+      runs.clear();
       server.close();
       server.closeAllConnections();
     },

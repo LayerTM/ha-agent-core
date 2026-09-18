@@ -33,7 +33,11 @@ const HA_MCP_URL_OVERRIDE = process.env.CLAUDE_PROMPT_HA_MCP_URL || '';
 const DISCOVERY_SERVICE = 'claude_ha';
 // Where chat runs work. Stated once: the removal of the sessions earlier
 // versions saved derives Claude's transcript folder from it.
-const WORK_DIR = path.join(DATA_DIR, 'claude-prompt', 'work');
+const PROMPT_DIR = path.join(DATA_DIR, 'claude-prompt');
+const WORK_DIR = path.join(PROMPT_DIR, 'work');
+// One directory per run in flight, removed with the run. Never inherited: a
+// restart wipes the lot, because a bearer from before it is already revoked.
+const RUNS_DIR = path.join(PROMPT_DIR, 'runs');
 
 function log(msg) {
   console.log(`[prompt] ${msg}`);
@@ -74,8 +78,8 @@ async function loadToken(options) {
 // and carries the per-boot RELAY token — not the Home Assistant one, which stays
 // in this process (see core-relay.js). Never the Supervisor token. Resolves to
 // the file path, or null (file removed) when there is no relay.
-function writeMcpConfig(url, bearer) {
-  return adapter().prompt.writeMcpConfig({ dir: path.join(DATA_DIR, 'claude-prompt'), url, bearer });
+function writeMcpConfig(dir, url, bearer) {
+  return adapter().prompt.writeMcpConfig({ dir, url, bearer });
 }
 
 // The settings a chat run gets instead of the console's settings files carry
@@ -192,23 +196,41 @@ async function start() {
   log(`core at ${coreTarget.origin} (${coreTarget.source})`);
   let relay = null;
   if (haToken) {
-    const relayToken = crypto.randomBytes(32).toString('base64url');
-    relay = await startCoreRelay({
-      coreOrigin: coreTarget.origin, haToken, relayToken, log,
-    });
-    relay.token = relayToken;
+    relay = await startCoreRelay({ coreOrigin: coreTarget.origin, haToken, log });
     log(`core relay on 127.0.0.1:${relay.port}`);
   }
 
-  // Two facts, deliberately two names. `haConfigured` is a boot fact: is there a
-  // way to Home Assistant at all (a relay, hence an MCP server to point at)?
-  // `mcpConfigPath` is the file one run reads. They coincide today, because the
-  // config is written once at the start, and they will not once it is written
-  // per run — so nothing may read the path to learn whether HA is configured.
+  // Whether Home Assistant is configured is a boot fact: is there a relay, hence
+  // an MCP server to point a run at? The configuration FILE is not a boot fact —
+  // it belongs to one run and does not outlive it (see beginRun below).
   const haConfigured = Boolean(relay);
-  const mcpConfigPath = haConfigured
-    ? await writeMcpConfig(HA_MCP_URL_OVERRIDE || `${relay.url}/api/mcp`, relay.token)
-    : await writeMcpConfig('', '');
+  // Remove the one an older version wrote into the shared directory, and any run
+  // directory a crash left behind: a restart inherits no bearer and no file.
+  await writeMcpConfig(PROMPT_DIR, '', '');
+  await fsp.rm(RUNS_DIR, { recursive: true, force: true });
+
+  // One run's identity and the two things that carry it: the bearer the relay
+  // knows it by, and the MCP configuration its agent reads. Both are made here
+  // and destroyed by endRun, whatever ends the run.
+  const beginRun = async (runId) => {
+    if (!relay) return { token: '', mcpConfigPath: null, dir: null };
+    const bearer = relay.issue(runId);
+    const dir = path.join(RUNS_DIR, runId);
+    try {
+      await fsp.mkdir(dir, { recursive: true, mode: 0o700 });
+      const configPath = await writeMcpConfig(dir, HA_MCP_URL_OVERRIDE || `${relay.url}/api/mcp`, bearer);
+      return { token: bearer, mcpConfigPath: configPath, dir };
+    } catch (err) {
+      relay.revoke(bearer);
+      await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
+      throw err;
+    }
+  };
+  const endRun = async (run) => {
+    if (!run) return;
+    if (relay && run.token) relay.revoke(run.token);
+    if (run.dir) await fsp.rm(run.dir, { recursive: true, force: true }).catch(() => {});
+  };
   const workDir = await ensureWorkDir();
 
   // The engine's credentials, in the order the redactor has always received them:
@@ -236,7 +258,8 @@ async function start() {
     claudeSettings,
     usageBin: USAGE_BIN,
     haConfigured,
-    mcpConfigPath,
+    beginRun,
+    endRun,
     // A dedicated chat model (e.g. a faster/cheaper one) is preferred; fall back
     // to the console's model override, then the Claude default.
     model: optionString(options, 'chat_model') || optionString(options, 'model'),
@@ -251,7 +274,6 @@ async function start() {
     // Camera snapshots (vision) go through the same relay, so the HA token and
     // the Core TLS decision live in exactly one place.
     coreRelayUrl: relay ? relay.url : '',
-    coreRelayToken: relay ? relay.token : '',
     // For /api/account_limits: which credential the account has, in the same
     // order everything else here uses (option first, then environment). The
     // interactive-login case has neither and is read from HOME at call time.
@@ -263,7 +285,7 @@ async function start() {
     audit,
     // Durable state (budget spend + chat-health window) lives alongside the MCP
     // config in the existing 0700 claude-prompt dir, so it survives restarts.
-    stateDir: path.join(DATA_DIR, 'claude-prompt'),
+    stateDir: PROMPT_DIR,
     // The /data root, where the separate cc-alerts service writes alerts-state.json.
     // The server reads that file to publish the active-alerts set on /api/status.
     dataDir: DATA_DIR,

@@ -50,7 +50,7 @@ function home(files) {
 
 async function getUsage() {
   const app = createPromptApp({
-    token: TOKEN, claudeBin: path.join(TMP, 'no-agent'), usageBin: USAGE_BIN, haConfigured: false, mcpConfigPath: null,
+    token: TOKEN, claudeBin: path.join(TMP, 'no-agent'), usageBin: USAGE_BIN, haConfigured: false,
     model: '', workDir: TMP, addonVersion: 'usage', redact: (s) => s, audit: () => {},
   });
   const server = await new Promise((resolve) => { const s = app.listen(0, '127.0.0.1', () => resolve(s)); });

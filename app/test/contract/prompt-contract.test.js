@@ -39,7 +39,6 @@ function makeApp(overrides = {}) {
     claudeSettings: 'neutral-settings',
     usageBin: path.join(TMP, 'no-such-usage'),
     haConfigured: true,
-    mcpConfigPath: path.join(TMP, 'mcp.json'),
     model: 'neutral-model',
     workDir: TMP,
     addonVersion: 'contract',
@@ -64,7 +63,7 @@ let noMcpBase;
 before(async () => {
   server = await listen(makeApp());
   base = `http://127.0.0.1:${server.address().port}`;
-  noMcpServer = await listen(makeApp({ haConfigured: false, mcpConfigPath: null }));
+  noMcpServer = await listen(makeApp({ haConfigured: false }));
   noMcpBase = `http://127.0.0.1:${noMcpServer.address().port}`;
 });
 
@@ -187,7 +186,7 @@ test('a server built without saying whether Home Assistant is configured refuses
 test('whether Home Assistant is configured is a fact of its own, not the presence of a config file', async () => {
   // The config file is written per run, so between runs there is none while Home
   // Assistant is configured all the same. Nothing may read the path to answer this.
-  const server_ = await listen(makeApp({ haConfigured: true, mcpConfigPath: null }));
+  const server_ = await listen(makeApp({ haConfigured: true }));
   const url = `http://127.0.0.1:${server_.address().port}`;
   try {
     const status = await (await fetch(`${url}/api/status`, { headers: { authorization: `Bearer ${TOKEN}` } })).json();
@@ -199,6 +198,38 @@ test('whether Home Assistant is configured is a fact of its own, not the presenc
   } finally {
     server_.close();
   }
+});
+
+test('a run gets its own bearer and configuration, and gives both back however it ends', async () => {
+  const began = [];
+  const ended = [];
+  const seenPaths = [];
+  const app = makeApp({
+    haConfigured: true,
+    beginRun: async (runId) => {
+      const handle = { token: `bearer-${runId}`, mcpConfigPath: `/run/${runId}/mcp.json`, dir: `/run/${runId}` };
+      began.push(handle);
+      return handle;
+    },
+    endRun: async (handle) => { ended.push(handle); },
+    runAgent: async (opts) => {
+      seenPaths.push(opts.mcpConfigPath);
+      if (opts.prompt === 'break') throw new Error('the run died');
+      return { status: 'ok', text: 'fine', proposal: null, toolsUsed: [], numTurns: 1 };
+    },
+  });
+  const server_ = await listen(app);
+  const url = `http://127.0.0.1:${server_.address().port}`;
+  try {
+    await post({ mode: 'read', prompt: 'hello' }, { url });
+    await post({ mode: 'read', prompt: 'break' }, { url });
+  } finally {
+    server_.close();
+  }
+  assert.equal(began.length, 2);
+  assert.notEqual(began[0].token, began[1].token, 'a bearer belongs to one run');
+  assert.deepEqual(seenPaths, began.map((h) => h.mcpConfigPath), 'a run reads its own configuration');
+  assert.deepEqual(ended, began, 'both were given back — the answered run and the one that died');
 });
 
 test('a caller over its rate limit is refused before anything runs', async () => {

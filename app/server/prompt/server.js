@@ -527,10 +527,13 @@ function reportsCost() {
 }
 
 function createPromptApp({
-  token, claudeBin, claudeSettings = '', usageBin, haConfigured, mcpConfigPath,
+  token, claudeBin, claudeSettings = '', usageBin, haConfigured,
+  // One run's bearer and MCP configuration: made when the run takes its slot,
+  // destroyed when it gives it back. Neither outlives the run that owns it.
+  beginRun = async (_runId) => ({ token: '', mcpConfigPath: null, dir: null }), endRun = async (_run) => {},
   model, voiceModel = '', writeModel = '', cameraModel = '',
   dailyBudgetUsd = 0,
-  coreRelayUrl = '', coreRelayToken = '',
+  coreRelayUrl = '',
   // Credentials as the add-on already holds them, for /api/account_limits only:
   // they decide WHICH auth mode the account is in, and the OAuth one is the only
   // token the account-limits endpoint upstream accepts. Injected rather than read
@@ -982,11 +985,28 @@ function createPromptApp({
         if (!res.writableEnded) abort.abort();
       });
 
-      // Fetch the requested camera snapshot (if any) before running Claude; a
-      // failed fetch simply yields no image and the model answers without vision.
-      const imagePath = imageEntity
-        ? await fetchSnapshot(imageEntity, { url: coreRelayUrl, token: coreRelayToken }, workDir)
-        : null;
+      // The run's own name, and the bearer the relay will know it by. Everything
+      // this request sends to Home Assistant — the agent's tool calls and the
+      // camera read below — carries it, so a record of either names its run even
+      // while another run is in flight.
+      const runId = crypto.randomBytes(6).toString('hex');
+      let runHandle = null;
+      let imagePath = null;
+      try {
+        runHandle = await beginRun(runId);
+        // Fetch the requested camera snapshot (if any) before running Claude; a
+        // failed fetch simply yields no image and the model answers without vision.
+        imagePath = imageEntity
+          ? await fetchSnapshot(imageEntity, { url: coreRelayUrl, token: runHandle.token }, workDir)
+          : null;
+      } catch (err) {
+        activeRuns -= 1;
+        await endRun(runHandle);
+        if (imagePath) fsp.rm(imagePath, { force: true }).catch(() => {});
+        audit(`prompt[deny] reason=503-no-run caller=${caller}`);
+        console.error(`[prompt] run ${runId} could not be prepared: ${redact(err.message || String(err))}`);
+        return sendError(res, 'busy');
+      }
 
       // For streaming, open an NDJSON response now and emit REDACTED text deltas
       // as the answer generates — one JSON object per line, which the companion
@@ -1043,7 +1063,7 @@ function createPromptApp({
             prompt,
             mode,
             intents: intents || [],
-            mcpConfigPath,
+            mcpConfigPath: runHandle.mcpConfigPath,
             // A voice turn uses the (optional) faster voice model — spoken replies
             // are short, so lower latency beats raw capability. Falls back to the
             // normal model when unset. Applies to voice writes too (snappy confirms).
@@ -1099,6 +1119,9 @@ function createPromptApp({
         }
       } finally {
         activeRuns -= 1;
+        // The bearer and the configuration file die with the run, whatever ended
+        // it — an answer, a timeout, an abort or a kill.
+        await endRun(runHandle);
         // Always delete the snapshot — it lived only for this one call.
         if (imagePath) fsp.rm(imagePath, { force: true }).catch(() => {});
       }

@@ -31,7 +31,7 @@ const app = createPromptApp({
   claudeBin: bin,
   claudeSettings: 'neutral-settings',
   usageBin: path.join(tmp, 'no-usage'),
-  haConfigured: false, mcpConfigPath: null,
+  haConfigured: false,
   model: 'neutral-model',
   workDir: tmp,
   addonVersion: 'parse',

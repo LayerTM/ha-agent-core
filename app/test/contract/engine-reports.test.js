@@ -31,7 +31,7 @@ function makeApp(overrides = {}) {
     token: TOKEN,
     claudeBin: path.join(TMP, 'no-agent'),
     usageBin: path.join(TMP, 'no-usage'),
-    haConfigured: false, mcpConfigPath: null,
+    haConfigured: false,
     model: '',
     workDir: TMP,
     addonVersion: 'reports',
@@ -166,7 +166,7 @@ test('an engine that does not report cost publishes no budget and audits the cos
 test('an engine that reports cost publishes the budget and bills every run', async () => {
   adapter.descriptor.reportsCost = true;
   const app = createPromptApp({
-    token: TOKEN, claudeBin: path.join(TMP, 'no-agent'), usageBin: path.join(TMP, 'no-usage'), haConfigured: false, mcpConfigPath: null,
+    token: TOKEN, claudeBin: path.join(TMP, 'no-agent'), usageBin: path.join(TMP, 'no-usage'), haConfigured: false,
     model: '', workDir: TMP, addonVersion: 'reports', redact: (s) => s, audit: (l) => auditLines.push(l),
     dailyBudgetUsd: 5, runAgent: run,
   });
@@ -190,7 +190,7 @@ test('an engine that reports cost publishes the budget and bills every run', asy
 test('a spent budget answers a read with the notice that names the engine', async () => {
   adapter.descriptor.reportsCost = true;
   const app = createPromptApp({
-    token: TOKEN, claudeBin: path.join(TMP, 'no-agent'), usageBin: path.join(TMP, 'no-usage'), haConfigured: false, mcpConfigPath: null,
+    token: TOKEN, claudeBin: path.join(TMP, 'no-agent'), usageBin: path.join(TMP, 'no-usage'), haConfigured: false,
     model: '', workDir: TMP, addonVersion: 'reports', redact: (s) => s, audit: (l) => auditLines.push(l),
     dailyBudgetUsd: 0.2, runAgent: run, stateDir: path.join(TMP, 'spent-budget'),
   });

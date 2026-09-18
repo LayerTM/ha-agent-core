@@ -95,7 +95,8 @@ test('server-sent events are filtered one event at a time, however they are spli
 
 // --- through the relay -------------------------------------------------------------
 
-const TOKEN = 'relay-token-filter';
+// The relay mints the bearer per run; this test holds the one it issued.
+let TOKEN;
 let core;
 let relay;
 let seen;
@@ -112,7 +113,8 @@ before(async () => {
     });
   });
   await new Promise((r) => core.listen(0, '127.0.0.1', r));
-  relay = await startCoreRelay({ coreOrigin: `http://127.0.0.1:${core.address().port}`, haToken: 'ha', relayToken: TOKEN });
+  relay = await startCoreRelay({ coreOrigin: `http://127.0.0.1:${core.address().port}`, haToken: 'ha' });
+  TOKEN = relay.issue('run-under-test');
 });
 
 after(() => {
