@@ -368,6 +368,34 @@ test('a call Home Assistant never answers is recorded when the run ends, and an 
   }
 });
 
+test('the calls in the air when the relay shuts down are recorded, for every run still open', async () => {
+  // The same silence the `(no answer)` marker exists against, reached by the
+  // other ending: the add-on stops with calls in flight. `revoke` settled them
+  // and `close` did not, so a shutdown erased what a revoke recorded.
+  const h = await withRecording((sent) => (sent.params && sent.params.name === 'Silent' ? null : ok(sent)));
+  try {
+    const one = h.relay.issue('run-20', MAY);
+    const two = h.relay.issue('run-21', MAY);
+    await h.call(one, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'Silent', arguments: { a: 1 } } });
+    await h.call(two, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'Answered', arguments: {} } });
+    await h.call(two, { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'Silent', arguments: { b: 2 } } });
+    assert.deepEqual(h.lines, ['Answered run=run-21: {}'], 'nothing is written while the calls are still in the air');
+    h.relay.close();
+    assert.deepEqual(h.lines, [
+      'Answered run=run-21: {}',
+      'Silent run=run-20 (no answer): {"a":1}',
+      'Silent run=run-21 (no answer): {"b":2}',
+    ], 'every run still open is settled, not just the first');
+    // Settling empties what it settled, so the second close of the harness (and
+    // any revoke that follows) cannot write the same call twice.
+    h.relay.close();
+    h.relay.revoke(one);
+    assert.equal(h.lines.length, 3, 'a settled call is recorded once');
+  } finally {
+    h.done();
+  }
+});
+
 test('a camera read is recorded too, with a line of its own', async () => {
   const lines = [];
   const pics = http.createServer((req, res) => {

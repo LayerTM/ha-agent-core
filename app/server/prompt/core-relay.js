@@ -188,6 +188,24 @@ async function startCoreRelay({ coreOrigin, haToken, log = () => {}, record = ()
   /** @type {Map<string, Map<string, {id: unknown, name: string, args: unknown, runId: string}>>} */
   const awaiting = new Map();
 
+  // The end of a run's life settles the calls it never got an answer to. A call
+  // Home Assistant never answered is still something the run asked for, and
+  // silence is not a record of it — the same reason a failed call is recorded
+  // rather than dropped.
+  //
+  // It lives here, once, because it is a property of a run ENDING and not of the
+  // particular way it ended: `revoke` ends one run, `close` ends the server and
+  // with it every run still open. `close` used to clear the tokens and leave
+  // `awaiting` untouched, so a shutdown with calls in the air erased them, and
+  // the reader of the log saw silence where Home Assistant had simply not
+  // answered yet. A third ending must come through here too.
+  function settleUnanswered(runId) {
+    const pending = awaiting.get(runId);
+    awaiting.delete(runId);
+    if (!pending) return;
+    for (const call of pending.values()) record(describeCall(call, ' (no answer)'));
+  }
+
   function observerFor(runId) {
     return (message) => {
       if (!message || typeof message !== 'object' || !('id' in message) || message.id === null) return;
@@ -408,14 +426,12 @@ async function startCoreRelay({ coreOrigin, haToken, log = () => {}, record = ()
       const entry = runs.get(token);
       runs.delete(token);
       if (entry === undefined) return;
-      const { runId } = entry;
-      // The run is over. A call Home Assistant never answered is still something
-      // the run asked for, and silence is not a record of it.
-      const pending = awaiting.get(runId);
-      awaiting.delete(runId);
-      if (pending) for (const call of pending.values()) record(describeCall(call, ' (no answer)'));
+      settleUnanswered(entry.runId);
     },
     close() {
+      // Every run still open ends here, so its calls are settled before the
+      // tokens go. The keys are copied because settling deletes as it goes.
+      for (const runId of [...awaiting.keys()]) settleUnanswered(runId);
       runs.clear();
       server.close();
       server.closeAllConnections();
