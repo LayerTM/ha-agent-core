@@ -29,6 +29,8 @@ export PATH="/data/home/.local/bin:/usr/local/bin:/usr/bin:/bin:${PATH}"
 NOTIFY_CMD="${CC_ALERTS_NOTIFY_CMD:-ha-notify}"
 # shellcheck source-path=SCRIPTDIR source=../lib/addon-branding.sh
 source "${BASH_SOURCE[0]%/*}/../lib/addon-branding.sh"
+# shellcheck source-path=SCRIPTDIR source=../lib/ha-curl.sh
+source "${BASH_SOURCE[0]%/*}/../lib/ha-curl.sh"
 
 
 DATA_DIR="${CC_ALERTS_DATA_DIR:-/data}"
@@ -128,7 +130,7 @@ run_cycle() {
     if [ -n "${CC_ALERTS_STATES_FILE:-}" ]; then
         states="$(cat "${CC_ALERTS_STATES_FILE}" 2>/dev/null)"
     else
-        states="$(curl -sS -H "Authorization: Bearer ${SUPERVISOR_TOKEN}" \
+        states="$(ha_curl "${SUPERVISOR_TOKEN}" -sS \
             http://supervisor/core/api/states 2>/dev/null)"
     fi
     [ -n "${states}" ] || return 0

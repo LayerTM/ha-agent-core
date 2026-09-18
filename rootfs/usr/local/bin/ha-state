@@ -4,17 +4,18 @@
 #   ha-state <entity_id>     → full state JSON for one entity
 #   ha-state <domain.>       → all entities in a domain (e.g. ha-state light.)
 set -o pipefail
+# shellcheck source-path=SCRIPTDIR source=../lib/ha-curl.sh
+source "${BASH_SOURCE[0]%/*}/../lib/ha-curl.sh"
 API="http://supervisor/core/api"
-AUTH="Authorization: Bearer ${SUPERVISOR_TOKEN}"
 
 arg="${1:-}"
 if [ -z "${arg}" ]; then
-    curl -sS -H "${AUTH}" "${API}/states" | jq -r '.[].entity_id' | sort
+    ha_curl "${SUPERVISOR_TOKEN}" -sS "${API}/states" | jq -r '.[].entity_id' | sort
 elif [[ "${arg}" == *. ]]; then
     # domain mode: "light." → all light.* entities
     domain="${arg%.}"
-    curl -sS -H "${AUTH}" "${API}/states" \
+    ha_curl "${SUPERVISOR_TOKEN}" -sS "${API}/states" \
         | jq --arg d "${domain}" '[.[] | select(.entity_id | startswith($d + "."))]'
 else
-    curl -sS -H "${AUTH}" "${API}/states/${arg}" | jq .
+    ha_curl "${SUPERVISOR_TOKEN}" -sS "${API}/states/${arg}" | jq .
 fi

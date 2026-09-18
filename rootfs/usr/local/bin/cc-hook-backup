@@ -7,6 +7,8 @@
 set -o pipefail
 # shellcheck source-path=SCRIPTDIR source=../lib/addon-branding.sh
 source "${BASH_SOURCE[0]%/*}/../lib/addon-branding.sh"
+# shellcheck source-path=SCRIPTDIR source=../lib/ha-curl.sh
+source "${BASH_SOURCE[0]%/*}/../lib/ha-curl.sh"
 
 input="$(cat)"
 tool="$(printf '%s' "${input}" | jq -r '.tool_name // ""' 2>/dev/null)"
@@ -52,10 +54,10 @@ if out="$(timeout 150 ha-backup "${name}" 2>&1)"; then
     audit_line "backup: ${out}"
     ha-notify "Safety backup before a risky change — ${out}" "$(branding_name_or_fallback agentName) · backup" >/dev/null 2>&1 || true
     # Keep only the newest 3 auto-backups.
-    stale="$(curl -sS -H "Authorization: Bearer ${SUPERVISOR_TOKEN}" http://supervisor/backups 2>/dev/null \
+    stale="$(ha_curl "${SUPERVISOR_TOKEN}" -sS http://supervisor/backups 2>/dev/null \
         | jq -r '(.data.backups // []) | map(select(.name | startswith("claude-auto-"))) | sort_by(.date) | reverse | .[3:] | .[].slug' 2>/dev/null)"
     for s in ${stale}; do
-        curl -sS -X DELETE -H "Authorization: Bearer ${SUPERVISOR_TOKEN}" "http://supervisor/backups/${s}" >/dev/null 2>&1 || true
+        ha_curl "${SUPERVISOR_TOKEN}" -sS -X DELETE "http://supervisor/backups/${s}" >/dev/null 2>&1 || true
     done
 else
     audit_line "backup FAILED: ${out}"

@@ -32,6 +32,8 @@ export HOME=/data/home
 export PATH="/usr/local/bin:/usr/bin:/bin:${PATH}"
 # shellcheck source-path=SCRIPTDIR source=../lib/addon-branding.sh
 source "${BASH_SOURCE[0]%/*}/../lib/addon-branding.sh"
+# shellcheck source-path=SCRIPTDIR source=../lib/ha-curl.sh
+source "${BASH_SOURCE[0]%/*}/../lib/ha-curl.sh"
 AGENT_NAME="$(branding_name_or_fallback agentName)"
 TITLE="${AGENT_NAME} · HA health check"
 
@@ -122,8 +124,9 @@ resolve() {
 # the model, so they come out.
 fetch_log() {
     local response status body
-    response="$(${TIMEOUT_CMD:+${TIMEOUT_CMD} 30} "${CURL_CMD}" -sS --max-time 25 -w $'\n%{http_code}' \
-        -H "Authorization: Bearer ${SUPERVISOR_TOKEN}" \
+    local HA_CURL_CMD
+    HA_CURL_CMD="${TIMEOUT_CMD:+${TIMEOUT_CMD} 30} ${CURL_CMD}"
+    response="$(ha_curl "${SUPERVISOR_TOKEN}" -sS --max-time 25 -w $'\n%{http_code}' \
         -H "Range: entries=:-${FETCH_ENTRIES}:" \
         http://supervisor/core/logs 2>/dev/null)" || return 1
     status="${response##*$'\n'}"
