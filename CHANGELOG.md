@@ -6,6 +6,30 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `verify-core.js check-assembly` now resolves what a shipped `package.json`'s
+  scripts name, against both halves of the assembled tree. Of the ten scripts
+  `app/package.json` ships, only `start` names a file the core carries, so the
+  archive could never answer for the other nine and `haAgentCore.unshippedScripts`
+  was kept by hand from what consumers were measured to run — a list whose being
+  out of date was invisible until a consumer's CI went red at a core bump. The
+  list keeps its job, which is to say what to strip and to record a decision
+  about every shipped manifest; it is no longer the only thing that knows whether
+  a script resolves. The word rule and its two deliberate limits (a script that
+  names no path, such as `eslint .`, and a manifest outside the assembly roots)
+  are documented and held by tests.
+
+- Adapter API 5 gains an optional `runner.endRun(spec)`: the core tells the
+  adapter that one run is over, once, on every ending — an answer, a model
+  error, a timeout, an abort, a kill, and a failure to spawn, where the run
+  never started but `launch` had already allocated. Until now nothing in the
+  core said so, so an adapter that allocated per run (a scratch directory, an
+  entry in a live set) could only free it from a terminal event of the engine's
+  own, and a run that ended any other way left it behind for the life of the
+  process. The member is optional and the API version does not change: an
+  adapter that allocates nothing per run needs no release.
+
 ### Changed
 
 - A run's relay token is now what that run may do. The per-call enforcement of
@@ -33,22 +57,6 @@ uses [Semantic Versioning](https://semver.org/).
   assembly-time check added in the same cycle is what made the stale names
   visible, in the released 0.6.0 manifest rather than in a consumer's CI.
 
-### Added
-
-- `verify-core.js check-assembly` now resolves what a shipped `package.json`'s
-  scripts name, against both halves of the assembled tree. Of the ten scripts
-  `app/package.json` ships, only `start` names a file the core carries, so the
-  archive could never answer for the other nine and `haAgentCore.unshippedScripts`
-  was kept by hand from what consumers were measured to run — a list whose being
-  out of date was invisible until a consumer's CI went red at a core bump. The
-  list keeps its job, which is to say what to strip and to record a decision
-  about every shipped manifest; it is no longer the only thing that knows whether
-  a script resolves. The word rule and its two deliberate limits (a script that
-  names no path, such as `eslint .`, and a manifest outside the assembly roots)
-  are documented and held by tests.
-
-### Changed
-
 - The audit guarantee is now stated as what the code does. A failed append to
   `/data/claude-audit.log` used to arrive in an empty callback, so a full or
   read-only `/data` produced a Home Assistant action nobody could point to
@@ -66,18 +74,6 @@ uses [Semantic Versioning](https://semver.org/).
   the run that is acting now. The log is probed once at start, so an
   unwritable `/data` is a fact of the boot rather than something a user finds
   out through a chat request; the probe writes no byte into the log.
-
-### Added
-
-- Adapter API 5 gains an optional `runner.endRun(spec)`: the core tells the
-  adapter that one run is over, once, on every ending — an answer, a model
-  error, a timeout, an abort, a kill, and a failure to spawn, where the run
-  never started but `launch` had already allocated. Until now nothing in the
-  core said so, so an adapter that allocated per run (a scratch directory, an
-  entry in a live set) could only free it from a terminal event of the engine's
-  own, and a run that ended any other way left it behind for the life of the
-  process. The member is optional and the API version does not change: an
-  adapter that allocates nothing per run needs no release.
 
 ## [0.6.0]
 
