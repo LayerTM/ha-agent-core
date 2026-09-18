@@ -17,8 +17,6 @@ uses [Semantic Versioning](https://semver.org/).
   processes and closes the relay, while the per-run revoke lives in the request's
   own `finally` and is not guaranteed to run by then.
 
-### Fixed
-
 - The audit hook records a call that FAILED, marked `(failed)`. A failed tool is
   routed to the engine's failure event rather than to `PostToolUse`, and that
   event carries `error` in place of `tool_response`, so the hook was never
