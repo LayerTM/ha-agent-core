@@ -67,10 +67,18 @@ humidity_enabled="$(jqopt '.alert_humidity_enabled' false)"
 humidity_low="$(jqopt '.alert_humidity_low' 25)"
 humidity_high="$(jqopt '.alert_humidity_high' 70)"
 offline_enabled="$(jqopt '.alert_offline' true)"     # CRITICAL, always sent
-# Which entities to watch for going offline (a JSON list). Defaults to the
-# internet gateway so "router/internet down" is caught out of the box.
+# Which entities to watch for going offline (a JSON list). NOT SETTING IT MEANS
+# THE SAME AS SETTING IT EMPTY: nothing is watched. This add-on cannot know an
+# entity id that exists in the home it was installed into, and a built-in one
+# watched a device that is not there — an alert nobody asked for, about a name
+# that means nothing to them, while the home they do have goes unwatched.
+#
+# Note the polarity is the opposite of `alert_temp_entities` above, and
+# deliberately so: an empty temperature list means every temperature sensor,
+# because that check knows what to look at from the device class alone. This one
+# has nothing to widen to, so an empty list is the only honest answer.
 offline_entities="$(jq -c '.alert_offline_entities // empty' "${OPTIONS}" 2>/dev/null)"
-[ -n "${offline_entities}" ] || offline_entities='["device_tracker.ucg_fiber"]'
+[ -n "${offline_entities}" ] || offline_entities='[]'
 quiet="$(jqopt '.alert_quiet_hours' '')"             # "" = off, else "HH:MM-HH:MM"
 
 # --- Time-window helpers ----------------------------------------------------

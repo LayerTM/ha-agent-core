@@ -1,0 +1,7 @@
+[
+  {
+    "entity_id": "device_tracker.router",
+    "state": "not_home",
+    "attributes": { "friendly_name": "Home Router", "source_type": "router" }
+  }
+]

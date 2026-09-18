@@ -6,6 +6,18 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- The offline watch-list starts empty. Leaving `alert_offline_entities` unset now
+  means exactly what setting it to `[]` means — nothing is watched — instead of
+  injecting a built-in entity id. An add-on cannot know an id that exists in the
+  home it was installed into, so the built-in one alerted about a device that is
+  not there, under a name that means nothing to its owner, while the home they do
+  have went unwatched. Watching begins when the user names an entity. The
+  opposite polarity of `alert_temp_entities` (empty means every temperature
+  sensor) is deliberate and now stated where the value is read: that check knows
+  what to look at from the device class, this one has nothing to widen to.
+
 ## [0.7.1] - 2026-09-18
 
 ### Added
