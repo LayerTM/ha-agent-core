@@ -8,6 +8,11 @@ uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Adapter API 5 gains a leaf module, `app/server/prompt/ha-tool-names.js`: how
+  Home Assistant names a published tool — the part after the LAST `__`, because
+  one server publishes several prefixes at once — is now stated once and may be
+  required by an adapter, which could not load the relay that held it. The rule
+  itself is unchanged, and the relay answers from the leaf.
 - An engine may declare `descriptor.closedSchemasOnly`, for a structured output
   that cannot describe an OPEN object — one whose keys belong to the caller, like
   an intent's `data` or a Home Assistant automation block. The core then gives

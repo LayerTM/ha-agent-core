@@ -16,6 +16,13 @@
 // request the server makes of the client (sampling, elicitation, roots, …) is
 // dropped.
 
+// The one rule for a Home Assistant tool name lives in its own leaf, so that an
+// adapter can state it the same way without loading the relay. The relay knows
+// Home Assistant, and it must never learn engines: the engine-side spelling
+// (`runner.toolBasename`) is a different function on a different string, and
+// returns null for what arrives here.
+const { haBasename } = require('./ha-tool-names');
+
 const MAX_BODY_BYTES = 1024 * 1024;
 
 const CLIENT_METHODS = new Set(['initialize', 'ping', 'tools/list', 'tools/call']);
@@ -23,27 +30,6 @@ const NOTIFICATION_PREFIX = 'notifications/';
 const METHOD_NOT_FOUND = -32601;
 const INVALID_REQUEST = -32600;
 const INVALID_PARAMS = -32602;
-
-// The basename of a tool as HOME ASSISTANT publishes it. Home Assistant may
-// namespace a tool name once more than one API is selected
-// (`homeassistant__GetLiveContext`), and `tools/call` carries the name the SERVER
-// published, so that is the only shape this sees: the part after the last `__`.
-// Measured against the engine at 05:57 CEST on 2026-09-18, with a server
-// publishing each shape: `GetLiveContext` arrives as `GetLiveContext` and
-// `homeassistant__GetLiveContext` as itself — the client sends the server's name
-// verbatim, with none of its own prefixing. The rule converges for every shape,
-// including a hypothetical name that did arrive prefixed, which is why this holds
-// for an engine nobody has measured.
-//
-// This is Home Assistant's convention, not an engine's. That is what lets it live
-// here: the relay knows Home Assistant, and it must never learn engines. The
-// engine-side spelling belongs to the adapter (`runner.toolBasename`), is a
-// different function on a different string, and returns null for what arrives
-// here.
-function haBasename(name) {
-  const cut = name.lastIndexOf('__');
-  return cut === -1 ? name : name.slice(cut + 2);
-}
 
 function isMessage(m) {
   return m !== null && typeof m === 'object' && !Array.isArray(m) && m.jsonrpc === '2.0';
@@ -204,5 +190,5 @@ function createSseFilter(write, observe = null) {
 }
 
 module.exports = {
-  MAX_BODY_BYTES, CLIENT_METHODS, haBasename, judgeClientBody, filterServerJson, createSseFilter,
+  MAX_BODY_BYTES, CLIENT_METHODS, judgeClientBody, filterServerJson, createSseFilter,
 };

@@ -30,7 +30,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const LOADER = 'server/adapter-contract.js';
-const LEAVES = new Set(['server/prompt/security.js', 'server/branding.js', 'server/theme.js']);
+const LEAVES = new Set(['server/prompt/security.js', 'server/prompt/ha-tool-names.js', 'server/branding.js', 'server/theme.js']);
 const ROOTS = ['server', 'adapter'];
 const CODE_EXT = new Set(['.js', '.cjs']);
 const LOADABLE_EXT = new Set(['.js', '.cjs', '.json']);
