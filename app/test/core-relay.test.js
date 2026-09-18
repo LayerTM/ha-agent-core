@@ -583,7 +583,6 @@ test('a refused request is logged, with no header at all', async () => {
     const res = await ask({ 'content-type': 'application/json' });
     assert.equal(res.status, 401);
     assert.equal(lines.refusals().length, 1);
-    assert.match(lines[0], /relay accepted connection 1 /);
     assert.match(lines.refusals()[0], /relay refused POST \/api\/mcp: unauthorized/);
     assert.match(lines.refusals()[0], /authorization header absent/);
     assert.match(lines.refusals()[0], /bearer form no/);
@@ -680,5 +679,8 @@ test('each connection is counted, and a refusal on one of them is a separate lin
     assert.equal(accepted.length, 1);
     assert.match(accepted[0], /accepted connection 1 /);
     assert.equal(lines.filter((l) => l.includes('refused')).length, 1);
+    // the order is a fact of its own: the connection is accepted before the
+    // request on it is judged
+    assert.match(lines[0], /relay accepted connection 1 /);
   });
 });
