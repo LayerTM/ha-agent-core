@@ -33,7 +33,7 @@ function packageJson(overrides = {}) {
     version: '1.2.3',
     license: 'MIT',
     repository: { type: 'git', url: 'git+https://github.com/example/ha-agent-core.git' },
-    haAgentCore: { adapterApi: 1 },
+    haAgentCore: { adapterApi: 1, unshippedScripts: { 'package.json': [] } },
     files: ['LICENSE', 'package.json', 'package-lock.json', 'src/'],
     ...overrides,
   }, null, 2)}\n`;

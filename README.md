@@ -509,7 +509,20 @@ The archive is an uncompressed ustar stream with every entry under
 - exactly the paths listed in `files` of `package.json`, taken from the tagged
   commit, plus `ha-agent-core/core-manifest.json`;
 - the manifest records `name`, `version`, `commit`, `adapterApi` and, for every
-  other file, its `path`, `mode`, `size` and `sha256`.
+  other file, its `path`, `mode`, `size` and `sha256`;
+- a `package.json` is packed without the scripts `haAgentCore.unshippedScripts`
+  names for it, and with every other one. Today that is `test:usage` and
+  `test:image` in `app/package.json`, whose test files no consumer has; the
+  scripts a consumer's own CI runs stay. The list says what to DROP rather than
+  what to keep, because the archive cannot answer the question: these scripts run
+  in an assembled tree, where the consumer supplies the tests and the lint and
+  type configuration, so only a consumer knows which of them resolve. Keeping by
+  default costs a stale line in a manifest; dropping by default costs a live
+  script in someone's CI. Everything else in the manifest, its dependencies
+  included, is the file as the commit has it, so `npm ci` still matches the lock,
+  and a manifest with nothing named is packed byte for byte. Packing refuses a
+  manifest the list says nothing about, a name it drops that the manifest does
+  not have, and a path it names that is not packed.
 
 The archive depends on the commit alone: sorted entries, the commit time as every
 timestamp and zero owners. It is deliberately not compressed, because compressed
