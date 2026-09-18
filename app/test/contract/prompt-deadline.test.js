@@ -41,7 +41,6 @@ before(async () => {
     claudeBin: path.join(TMP, 'no-such-agent'),
     usageBin: path.join(TMP, 'no-such-usage'),
     haConfigured: true,
-    mcpConfigPath: path.join(TMP, 'mcp.json'),
     model: '',
     workDir: TMP,
     addonVersion: 'deadline',

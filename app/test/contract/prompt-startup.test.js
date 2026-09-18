@@ -81,3 +81,27 @@ test('the bootstrap refuses to start without the audit hook, then starts with it
     shutdown();
   }
 });
+
+test('writeMcpConfig is a per-run call: twice, in two directories, and both hold', async () => {
+  // The core calls it once per run, not once per boot, and two runs overlap. An
+  // adapter that cached its answer, or wrote to a directory of its own choosing,
+  // would hand the second run the first run's bearer — the contract says MAY be
+  // called per run and MUST be idempotent, and this is where that is checked.
+  const { createNeutralAdapter } = require('../fixtures/neutral-adapter');
+  const { adapter } = createNeutralAdapter();
+  const dirs = [path.join(TMP, 'run-a'), path.join(TMP, 'run-b')];
+  const written = [];
+  for (const [i, dir] of dirs.entries()) {
+    // eslint-disable-next-line no-await-in-loop
+    written.push(await adapter.prompt.writeMcpConfig({ dir, url: `http://127.0.0.1:1/api/mcp`, bearer: `bearer-${i}` }));
+  }
+  assert.notEqual(written[0], written[1], 'each run is given its own file');
+  for (const [i, file] of written.entries()) {
+    assert.ok(file.startsWith(dirs[i] + path.sep), `the file is written where the core said (${file})`);
+    assert.ok(fs.existsSync(file), 'and the earlier one still exists: writing the second did not disturb it');
+  }
+  // Called again for the same run, it answers the same way — nothing is consumed.
+  const again = await adapter.prompt.writeMcpConfig({ dir: dirs[0], url: 'http://127.0.0.1:1/api/mcp', bearer: 'bearer-0' });
+  assert.equal(again, written[0]);
+  assert.ok(fs.existsSync(written[0]));
+});

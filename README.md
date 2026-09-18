@@ -43,7 +43,7 @@ valid (see [Names](#names) and [Console pages](#console-pages)):
 | `runner.toolBasename(name)` | function | the basename of such a tool name, or `null` for any other tool |
 | `prompt.limitsSource({ apiKey, oauthToken, homeDir })` | function | the account's limits: `null` without a credential, or `{ mode, key, read(fetch)? }` (see below) |
 | `prompt.authConfigured({ env, home })` | function | whether the agent has credentials |
-| `prompt.writeMcpConfig({ dir, url, bearer })` | function | write (or, without a URL, remove) the MCP configuration in `dir` |
+| `prompt.writeMcpConfig({ dir, url, bearer })` | function | write (or, without a URL, remove) the MCP configuration in `dir` — called once per run, with that run's own `dir` and `bearer`, so it must write where it is told and must be idempotent: two runs are in flight at once, and neither may be handed the other's file |
 | `prompt.hasAuditHook(raw)` | function | whether the run settings carry the audit hook; without it the prompt API does not start |
 | `prompt.removeSavedSessions(homeDir, workDir)` | function | remove transcripts earlier versions saved |
 | `prompt.credentials({ options, env, optionString })` | function | `{ apiKey, oauthToken }` |
