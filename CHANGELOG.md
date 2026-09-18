@@ -16,13 +16,12 @@ uses [Semantic Versioning](https://semver.org/).
   configuration hands to an agent with a shell. The token is now minted carrying
   the tool basenames the request implies and the camera entity it named; the relay
   refuses a call for anything else with `-32602`, and a camera path that is not
-  the run's own with `404`. A token given nothing may do nothing. `tools/list`
-  stays unnarrowed, because listing is not acting and the run's rename detector
-  needs the published catalogue. Tool names are matched by Home Assistant's own
+  the run's own with `404`. A token given nothing may call no tool and read no
+  camera; `tools/list`, `initialize` and `ping` are not narrowed and still reach
+  Home Assistant on it, because listing is not acting and the run's rename
+  detector needs the published catalogue. Tool names are matched by Home Assistant's own
   basename rule — the part after the last `__` — which is the shape `tools/call`
   actually carries, measured against the engine rather than assumed.
-
-### Changed
 
 - The archive no longer ships six script names only one engine can run.
   `test:alerts`, `test:config`, `test:monitor`, `test:digest`, `test:audit` and

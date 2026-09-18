@@ -36,7 +36,9 @@
 const crypto = require('node:crypto');
 const http = require('node:http');
 const https = require('node:https');
-const { MAX_BODY_BYTES, judgeClientBody, filterServerJson, createSseFilter } = require('./mcp-filter');
+const {
+  MAX_BODY_BYTES, haBasename, judgeClientBody, filterServerJson, createSseFilter,
+} = require('./mcp-filter');
 
 // Exactly what the add-on needs, and nothing else.
 const MCP_PATH = '/api/mcp';
@@ -382,13 +384,24 @@ async function startCoreRelay({ coreOrigin, haToken, log = () => {}, record = ()
   return {
     url: `http://127.0.0.1:${port}`,
     port,
-    // A bearer for one run, carrying what that run may do. `basenames` are Home
-    // Assistant tool basenames (see haBasename); `cameras` are the entities the
-    // run may read. Anything absent means the run may not: this is the only place
-    // a bearer is created, so there is no window in which it means more.
+    // A bearer for one run, carrying what that run may do. `cameras` are the
+    // entities the run may read. Anything absent means the run may not: this is
+    // the only place a bearer is created, so there is no window in which it means
+    // more.
+    //
+    // `basenames` go through `haBasename` here — the SAME rule the wire name is
+    // reduced by — so both sides of the comparison speak basenames and no name can
+    // mean one thing on the way in and another on the way out. A confirmed intent
+    // may legitimately carry `__` (`INTENT_RE` in security.js allows `_`), and
+    // storing it verbatim would refuse every call of that run while the adapter
+    // allowed it: fail-closed, silent, and impossible to see from either side.
     issue(runId, { basenames = [], cameras = [] } = {}) {
       const token = crypto.randomBytes(32).toString('base64url');
-      runs.set(token, { runId, basenames: new Set(basenames), cameras: new Set(cameras) });
+      runs.set(token, {
+        runId,
+        basenames: new Set([...basenames].map(haBasename)),
+        cameras: new Set(cameras),
+      });
       return token;
     },
     revoke(token) {

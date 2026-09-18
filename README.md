@@ -131,9 +131,10 @@ The adapter turns the run spec into a command line. Its `launch(spec, { env })`
 receives `mode`, `read`, `vision`, `imagePath`, `haAllowed` and
 `haDisallowed` (the tools the run may and may not call), `schema`,
 `systemPrompt`, `maxTurns`, `mcpConfigPath`, `settings`, `model` and `stream`.
-It denies every tool call outside `haAllowed` (plus reading `imagePath` for a
-vision run). That is no longer the only enforcement: the relay refuses a call for
-a tool this run may not make, whatever the adapter does (see
+It must deny every tool call outside `haAllowed` (plus reading `imagePath` for a
+vision run) — that is what keeps a tool out of the model's context at all. It is
+no longer the only enforcement: the relay refuses a call for a tool this run may
+not make, whatever the adapter does (see
 [Home Assistant MCP access](#home-assistant-mcp-access)).
 
 Its decoder reports these events:
@@ -178,8 +179,10 @@ loopback relay (`app/server/prompt/core-relay.js`):
 - **that token is what the run may do.** It is minted carrying the Home Assistant
   tool basenames this request implies — live context for a read, exactly the
   confirmed intents for a write — and the camera entity the request named, if any.
-  A token that was given nothing may do nothing: an unset allowlist refuses,
-  rather than standing for "no gate";
+  A token given nothing may call no tool and read no camera: an unset allowlist
+  refuses, rather than standing for "no gate". It is not narrowed further than
+  that: `tools/list`, `initialize` and `ping` still reach Home Assistant on such a
+  token, deliberately — see the list below;
 - the relay decides which JSON-RPC methods pass (`app/server/prompt/mcp-filter.js`);
 - the relay records what each run asked Home Assistant to do (below).
 

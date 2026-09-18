@@ -504,3 +504,28 @@ test('a run reads the camera it was given and no other', async () => {
   assert.equal(denied.status, 404);
   assert.equal(seen.length, 1);
 });
+
+test('a confirmed intent that carries __ is not refused by the rule that reduces it', async () => {
+  // INTENT_RE (security.js) allows `_`, so HassFoo__Bar is a legitimate confirmed
+  // intent and goes into the bearer. The wire name is reduced to its Home
+  // Assistant basename, `Bar`; if the set kept the intent verbatim the two sides
+  // would speak different names and EVERY call of that run would be refused while
+  // the adapter allowed it — fail-closed and silent. The set is built through the
+  // same rule it is compared with, so the divergence cannot exist for any name.
+  seen.length = 0;
+  const token = relay.issue('run-underscored', { basenames: ['HassFoo__Bar'] });
+  const call = (name) => fetch(`${relay.url}/api/mcp`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: {} } }),
+  });
+  assert.equal((await call('HassFoo__Bar')).status, 200);
+  assert.equal(seen.length, 1, 'the run\'s own tool reached Home Assistant');
+  // And the reduction does not widen: a different tool that shares no basename is
+  // still refused.
+  const other = await call('HassTurnOn');
+  assert.deepEqual(await other.json(), {
+    jsonrpc: '2.0', id: 1, error: { code: -32602, message: 'Tool not allowed for this run' },
+  });
+  assert.equal(seen.length, 1, 'nothing else reached Home Assistant');
+});
