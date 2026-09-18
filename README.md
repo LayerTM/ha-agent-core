@@ -279,6 +279,15 @@ the record it protects.
 The record says nothing about a tool that never reaches Home Assistant. Those are
 the engine's to record, and a console run's hook still does.
 
+That hook (`rootfs/usr/local/bin/cc-hook-audit`) writes a line for a call that
+FAILED as well, marked `(failed)` — the same word the relay uses, so one log
+keeps one vocabulary. It has to be registered for the engine's failure event as
+well as its success one: a failed tool is not sent to `PostToolUse` at all, so a
+hook registered only there writes nothing whatever for an action that was
+attempted and refused, and the log's silence reads as "nothing was done". Which
+events a hook is registered for is the consuming add-on's to write, not the
+core's; the marker is here, the registration is there.
+
 ### Error answers
 
 Every error answer of the prompt API is `{ "error": "<message>", "code": "<code>" }`, plus:

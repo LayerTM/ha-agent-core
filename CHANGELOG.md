@@ -6,6 +6,21 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- The audit hook records a call that FAILED, marked `(failed)`. A failed tool is
+  routed to the engine's failure event rather than to `PostToolUse`, and that
+  event carries `error` in place of `tool_response`, so the hook was never
+  invoked for one: an attempted-and-refused Home Assistant action left no line at
+  all and the log's silence read as "nothing was done". The marker is the word
+  the prompt server's relay already writes for the same outcome, so one log keeps
+  one vocabulary; a preview still wins over it, a successful line is byte-identical
+  to before, and the read/write split is unchanged — a read that failed still
+  changed nothing. `npm run test:audit` holds the border and now runs in CI, which
+  it did not before: the script was carried here without its test. Which events
+  the hook is registered for belongs to the consuming add-on, so the marker is
+  necessary and not sufficient on its own.
+
 ## [0.7.0] - 2026-09-18
 
 ### Added
