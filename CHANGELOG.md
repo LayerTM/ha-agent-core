@@ -6,6 +6,15 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- The proactive-alerts loop says so when it is watching nothing. With the offline
+  alert switched on and the watch list empty the loop is correct and permanently
+  silent, which from outside is indistinguishable from "watching, and all clear";
+  it now logs `[cc-alerts] offline watch: no entities configured` once at
+  start-up, on the same channel the digest and monitor loops log to. Only that
+  combination logs it, and the behaviour of an empty list is unchanged.
+
 ## [0.7.2] - 2026-09-18
 
 ### Changed

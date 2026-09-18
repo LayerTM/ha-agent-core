@@ -35,6 +35,8 @@ DATA_DIR="${CC_ALERTS_DATA_DIR:-/data}"
 OPTIONS="${DATA_DIR}/options.json"
 STATE="${DATA_DIR}/alerts-state.json"
 
+log() { printf '[cc-alerts] %s\n' "$1" >&2; }
+
 # --- Config (from options.json, with sensible built-in defaults) ------------
 jqopt() {  # $1 = jq filter, $2 = default (used when key is absent/null/unreadable)
     local v
@@ -79,6 +81,15 @@ offline_enabled="$(jqopt '.alert_offline' true)"     # CRITICAL, always sent
 # has nothing to widen to, so an empty list is the only honest answer.
 offline_entities="$(jq -c '.alert_offline_entities // empty' "${OPTIONS}" 2>/dev/null)"
 [ -n "${offline_entities}" ] || offline_entities='[]'
+# An empty list is a correct configuration, and it is also the one state in which
+# this check can never say anything — so from outside "watching, and all clear"
+# and "watching nothing" look identical: the offline alert is on, the list is
+# empty, and nothing is ever reported either way. Said once at start-up, on the
+# same channel the other two loops log to. The behaviour above is unchanged; the
+# empty list still watches nothing, deliberately, for the reason stated there.
+if [ "${offline_enabled}" = "true" ] && [ "${offline_entities}" = '[]' ]; then
+    log "offline watch: no entities configured (alert_offline_entities is empty)"
+fi
 quiet="$(jqopt '.alert_quiet_hours' '')"             # "" = off, else "HH:MM-HH:MM"
 
 # --- Time-window helpers ----------------------------------------------------
