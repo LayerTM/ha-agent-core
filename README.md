@@ -212,6 +212,13 @@ keeps it within the tools the run's allowlist names.
   entity the request named is the whole permission: `GET
   /api/camera_proxy/<other>` is refused with 404, and a run that named no camera
   reads none.
+- A request whose bearer the relay does not know is refused with 401 **and
+  logged**, on the add-on's own log channel: whether an `authorization` header
+  came at all, whether it had the `Bearer ` form, how many characters were
+  presented, and how many runs the relay currently knows. The value itself is
+  never logged, nor any fragment of it. A refusal that says nothing is
+  indistinguishable from an engine that called no tool — both leave a run that
+  answered normally with no tool call in the audit.
 - A request body with a refused method is not forwarded at all.
 - A body that is not JSON-RPC 2.0 is refused with 400.
 - A body over 1 MiB is refused with 413.

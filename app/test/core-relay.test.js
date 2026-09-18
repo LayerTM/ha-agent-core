@@ -557,3 +557,91 @@ test('a confirmed intent that carries __ is not refused by the rule that reduces
   });
   assert.equal(seen.length, 1, 'nothing else reached Home Assistant');
 });
+
+// --- a refusal says so ----------------------------------------------------------
+
+// Measured 2026-09-18 against the sandbox add-on: a rejected bearer made the CLI's
+// MCP transport quit with "HTTP 401", the run still answered 200 with no tool
+// call, and neither the add-on log nor the audit held a word about it — the
+// refusal was indistinguishable from an engine that called nothing. These cases
+// are the lines that would have said which it was.
+async function withLoggingRelay(fn) {
+  const lines = [];
+  const relayHere = await startCoreRelay({ coreOrigin, haToken: HA_TOKEN, log: (line) => lines.push(line) });
+  try {
+    await fn({ relay: relayHere, lines, ask: (headers) => fetch(`${relayHere.url}/api/mcp`, { method: 'POST', headers, body: INIT }) });
+  } finally {
+    relayHere.close();
+  }
+}
+
+test('a refused request is logged, with no header at all', async () => {
+  await withLoggingRelay(async ({ lines, ask }) => {
+    const res = await ask({ 'content-type': 'application/json' });
+    assert.equal(res.status, 401);
+    assert.equal(lines.length, 1);
+    assert.match(lines[0], /relay refused POST \/api\/mcp: unauthorized/);
+    assert.match(lines[0], /authorization header absent/);
+    assert.match(lines[0], /bearer form no/);
+    assert.match(lines[0], /presented 0 chars/);
+    assert.match(lines[0], /0 run\(s\) known/);
+  });
+});
+
+test('a refused request is logged when the header is not a bearer', async () => {
+  await withLoggingRelay(async ({ relay: relayHere, lines, ask }) => {
+    relayHere.issue('run-a', MAY);
+    const res = await ask({ authorization: 'Basic dXNlcjpwYXNz' });
+    assert.equal(res.status, 401);
+    assert.match(lines[0], /authorization header present/);
+    assert.match(lines[0], /bearer form no/);
+    assert.match(lines[0], /presented 0 chars/);
+    assert.match(lines[0], /1 run\(s\) known/);
+  });
+});
+
+test('a bearer the relay does not know is logged with its length and the runs it does know', async () => {
+  await withLoggingRelay(async ({ relay: relayHere, lines, ask }) => {
+    relayHere.issue('run-a', MAY);
+    relayHere.issue('run-b', MAY);
+    const res = await ask({ authorization: 'Bearer not-a-token-of-any-run' });
+    assert.equal(res.status, 401);
+    assert.match(lines[0], /bearer form yes/);
+    assert.match(lines[0], /presented 22 chars/);
+    assert.match(lines[0], /2 run\(s\) known/);
+  });
+});
+
+test('a bearer whose run has ended is refused and logged', async () => {
+  await withLoggingRelay(async ({ relay: relayHere, lines, ask }) => {
+    const token = relayHere.issue('run-over', MAY);
+    relayHere.revoke(token);
+    const res = await ask({ authorization: `Bearer ${token}` });
+    assert.equal(res.status, 401);
+    assert.match(lines[0], /bearer form yes/);
+    assert.match(lines[0], /0 run\(s\) known/);
+  });
+});
+
+test('the refusal log carries no byte of the bearer it refused', async () => {
+  await withLoggingRelay(async ({ relay: relayHere, lines, ask }) => {
+    const token = relayHere.issue('run-over', MAY);
+    relayHere.revoke(token);
+    await ask({ authorization: `Bearer ${token}` });
+    const line = lines.join('\n');
+    assert.equal(line.includes(token), false);
+    // and not a fragment either: every 8-character window of it is absent
+    for (let i = 0; i + 8 <= token.length; i += 1) {
+      assert.equal(line.includes(token.slice(i, i + 8)), false, `window at ${i}`);
+    }
+  });
+});
+
+test('a bearer the relay knows is not logged as a refusal', async () => {
+  await withLoggingRelay(async ({ relay: relayHere, lines, ask }) => {
+    const token = relayHere.issue('run-live', MAY);
+    const res = await ask({ authorization: `Bearer ${token}`, 'content-type': 'application/json' });
+    assert.equal(res.status, 200);
+    assert.deepEqual(lines.filter((l) => l.includes('refused')), []);
+  });
+});

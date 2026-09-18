@@ -239,6 +239,20 @@ async function startCoreRelay({ coreOrigin, haToken, log = () => {}, record = ()
     // not merely whether it may pass; an unknown bearer is refused as before.
     const entry = auth.startsWith('Bearer ') ? runs.get(auth.slice(7)) : undefined;
     if (entry === undefined) {
+      // A refusal says so. Until this line the relay refused in silence, and the
+      // silence arrived by the same path as "nothing happened": the run still
+      // answered 200 with no tool call, the audit recorded only successful calls,
+      // and a rejected bearer was indistinguishable from an engine that chose not
+      // to call anything. What is logged is everything about the presented
+      // credential EXCEPT the credential: whether a header came at all, whether it
+      // had the `Bearer ` form, how long the presented part was, and how many runs
+      // the relay currently knows. No byte of the value, and no fragment of it,
+      // because a log is read by more eyes than a bearer is.
+      log(`relay refused ${req.method} ${pathname}: unauthorized `
+        + `(authorization header ${auth ? 'present' : 'absent'}, `
+        + `bearer form ${auth.startsWith('Bearer ') ? 'yes' : 'no'}, `
+        + `presented ${auth.startsWith('Bearer ') ? auth.length - 7 : 0} chars, `
+        + `${runs.size} run(s) known)`);
       deny(res, 401, 'unauthorized');
       req.resume();
       return;
