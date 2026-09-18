@@ -225,6 +225,24 @@ engine whether its settings carry an audit hook before it starts — that was th
 engine's answer about itself, one an engine that cannot run hooks could not give
 truthfully, and nothing behind the flag was ever checked.
 
+**What the record promises, exactly.** A line is written when Home Assistant
+answers, so a write that fails cannot be un-failed: the effect has already
+happened. The guarantee is therefore not that no action escapes the log — it is
+that **an audit write that fails is announced, and acting stops until one
+succeeds.** A failed append names its errno on stderr (once per cause, so a full
+disk does not become one line per call), `/api/status` publishes
+`audit_recording` and `audit_error`, and while the record is not being kept a
+`write` request is refused with `503` and the code `audit_unavailable`, which
+carries the errno as `audit_error`. A `read` is not refused: it does not act on
+the home, so the home keeps answering. The first failing write is the one that
+is lost, and it is the one the announcement is about.
+
+The log is also probed once when the prompt API starts, because a read-only or
+unwritable `/data` is a fact of the boot and a chat request is the wrong way to
+discover one. The probe appends the empty string: it creates the log if it is
+missing and it opens it exactly as a line would, but not one byte of it reaches
+the record it protects.
+
 The record says nothing about a tool that never reaches Home Assistant. Those are
 the engine's to record, and a console run's hook still does.
 
@@ -252,6 +270,7 @@ The message is for people and may change. The code is stable:
 | `confirmation_required` | 403 | an unconfirmed write touches `domains` |
 | `rate_limited` | 429 | too many requests; see `Retry-After` |
 | `write_unavailable` | 503 | no Home Assistant MCP configuration for writes |
+| `audit_unavailable` | 503 | the audit log cannot be written, so a write is not allowed to act; the errno is in `audit_error` |
 | `busy` | 503 | the concurrent-run limit is reached |
 | `timeout` | 504 | the run passed its time limit |
 | `internal` | 500 | the run failed |
