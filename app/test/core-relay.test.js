@@ -233,3 +233,128 @@ test('a bearer nobody issued is refused, and so is one from a closed relay', asy
   assert.equal(mine.status, 401, "one relay's bearer is nothing to another");
   other.close();
 });
+
+// --- the record the relay writes -------------------------------------------
+
+// A Core that answers a tools/call however the test asks, and a relay that
+// records into an array instead of the audit log.
+async function withRecording(answerFor) {
+  const lines = [];
+  const fake = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      let sent = null;
+      try { sent = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { /* not JSON */ }
+      const answer = sent ? answerFor(sent) : null;
+      if (answer === null) { res.writeHead(202); res.end(); return; }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(answer));
+    });
+  });
+  await new Promise((r) => fake.listen(0, '127.0.0.1', r));
+  const relayHere = await startCoreRelay({
+    coreOrigin: `http://127.0.0.1:${fake.address().port}`, haToken: HA_TOKEN, record: (line) => lines.push(line),
+  });
+  return {
+    lines,
+    relay: relayHere,
+    async call(token, message) {
+      return fetch(`${relayHere.url}/api/mcp`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify(message),
+      });
+    },
+    done() { relayHere.close(); fake.close(); },
+  };
+}
+
+const ok = (sent) => ({ jsonrpc: '2.0', id: sent.id, result: { content: [{ type: 'text', text: 'done' }] } });
+
+test('every tool call a run makes is recorded once, with its tool, its run and its arguments', async () => {
+  const h = await withRecording(ok);
+  try {
+    const token = h.relay.issue('run-7');
+    await h.call(token, { jsonrpc: '2.0', id: 1, method: 'tools/list' });
+    await h.call(token, {
+      jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'HassTurnOn', arguments: { name: 'desk lamp' } },
+    });
+    assert.deepEqual(h.lines, ['HassTurnOn run=run-7: {"name":"desk lamp"}'], 'the call, and nothing that is not one');
+  } finally {
+    h.done();
+  }
+});
+
+test('an argument cannot forge a line of its own, and a long one is cut', async () => {
+  const h = await withRecording(ok);
+  try {
+    const token = h.relay.issue('run-8');
+    // The tool NAME is the vector: the arguments are JSON, which escapes a
+    // newline into two characters, but a name is written as it arrives.
+    await h.call(token, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: {
+        name: 'Hass\n2026-01-01 00:00:00  prompt[read] caller=x status=200 tokens=evil:9:0:0:0 cost=$9.9999',
+        arguments: { pad: 'y'.repeat(400) },
+      },
+    });
+    assert.equal(h.lines.length, 1);
+    assert.ok(!h.lines[0].includes('\n'), 'no newline reaches the log, so no second line can be forged');
+    assert.ok(Buffer.byteLength(h.lines[0], 'utf8') <= 1000);
+    assert.ok(h.lines[0].startsWith('Hass 2026-01-01'), `the control character became a space: ${h.lines[0]}`);
+    // The arguments are cut, and the cut is in the arguments, not in what names
+    // the run — a record that loses its run id records nothing.
+    assert.ok(h.lines[0].includes('run=run-8'));
+    assert.ok(h.lines[0].endsWith('y'), 'the arguments are cut at the cap');
+  } finally {
+    h.done();
+  }
+});
+
+test('a preview is told from a change, and a refusal from both', async () => {
+  const h = await withRecording((sent) => {
+    if (sent.params && sent.params.name === 'Failing') {
+      return { jsonrpc: '2.0', id: sent.id, error: { code: -32000, message: 'no' } };
+    }
+    if (sent.params && sent.params.name === 'PreviewInAnswer') {
+      return { jsonrpc: '2.0', id: sent.id, result: { content: [{ type: 'text', text: '{"dry_run": true}' }] } };
+    }
+    return ok(sent);
+  });
+  try {
+    const token = h.relay.issue('run-9');
+    const call = (id, name, args) => h.call(token, { jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } });
+    await call(1, 'PreviewInArgs', { dry_run: true });
+    await call(2, 'PreviewInAnswer', {});
+    await call(3, 'Failing', {});
+    await call(4, 'Real', {});
+    assert.deepEqual(h.lines, [
+      'PreviewInArgs run=run-9 (dry-run): {"dry_run":true}',
+      'PreviewInAnswer run=run-9 (dry-run): {}',
+      'Failing run=run-9 (failed): {}',
+      'Real run=run-9: {}',
+    ]);
+  } finally {
+    h.done();
+  }
+});
+
+test('a call Home Assistant never answers is recorded when the run ends, and an answered one is not recorded twice', async () => {
+  const h = await withRecording((sent) => (sent.params && sent.params.name === 'Silent' ? null : ok(sent)));
+  try {
+    const token = h.relay.issue('run-10');
+    await h.call(token, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'Answered', arguments: {} } });
+    await h.call(token, { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'Silent', arguments: { a: 1 } } });
+    assert.deepEqual(h.lines, ['Answered run=run-10: {}'], 'nothing is written for a call still in the air');
+    h.relay.revoke(token);
+    assert.deepEqual(h.lines, [
+      'Answered run=run-10: {}',
+      'Silent run=run-10 (no answer): {"a":1}',
+    ]);
+  } finally {
+    h.done();
+  }
+});

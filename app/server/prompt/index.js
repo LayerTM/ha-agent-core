@@ -192,11 +192,21 @@ async function start() {
   // front of it. Everything downstream — the spawned Claude's MCP client and the
   // camera-snapshot fetch — talks plain HTTP to the relay and never sees the HA
   // token or has to reason about Core's TLS. (ClaudeInHA#47)
+  const auditFile = path.join(DATA_DIR, 'claude-audit.log');
+  const audit = (line) => {
+    const ts = new Date().toISOString().replace('T', ' ').slice(0, 19);
+    fs.appendFile(auditFile, `${ts}  ${line}\n`, () => {});
+  };
+
   const coreTarget = await resolveCoreTarget();
   log(`core at ${coreTarget.origin} (${coreTarget.source})`);
   let relay = null;
   if (haToken) {
-    relay = await startCoreRelay({ coreOrigin: coreTarget.origin, haToken, log });
+    // Every Home Assistant call a run makes is written to the same log, in the
+    // same format, as the audit hook writes for a console run — the relay is the
+    // one place that sees the call, its arguments and Core's answer for EVERY
+    // engine, with hooks or without.
+    relay = await startCoreRelay({ coreOrigin: coreTarget.origin, haToken, log, record: audit });
     log(`core relay on 127.0.0.1:${relay.port}`);
   }
 
@@ -244,12 +254,6 @@ async function start() {
     process.env.SUPERVISOR_TOKEN,
     ...secrets.env,
   ], adapter().prompt.secretPatterns || []);
-
-  const auditFile = path.join(DATA_DIR, 'claude-audit.log');
-  const audit = (line) => {
-    const ts = new Date().toISOString().replace('T', ' ').slice(0, 19);
-    fs.appendFile(auditFile, `${ts}  ${line}\n`, () => {});
-  };
 
   const app = createPromptApp({
     token,

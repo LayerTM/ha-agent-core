@@ -1134,7 +1134,7 @@ function createPromptApp({
       const detail = mode === 'write'
         ? `intents=${intents.map((i) => `${i.intent}(${i.targets.join('+')})`).join(',')}`
         : `len=${Buffer.byteLength(prompt, 'utf8')} sha=${sha12(prompt)}`;
-      const base = `caller=${caller}${conversationId ? ` conv=${conversationId}` : ''}`
+      const base = `run=${runId} caller=${caller}${conversationId ? ` conv=${conversationId}` : ''}`
         + `${imageEntity ? ` img=${imageEntity}${imagePath ? '' : '(fetch-failed)'}` : ''}`
         + ` lang=${language} langdir=${safeLangTag(body.language) || '-'}`
         + ` surface=${body.surface || '-'} model=${sanitizeId(resolvedModel, 64) || 'default'}`

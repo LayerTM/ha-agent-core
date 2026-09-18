@@ -171,8 +171,10 @@ the answer is nullable there, and a `null` for it is treated as absent.
 An agent reaches Home Assistant's MCP server only through the prompt server's
 loopback relay (`app/server/prompt/core-relay.js`):
 - the relay holds the Home Assistant token;
-- the agent gets a per-boot relay token instead;
-- the relay decides which JSON-RPC methods pass (`app/server/prompt/mcp-filter.js`).
+- the agent gets a relay token of its own run instead, issued when the run starts
+  and revoked when it ends, so every request names the run that made it;
+- the relay decides which JSON-RPC methods pass (`app/server/prompt/mcp-filter.js`);
+- the relay records what each run asked Home Assistant to do (below).
 
 From the agent, only these pass:
 - `initialize`, `ping`, `notifications/*`;
@@ -192,6 +194,25 @@ keeps it within the tools the run's allowlist names.
 From Home Assistant, answers and notifications pass, in JSON and in
 server-sent-event streams. A request the server makes of the agent (sampling,
 elicitation, roots) is dropped.
+
+**The record.** The relay writes one line to `/data/claude-audit.log` per
+`tools/call` a run makes, in the shape the audit hook writes for a console run,
+so `ha-audit` shows both and `ha-usage` reads neither as chat spend:
+
+    2026-09-18 02:31:07  HassTurnOn run=9f2c1a04b7e2: {"name":"desk lamp"}
+
+The run id is the one the prompt server's own `prompt[...]` line carries, so a
+call can be read back to its caller, its status and its cost. A line is written
+when Home Assistant answers, and carries `(dry-run)` when the call or its answer
+says `dry_run: true`, `(failed)` when the answer is an error, and `(no answer)`
+when the run ended with the call unanswered. Arguments are the model's text: they
+are stripped of control characters and cut, as the hook cuts them, so nothing in
+them can pass for a line of its own.
+
+This is why a prompt run's Home Assistant actions are recorded whatever the
+engine is, with hooks or without: the record is written where the call passes,
+not by the engine that made it. It says nothing about a tool that never reaches
+Home Assistant — those are the engine's to record.
 
 ### Error answers
 

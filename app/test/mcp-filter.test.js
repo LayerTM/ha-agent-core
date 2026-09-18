@@ -18,11 +18,28 @@ const judge = (value) => judgeClientBody(typeof value === 'string' ? value : JSO
 // --- agent → server -------------------------------------------------------------
 
 test('the methods a prompt run needs are forwarded', () => {
-  for (const m of [rpc('initialize', 0, {}), rpc('ping', 1), rpc('tools/list', 2), rpc('tools/call', 3, { name: 'x' }),
+  for (const m of [rpc('initialize', 0, {}), rpc('ping', 1), rpc('tools/list', 2),
     rpc('notifications/initialized'), rpc('notifications/cancelled', undefined, { requestId: 3 })]) {
-    assert.deepEqual(judge(m), { forward: true }, m.method);
+    assert.deepEqual(judge(m), { forward: true, calls: [] }, m.method);
   }
-  assert.deepEqual(judge([rpc('tools/list', 1), rpc('notifications/initialized')]), { forward: true });
+  assert.deepEqual(judge([rpc('tools/list', 1), rpc('notifications/initialized')]), { forward: true, calls: [] });
+});
+
+test('a forwarded body names the calls it makes, and only those', () => {
+  // What a record of this body would have to say: which tool, with what.
+  assert.deepEqual(judge(rpc('tools/call', 3, { name: 'HassTurnOn', arguments: { name: 'lamp' } })), {
+    forward: true,
+    calls: [{ id: 3, name: 'HassTurnOn', args: { name: 'lamp' } }],
+  });
+  // A call without an id expects no answer, so there is nothing to resolve.
+  assert.deepEqual(judge(rpc('tools/call', undefined, { name: 'HassTurnOn' })), { forward: true, calls: [] });
+  // A batch names each of its calls, and nothing that is not one.
+  assert.deepEqual(
+    judge([rpc('tools/list', 1), rpc('tools/call', 2, { name: 'GetLiveContext', arguments: {} })]),
+    { forward: true, calls: [{ id: 2, name: 'GetLiveContext', args: {} }] },
+  );
+  // A name the agent did not send is not invented.
+  assert.deepEqual(judge(rpc('tools/call', 4, {})), { forward: true, calls: [{ id: 4, name: '', args: undefined }] });
 });
 
 test('every other method is answered "method not found" and not forwarded', () => {

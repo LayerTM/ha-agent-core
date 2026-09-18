@@ -38,7 +38,8 @@ function errorFor(id, code, message) {
 /**
  * Judges one request body from the agent.
  * @param {string} text
- * @returns {{ forward: true } | { forward: false, status: number, body: string, type?: string }}
+ * @returns {{ forward: true, calls: {id: unknown, name: string, args: unknown}[] }
+ *   | { forward: false, status: number, body: string, type?: string }}
  */
 function judgeClientBody(text) {
   let parsed;
@@ -55,7 +56,18 @@ function judgeClientBody(text) {
   // A message without a method is the agent's answer to a server request; the
   // server may make none, so there is nothing such a message could answer.
   const refused = messages.map((m) => typeof m.method !== 'string' || !clientMayCall(m.method));
-  if (!refused.some(Boolean)) return { forward: true };
+  if (!refused.some(Boolean)) {
+    // What this body asks Home Assistant to DO, for the record the relay writes:
+    // a tool call that expects an answer. A notification (no id) is not one.
+    const calls = messages
+      .filter((m) => m.method === 'tools/call' && 'id' in m && m.id !== null)
+      .map((m) => ({
+        id: m.id,
+        name: typeof m.params?.name === 'string' ? m.params.name : '',
+        args: m.params?.arguments,
+      }));
+    return { forward: true, calls };
+  }
 
   // Nothing of a body with a refused message is forwarded. Every request in it is
   // answered: a refused one with "method not found", the others with "invalid
@@ -89,13 +101,17 @@ function serverMayReach(m) {
  * when nothing of it may reach the agent.
  * @param {string} text
  */
-function filterServerJson(text) {
+function filterServerJson(text, observe = null) {
   let parsed;
   try {
     parsed = JSON.parse(text);
   } catch {
     return '';
   }
+  // Every server message this sees, before any filtering: what Home Assistant
+  // answered is what tells a preview from a change, and it is read here because
+  // this is the one place the answer is already parsed.
+  if (observe) for (const m of (Array.isArray(parsed) ? parsed : [parsed])) observe(m);
   if (Array.isArray(parsed)) {
     const kept = parsed.filter(serverMayReach);
     return kept.length ? JSON.stringify(kept) : '';
@@ -109,14 +125,14 @@ function filterServerJson(text) {
  * an event whose data is not an allowed JSON-RPC message is dropped.
  * @param {(chunk: string) => void} write
  */
-function createSseFilter(write) {
+function createSseFilter(write, observe = null) {
   let pending = '';
   const flushEvent = (event) => {
     const data = event.split('\n')
       .filter((line) => line.startsWith('data:'))
       .map((line) => line.slice(5).replace(/^ /, ''))
       .join('\n');
-    if (data === '' || filterServerJson(data) === data) write(`${event}\n\n`);
+    if (data === '' || filterServerJson(data, observe) === data) write(`${event}\n\n`);
   };
   return {
     push(chunk) {
