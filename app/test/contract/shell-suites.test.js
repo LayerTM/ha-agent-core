@@ -20,6 +20,7 @@ const SUITES = [
   { file: 'cc-alerts.test.sh', success: /^PASS: all cc-alerts checks passed$/m },
   { file: 'ha-token-check.test.sh', success: /^PASS: all ha-token-check checks passed$/m },
   { file: 'ha-curl.test.sh', success: /^PASS: all ha-curl checks passed$/m },
+  { file: 'ha-core-ready.test.sh', success: /^PASS: all ha-core-ready checks passed$/m },
   { file: 'config-list.test.sh', success: /^All config_list tests passed\.$/m },
 ];
 

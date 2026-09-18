@@ -56,6 +56,9 @@ source /usr/local/lib/background-loop.sh
 # shellcheck source-path=SCRIPTDIR source=../lib/ha-curl.sh
 source /usr/local/lib/ha-curl.sh
 
+# shellcheck source-path=SCRIPTDIR source=../lib/ha-core-ready.sh
+source /usr/local/lib/ha-core-ready.sh
+
 # shellcheck source-path=SCRIPTDIR source=../lib/ha-token-check.sh
 source /usr/local/lib/ha-token-check.sh
 # The engine's names, and AGENT_CONSOLE_DIR where every add-on installs the console.
@@ -154,9 +157,22 @@ ha_token=$(jq -r '.ha_token // ""' /data/options.json 2>/dev/null || echo "")
 # installs where the literal was already right.
 ha_core_scheme="http"
 ha_core_port="8123"
+# One attempt, judged the same way the token check judges its own: while the
+# Supervisor answers 502/503 or nothing at all, Core is still starting and the
+# question is worth repeating; anything else is an answer, and a body that is not
+# a 200 leaves the historic defaults in place exactly as before.
+core_info_once() {
+    local out code
+    out=$(ha_curl "${SUPERVISOR_TOKEN}" -sS -m 10 -w $'\n%{http_code}' \
+        http://supervisor/core/info 2>/dev/null)
+    code=${out##*$'\n'}
+    code=${code:-000}
+    ha_core_still_starting "${code}" && return 1
+    [ "${code}" = 200 ] || return 0
+    printf '%s' "${out%$'\n'*}"
+}
 if [ -n "${SUPERVISOR_TOKEN:-}" ]; then
-    ha_core_info=$(ha_curl "${SUPERVISOR_TOKEN}" -fsSL -m 10 \
-        http://supervisor/core/info 2>/dev/null || echo "")
+    ha_core_info=$(ha_awaiting_core core_info_once || echo "")
     if [ -n "${ha_core_info}" ]; then
         [ "$(echo "${ha_core_info}" | jq -r '.data.ssl // false')" = "true" ] && ha_core_scheme="https"
         ha_core_port_reported=$(echo "${ha_core_info}" | jq -r '.data.port // empty')
