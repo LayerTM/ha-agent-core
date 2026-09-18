@@ -20,6 +20,8 @@ export HOME=/data/home
 export PATH="/usr/local/bin:/usr/bin:/bin:${PATH}"
 # shellcheck source-path=SCRIPTDIR source=../lib/addon-branding.sh
 source "${BASH_SOURCE[0]%/*}/../lib/addon-branding.sh"
+# shellcheck source-path=SCRIPTDIR source=../lib/ha-curl.sh
+source "${BASH_SOURCE[0]%/*}/../lib/ha-curl.sh"
 
 ONCE=0
 [ "${1:-}" = "--once" ] && ONCE=1
@@ -50,7 +52,8 @@ seconds_until_target() {
 briefing() {
     # Fetch states ourselves (untrusted DATA) and slice out the few things worth a
     # morning heads-up. jq failures degrade to an empty snapshot, never an error.
-    states="$("${CURL_CMD}" -sS -H "Authorization: Bearer ${SUPERVISOR_TOKEN}" \
+    local HA_CURL_CMD="${CURL_CMD}"
+    states="$(ha_curl "${SUPERVISOR_TOKEN}" -sS \
         http://supervisor/core/api/states 2>/dev/null)"
     data="$(printf '%s' "${states}" | jq -c '{
         weather: [ .[] | select(.entity_id|startswith("weather."))

@@ -6,6 +6,16 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Security
+
+- The token a call carries no longer travels on a command line. Every HTTP call
+  the add-on's shell layer makes passed its bearer as `-H "Authorization:
+  Bearer ..."`, which is the curl process's command line and therefore readable
+  by any process in the container for as long as the call runs — measured on the
+  live process. The header is now handed to curl on standard input as a config,
+  in one place that every one of those calls asks; each call keeps its own
+  timeouts, method and output format, and the answers are unchanged.
+
 ## [0.7.5] - 2026-09-18
 
 ### Fixed

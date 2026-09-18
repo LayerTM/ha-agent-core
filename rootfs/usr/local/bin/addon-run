@@ -53,6 +53,9 @@ source /usr/local/lib/addon-config.sh
 # shellcheck source-path=SCRIPTDIR source=../lib/background-loop.sh
 source /usr/local/lib/background-loop.sh
 
+# shellcheck source-path=SCRIPTDIR source=../lib/ha-curl.sh
+source /usr/local/lib/ha-curl.sh
+
 # shellcheck source-path=SCRIPTDIR source=../lib/ha-token-check.sh
 source /usr/local/lib/ha-token-check.sh
 # The engine's names, and AGENT_CONSOLE_DIR where every add-on installs the console.
@@ -152,7 +155,7 @@ ha_token=$(jq -r '.ha_token // ""' /data/options.json 2>/dev/null || echo "")
 ha_core_scheme="http"
 ha_core_port="8123"
 if [ -n "${SUPERVISOR_TOKEN:-}" ]; then
-    ha_core_info=$(curl -fsSL -m 10 -H "Authorization: Bearer ${SUPERVISOR_TOKEN}" \
+    ha_core_info=$(ha_curl "${SUPERVISOR_TOKEN}" -fsSL -m 10 \
         http://supervisor/core/info 2>/dev/null || echo "")
     if [ -n "${ha_core_info}" ]; then
         [ "$(echo "${ha_core_info}" | jq -r '.data.ssl // false')" = "true" ] && ha_core_scheme="https"

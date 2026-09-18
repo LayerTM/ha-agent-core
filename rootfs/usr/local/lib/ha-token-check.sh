@@ -13,6 +13,9 @@
 # that could not run must never be reported as either verdict. The token is
 # never printed.
 
+# shellcheck source-path=SCRIPTDIR source=ha-curl.sh
+source "${BASH_SOURCE[0]%/*}/ha-curl.sh"
+
 # ha_token_status <core url> <token>
 # Prints one word plus the HTTP code: `accepted <code>`, `rejected <code>` or
 # `unreachable <code>` (`000` when curl could not reach Core at all).
@@ -22,8 +25,8 @@ ha_token_status() {
     # refused connection, the 10 s timeout — and then exits non-zero. Adding
     # `|| printf '000'` here appended a second `000` to that, so the line the user
     # read said `HTTP 000000`.
-    code=$(curl -s -o /dev/null -m 10 -w '%{http_code}' \
-        -H "Authorization: Bearer ${token}" "${url}/api/" 2>/dev/null)
+    code=$(ha_curl "${token}" -s -o /dev/null -m 10 -w '%{http_code}' \
+        "${url}/api/" 2>/dev/null)
     code=${code:-000}
     case "${code}" in
         2??) printf 'accepted %s\n' "${code}" ;;
