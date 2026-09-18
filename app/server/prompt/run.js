@@ -538,10 +538,36 @@ function run({
       : TIMEOUT_MS;
     const wantedBasenames = wantedHaBasenames(mode, intents);
 
+    // Set by whichever exit runs first, so the other one cannot run at all.
+    let settled = false;
+
     let engine;
     let spec;
     let child;
     let decode;
+
+    // An adapter may allocate for one run in `launch` — a scratch directory, an
+    // entry in a live set — and only the core knows when that run is over. This
+    // tells it, exactly once, on EVERY exit from run(): an answer, a timeout, an
+    // abort, a kill, and the spawn failure below, where the allocation is
+    // already made and no agent ever runs. `spec` is the identity the adapter
+    // received in `launch` and `createDecoder`, so nothing new is threaded
+    // through. An adapter that allocates nothing does not ship the member.
+    let released = false;
+    const endRun = () => {
+      if (released || !spec) return;
+      released = true;
+      const tell = adapter().runner.endRun;
+      if (typeof tell !== 'function') return;
+      try {
+        tell(spec);
+      } catch (err) {
+        // The run is over either way; a failed cleanup must not replace its
+        // outcome, and it must never reach a caller as a rejection.
+        console.error(`[prompt] engine adapter: endRun failed: ${err.message}`);
+      }
+    };
+
     try {
       engine = adapter().descriptor.engine;
       spec = launchSpec({
@@ -557,13 +583,14 @@ function run({
         detached: true, // own process group -> group SIGKILL reaps MCP children
       });
     } catch (err) {
+      settled = true;
+      endRun();
       resolve({ status: 'error', reason: 'spawn-failed', message: `spawn failed: ${err.message}` });
       return;
     }
     children.add(child);
     const { read } = spec;
 
-    let settled = false;
     let timedOut = false;
     let aborted = false;
     let streamBytes = 0;
@@ -616,6 +643,7 @@ function run({
       if (signal) signal.removeEventListener('abort', onAbort);
       killGroup(child);
       children.delete(child);
+      endRun();
       resolve(outcome);
     };
 

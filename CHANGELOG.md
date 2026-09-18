@@ -6,6 +6,18 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Adapter API 5 gains an optional `runner.endRun(spec)`: the core tells the
+  adapter that one run is over, once, on every ending — an answer, a model
+  error, a timeout, an abort, a kill, and a failure to spawn, where the run
+  never started but `launch` had already allocated. Until now nothing in the
+  core said so, so an adapter that allocated per run (a scratch directory, an
+  entry in a live set) could only free it from a terminal event of the engine's
+  own, and a run that ended any other way left it behind for the life of the
+  process. The member is optional and the API version does not change: an
+  adapter that allocates nothing per run needs no release.
+
 ## [0.6.0]
 
 ### Changed

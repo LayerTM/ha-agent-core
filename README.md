@@ -39,6 +39,7 @@ valid (see [Names](#names) and [Console pages](#console-pages)):
 | `runner.bin` | string | the agent executable a prompt run starts (`CLAUDE_PROMPT_BIN` overrides it) |
 | `runner.launch(spec, { env })` | function | `{ args, env }` for one run (see below) |
 | `runner.createDecoder(spec)` | function | a function turning one parsed line of the agent's JSON-lines output into a list of run events |
+| `runner.endRun(spec)` | optional function | free what this run allocated (a scratch directory, an entry in a live set). Called once per run on EVERY ending — an answer, a model error, a timeout, an abort, a kill, and a failure to spawn, where the run never started but `launch` had already allocated. `spec` is the one `launch` and `createDecoder` received, so it is the run's identity. It may arrive for a `spec` nothing was allocated for, so it must tolerate that and be idempotent; a throw is logged and never changes the run's outcome. An adapter that allocates nothing per run does not ship it. A process that is killed outright never reaches it, so an adapter whose allocation outlives the process needs its own way back to it |
 | `runner.toolName(basename)` | function | the name the agent gives a tool of the `ha` MCP server |
 | `runner.toolBasename(name)` | function | the basename of such a tool name, or `null` for any other tool |
 | `prompt.limitsSource({ apiKey, oauthToken, homeDir })` | function | the account's limits: `null` without a credential, or `{ mode, key, read(fetch)? }` (see below) |
