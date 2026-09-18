@@ -73,6 +73,14 @@ function createNeutralAdapter() {
     runs: [], // every options object handed to the scripted run
     script: [], // queued (opts) => outcome | Promise<outcome>; empty → okOutcome()
     launches: [], // every spec handed to runner.launch
+    // The adapter's own per-run allocation — a real directory, which is what a
+    // leak leaves behind. Kept in a STRONG map so a test can look for the leak
+    // instead of waiting for a collector.
+    runDirs: new Map(), // spec -> its directory, until endRun removes it
+    // Every endRun call, with whether the directory was STILL THERE when the
+    // call arrived. A test that only looked afterwards could not tell the call
+    // from a sweep, a boot wipe or a collected decoder.
+    endRuns: [], // { spec, existed }
     tapes: [], // queued tapes for the agent process; empty → okTape()
     mcpConfigs: [],
     removedSessions: [],
@@ -102,6 +110,12 @@ function createNeutralAdapter() {
       // pass on; a Supervisor token it tries to pass must not arrive.
       launch(spec, { env }) {
         state.launches.push(spec);
+        // Allocate for this run where a real adapter does: in launch, which the
+        // core calls before spawning, so a spawn failure leaks it unless the
+        // core says the run ended.
+        const runDir = path.join(tapeDir(), `run-${state.launches.length}`);
+        fs.mkdirSync(runDir, { recursive: true });
+        state.runDirs.set(spec, runDir);
         const tape = state.tapes.shift() || okTape();
         const file = path.join(tapeDir(), `tape-${state.launches.length}.json`);
         fs.writeFileSync(file, JSON.stringify(tape));
@@ -112,6 +126,16 @@ function createNeutralAdapter() {
             ...(env.NEUTRAL_LEAK_TEST ? { SUPERVISOR_TOKEN: 'leak', TERM: 'xterm', PATH: '/leak' } : {}),
           },
         };
+      },
+      // The contract's optional terminal call: free what launch allocated for
+      // this run. Recorded before the removal, so the assertion is about the
+      // call and not about the final state of the disk.
+      endRun(spec) {
+        const dir = state.runDirs.get(spec);
+        state.endRuns.push({ spec, existed: Boolean(dir) && fs.existsSync(dir) });
+        if (!dir) return;
+        state.runDirs.delete(spec);
+        fs.rmSync(dir, { recursive: true, force: true });
       },
       createDecoder() {
         return (event) => {

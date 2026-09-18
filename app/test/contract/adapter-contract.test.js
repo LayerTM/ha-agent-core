@@ -110,6 +110,22 @@ test('the optional remote window may be absent, but not malformed', () => {
   );
 });
 
+test('the optional terminal call may be absent, but not malformed, and needs no api bump', () => {
+  const { adapter } = createNeutralAdapter();
+  assert.equal(contract.API_VERSION, 5);
+  const { endRun, ...runner } = adapter.runner;
+  assert.equal(typeof endRun, 'function');
+  // An adapter that allocates nothing per run ships no `endRun` and stays valid
+  // at this apiVersion: that is what makes the member optional rather than a bump.
+  const allocatesNothing = { ...adapter, runner };
+  assert.equal(allocatesNothing.runner.endRun, undefined);
+  assert.equal(contract.validateAdapter(allocatesNothing), allocatesNothing);
+  assert.throws(
+    () => contract.validateAdapter({ ...adapter, runner: { ...runner, endRun: 'end' } }),
+    /runner\.endRun must be a function when present/,
+  );
+});
+
 test('an adapter can be installed once, before first use, and only a valid one with valid names', () => {
   const { adapter, branding } = createNeutralAdapter();
   assert.throws(() => contract.useAdapter({ ...adapter, apiVersion: 2 }, branding), /apiVersion/);

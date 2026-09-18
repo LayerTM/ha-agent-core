@@ -43,6 +43,7 @@ const REQUIRED = {
 // Absent means the feature is off; present must have this type.
 const OPTIONAL = {
   'console.remoteWindow': 'function',
+  'runner.endRun': 'function',
   'descriptor.versionAlias': 'string',
   'descriptor.reportsCost': 'boolean',
   'prompt.secretPatterns': 'object',

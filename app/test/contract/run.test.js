@@ -261,6 +261,94 @@ test('nothing the agent started outlives the run, however it ends', async () => 
   assert.equal(await gone(Number(fs.readFileSync(pidFile, 'utf8'))), true, 'abort');
 });
 
+// --- the end of a run, as the adapter is told it ----------------------------------
+
+test('the adapter is told a run ended exactly once, whatever ended it', async () => {
+  assert.equal(state.runDirs.size, 0, 'an earlier run leaked its directory');
+  const cases = [
+    ['a normal exit', [result(answer('done'))], 'ok', {}],
+    ['a model error', [{ emit: { type: 'result', isError: true } }], 'error', {}],
+    ['no result', [{ exit: 2 }], 'error', {}],
+    ['a timeout', [{ hang: true }], 'timeout', { timeoutMs: 1 }],
+  ];
+  for (const [label, tape, status, opts] of cases) {
+    state.endRuns.length = 0;
+    const outcome = await runWith(tape, opts);
+    assert.equal(outcome.status, status, label);
+    assert.equal(state.endRuns.length, 1, `${label}: endRun ran ${state.endRuns.length} times`);
+    // The oracle: the allocation was STILL THERE when the call arrived. Asserting
+    // only that it is gone afterwards cannot tell the call from a sweep, a boot
+    // wipe, or a decoder the collector happened to take.
+    assert.equal(state.endRuns[0].existed, true, `${label}: there was nothing left to free`);
+    assert.equal(state.endRuns[0].spec, lastSpec(), `${label}: another run's spec`);
+    assert.equal(state.runDirs.size, 0, `${label}: the run directory leaked`);
+  }
+  // An abort and a kill are the two endings that produce no terminal event of
+  // their own, which is why they were the leak.
+  state.endRuns.length = 0;
+  const abort = new AbortController();
+  const aborting = runWith([{ hang: true }], { signal: abort.signal });
+  await new Promise((r) => setTimeout(r, 100));
+  abort.abort();
+  assert.equal((await aborting).reason, 'aborted');
+  assert.equal(state.endRuns.length, 1, 'abort: endRun');
+  assert.equal(state.endRuns[0].existed, true, 'abort: there was nothing left to free');
+
+  state.endRuns.length = 0;
+  const killed = runWith([{ hang: true }]);
+  await new Promise((r) => setTimeout(r, 100));
+  core.shutdown();
+  await killed;
+  assert.equal(state.endRuns.length, 1, 'kill: endRun');
+  assert.equal(state.endRuns[0].existed, true, 'kill: there was nothing left to free');
+  assert.equal(state.runDirs.size, 0, 'the run directory leaked');
+});
+
+test('a run that never spawns frees what launch allocated', async () => {
+  state.endRuns.length = 0;
+  const original = adapter.runner.launch;
+  try {
+    // The allocation is made, and then composing the command line fails. This is
+    // the exit where no agent ever runs: the adapter has a directory and there is
+    // no run to end it.
+    adapter.runner.launch = (spec, env) => { original(spec, env); throw new Error('no'); };
+    const outcome = await core.run({ bin: process.execPath, mode: 'read', prompt: 'x', intents: [] });
+    assert.equal(outcome.reason, 'spawn-failed');
+  } finally {
+    adapter.runner.launch = original;
+  }
+  assert.equal(state.endRuns.length, 1);
+  assert.equal(state.endRuns[0].existed, true, 'the launch-side allocation was already gone');
+  assert.equal(state.runDirs.size, 0, 'the pre-spawn exit leaked the run directory');
+});
+
+test('the member is optional, and a leak is what its absence looks like', async () => {
+  const original = adapter.runner.endRun;
+  delete adapter.runner.endRun;
+  try {
+    assert.equal((await runWith([result(answer('fine'))])).text, 'fine');
+  } finally {
+    adapter.runner.endRun = original;
+  }
+  // An adapter that does not ship the member is told nothing and keeps its
+  // directory — the state this change exists to end, and the control that makes
+  // every `existed: true` above mean the call did the freeing.
+  assert.equal(state.runDirs.size, 1);
+  for (const dir of state.runDirs.values()) fs.rmSync(dir, { recursive: true, force: true });
+  state.runDirs.clear();
+});
+
+test('an endRun that throws does not change the run outcome', async () => {
+  const original = adapter.runner.endRun;
+  adapter.runner.endRun = () => { throw new Error('cleanup bug'); };
+  try {
+    assert.equal((await runWith([result(answer('fine'))])).text, 'fine');
+  } finally {
+    adapter.runner.endRun = original;
+  }
+  state.runDirs.clear();
+});
+
 test('shutdown ends every running agent', async () => {
   const pending = runWith([{ hang: true }]);
   await new Promise((r) => setTimeout(r, 200));
