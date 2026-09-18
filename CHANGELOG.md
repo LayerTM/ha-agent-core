@@ -6,6 +6,8 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-09-18
+
 ### Changed
 
 - The relay says when it refuses a request. A bearer it does not know was refused
