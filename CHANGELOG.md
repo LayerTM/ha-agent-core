@@ -6,6 +6,18 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- The offline watch-list starts empty. Up to and including 0.7.1 the image carried
+  a fixed entity id as the built-in value of that list, so a home without that
+  exact id got an alert about a device it does not have while the devices it does
+  have went unwatched. That id is gone. Leaving `alert_offline_entities` unset now
+  means exactly what setting it to `[]` means: nothing is watched, and watching
+  begins when the user names an entity. The
+  opposite polarity of `alert_temp_entities` (empty means every temperature
+  sensor) is deliberate and now stated where the value is read: that check knows
+  what to look at from the device class, this one has nothing to widen to.
+
 ## [0.7.1] - 2026-09-18
 
 ### Added
