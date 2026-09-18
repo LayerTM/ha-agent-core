@@ -6,6 +6,8 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-09-18
+
 ### Added
 
 - Adapter API 5 gains a leaf module, `app/server/prompt/ha-tool-names.js`: how
