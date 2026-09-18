@@ -72,6 +72,8 @@ jobs:
         run: npm run test:monitor && npm run test:digest
       - name: Run the usage report tests (bash + python3 + jq)
         run: npm run test:usage
+      - name: Run the audit hook tests (bash + jq)
+        run: npm run test:audit
       - name: Run the start and notification scripts in the add-on base image
         run: npm run test:image
 

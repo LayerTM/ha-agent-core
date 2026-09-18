@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Claude Code PostToolUse hook — audit log. Record the HA-affecting actions
+# Claude Code PostToolUse / PostToolUseFailure hook — audit log. Record the
+# HA-affecting actions
 # Claude takes (service calls, config-file edits, Core restarts/reloads,
 # backups, and anything a connected tool server changes) to
 # /data/claude-audit.log. View with `ha-audit`.
@@ -32,6 +33,22 @@
 # reset_snapshot all read as "reads". A list is acceptable on the READ side for
 # the reason above — if a server gains a read tool it costs one extra line, never
 # a missed change.
+#
+# A call that FAILED is recorded too, marked `(failed)`. The engine does not send
+# a failure to PostToolUse at all: a tool that answers with an error — an MCP
+# reply carrying isError, a shell command with a non-zero status — reaches
+# PostToolUseFailure instead, and that event carries `.error` in place of
+# `.tool_response`. So a hook registered only for the success event wrote nothing
+# whatever for a failed action, and the log's silence read as "nothing was done"
+# when something was done and it failed. The marker is the same word the prompt
+# server's relay already writes for the same outcome, so one log keeps one
+# vocabulary. An interrupted call arrives here as well and is recorded the same
+# way, deliberately: the hook cannot know how far the action got, and the
+# polarity throughout this file is that the unproven is recorded, not skipped.
+#
+# NOTE for whoever registers this hook: the marker only ever appears if the hook
+# is registered for PostToolUseFailure beside PostToolUse. Registration lives
+# with the add-on, not here.
 set -o pipefail
 
 # Same override convention as cc-alerts and cc-monitor, so the read/write split
@@ -40,8 +57,14 @@ DATA_DIR="${CC_AUDIT_DATA_DIR:-/data}"
 
 input="$(cat)"
 tool="$(printf '%s' "${input}" | jq -r '.tool_name // ""' 2>/dev/null)"
+event="$(printf '%s' "${input}" | jq -r '.hook_event_name // ""' 2>/dev/null)"
 ts="$(date '+%Y-%m-%d %H:%M:%S')"
 line=""
+
+# The outcome marker. Empty for a call that succeeded, so every line this hook
+# wrote before is byte-identical to what it writes now.
+outcome=""
+[ "${event}" = "PostToolUseFailure" ] && outcome=" (failed)"
 
 # Was this a preview rather than a change? Several dashboard tools take a
 # `dry_run`, and the flag sits LAST in their arguments — past the 300-character
@@ -68,7 +91,7 @@ case "${tool}" in
     Bash)
         cmd="$(printf '%s' "${input}" | jq -r '.tool_input.command // ""' 2>/dev/null)"
         if printf '%s' "${cmd}" | grep -qE 'core/api/services/[a-z_]+/[a-z_]+|ha core (restart|stop|start|update|reload|rebuild)|ha backups|\bha-backup\b'; then
-            line="${ts}  cmd: $(printf '%s' "${cmd}" | tr '\n' ' ' | head -c 300)"
+            line="${ts}  cmd${outcome}: $(printf '%s' "${cmd}" | tr '\n' ' ' | head -c 300)"
         fi
         ;;
     Edit|Write|MultiEdit|NotebookEdit)
@@ -76,7 +99,7 @@ case "${tool}" in
         # this hook because the matcher's `Edit` is an unanchored regex. Both keys
         # are read so adding it here is not a silent no-op.
         fp="$(printf '%s' "${input}" | jq -r '.tool_input.file_path // .tool_input.notebook_path // ""' 2>/dev/null)"
-        case "${fp}" in /homeassistant/*|/config/*) line="${ts}  ${tool}: $(printf '%s' "${fp}" | head -c 300)" ;; esac
+        case "${fp}" in /homeassistant/*|/config/*) line="${ts}  ${tool}${outcome}: $(printf '%s' "${fp}" | head -c 300)" ;; esac
         ;;
     mcp__*)
         # Read-only verbs, matched on the tool's own name (the part after the
@@ -90,9 +113,11 @@ case "${tool}" in
                 # jq -c keeps the arguments on one line; the cap keeps a whole
                 # dashboard configuration from filling the log with one entry.
                 # The dry-run marker goes BEFORE the arguments so the cap cannot
-                # cut it off.
+                # cut it off, and it wins over `(failed)` — the same precedence
+                # the relay uses: a preview that failed changed nothing either
+                # way, and the preview is the stronger statement about the home.
                 args="$(printf '%s' "${input}" | jq -c '.tool_input // {}' 2>/dev/null | tr -d '\n')"
-                line="${ts}  ${tool}${preview}: $(printf '%s' "${args}" | head -c 300)"
+                line="${ts}  ${tool}${preview:-${outcome}}: $(printf '%s' "${args}" | head -c 300)"
                 ;;
         esac
         ;;
