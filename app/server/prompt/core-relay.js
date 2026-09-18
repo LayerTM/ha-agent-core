@@ -42,6 +42,7 @@ const { MAX_BODY_BYTES, judgeClientBody, filterServerJson, createSseFilter } = r
 const MCP_PATH = '/api/mcp';
 const MCP_METHODS = new Set(['POST', 'GET', 'DELETE']);
 const CAMERA_PATH_RE = /^\/api\/camera_proxy\/[a-z_]+\.[a-z0-9_]+$/;
+const CAMERA_PREFIX = '/api/camera_proxy/';
 
 // The record of one call, in the shape the audit hook writes for a console run,
 // so one log holds one format: `<tool> run=<id><mark>: <arguments>`. The caps are
@@ -230,7 +231,7 @@ async function startCoreRelay({ coreOrigin, haToken, log = () => {}, record = ()
             if (!pending) { pending = new Map(); awaiting.set(runId, pending); }
             for (const call of verdict.calls) pending.set(String(call.id), { ...call, runId });
           }
-          forward(req, res, pathname, body, observerFor(runId));
+          forward(req, res, pathname, body, observerFor(runId), runId);
           return;
         }
         res.writeHead(verdict.status, verdict.type ? { 'content-type': verdict.type } : {});
@@ -244,13 +245,13 @@ async function startCoreRelay({ coreOrigin, haToken, log = () => {}, record = ()
       return;
     }
     req.resume();
-    forward(req, res, pathname, null, observerFor(runId));
+    forward(req, res, pathname, null, observerFor(runId), runId);
   });
 
   // The request to Core, with the Home Assistant token in place of the relay's.
   // Only POST /api/mcp carries a body to Core: `body` is that body, already read
   // and judged, or null for a request that sends none. Nothing is streamed.
-  function forward(req, res, pathname, body, observe) {
+  function forward(req, res, pathname, body, observe, runId) {
     const headers = { authorization: `Bearer ${haToken}` };
     for (const [name, value] of Object.entries(req.headers)) {
       if (FORWARD_TO_CORE.has(name)) headers[name] = value;
@@ -271,6 +272,13 @@ async function startCoreRelay({ coreOrigin, haToken, log = () => {}, record = ()
         ...(secure ? { rejectUnauthorized: false } : {}),
       },
       (upRes) => {
+        if (CAMERA_PATH_RE.test(pathname)) {
+          // A camera read is a Home Assistant action too, and it is not a tool
+          // call: no name, no arguments, so it gets a line of its own rather than
+          // a place in one that would have to leave them empty.
+          const ok = upRes.statusCode >= 200 && upRes.statusCode < 300;
+          record(capBytes(`camera run=${runId}${ok ? '' : ' (failed)'}: ${pathname.slice(CAMERA_PREFIX.length)}`, LINE_CAP));
+        }
         // A redirect is never followed: node does not follow by default, and the
         // Authorization header must not travel to another origin. Surfaced as a
         // plain error so it cannot be mistaken for an auth failure.

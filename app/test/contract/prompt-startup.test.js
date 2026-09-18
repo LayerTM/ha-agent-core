@@ -17,7 +17,7 @@ const TOKEN = 'startup-token-0123456789abcdef';
 
 after(() => fs.rmSync(TMP, { recursive: true, force: true }));
 
-test('the bootstrap refuses to start without the audit hook, then starts with it', async () => {
+test('the bootstrap starts whatever the engine says about its own hooks', async () => {
   // Read by the bootstrap at load time.
   process.env.CLAUDE_PROMPT_PORT = '0';
   process.env.CLAUDE_PROMPT_HOST = TEST_HOST;
@@ -36,22 +36,16 @@ test('the bootstrap refuses to start without the audit hook, then starts with it
   const { adapter, state, branding } = createNeutralAdapter();
   useAdapter(adapter, branding);
   const promptServer = require('../../server/prompt');
-  assert.equal(promptServer.hasAuditHook('neutral-audit-hook'), true, 'the exported check is the adapter\'s');
-  assert.equal(promptServer.hasAuditHook('{}'), false);
+  assert.equal(promptServer.hasAuditHook, undefined, 'the core no longer asks the engine about its hooks');
 
-  // Without the hook: nothing listens, nothing is written.
+  // Settings that carry no hook at all: the API starts, because what a chat
+  // request does to Home Assistant is recorded by the relay it has to pass.
   process.env.CLAUDE_PROMPT_SETTINGS = 'no hook here';
-  const refused = await captureLog(() => promptServer.start());
-  assert.equal(typeof refused.result, 'function');
-  assert.equal(reportedPort(refused.logged.join('\n'), 'prompt server'), null, 'nothing listens');
-  assert.deepEqual(state.mcpConfigs, []);
-  // Old transcripts are removed before the gate, whether or not the API starts.
+  const started = await captureLog(() => promptServer.start());
+  // Old transcripts are still removed at every start.
   assert.deepEqual(state.removedSessions, [{
     homeDir: path.join(TMP, 'home'), workDir: path.join(TMP, 'claude-prompt', 'work'),
   }]);
-
-  process.env.CLAUDE_PROMPT_SETTINGS = 'neutral-audit-hook';
-  const started = await captureLog(() => promptServer.start());
   const shutdown = started.result;
   const port = reportedPort(started.logged.join('\n'), 'prompt server');
   try {
@@ -76,7 +70,8 @@ test('the bootstrap refuses to start without the audit hook, then starts with it
     });
     assert.equal(answer.status, 200);
     assert.equal((await answer.json()).text, 'key [REDACTED]');
-    assert.equal(state.launches[0].settings, 'neutral-audit-hook');
+    // The settings still reach the run unchanged; they are simply no longer a gate.
+    assert.equal(state.launches[0].settings, 'no hook here');
   } finally {
     shutdown();
   }

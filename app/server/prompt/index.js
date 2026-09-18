@@ -82,12 +82,6 @@ function writeMcpConfig(dir, url, bearer) {
   return adapter().prompt.writeMcpConfig({ dir, url, bearer });
 }
 
-// The settings a chat run gets instead of the console's settings files carry
-// the audit hook. True only when a hook is there to record actions.
-function hasAuditHook(raw) {
-  return adapter().prompt.hasAuditHook(raw);
-}
-
 // Transcripts that earlier versions let chat runs save are removed at every
 // start. Resolves to the number of transcripts removed.
 function removeSavedPromptSessions(homeDir, workDir) {
@@ -164,14 +158,13 @@ async function start() {
     log('disabled via prompt_api option');
     return () => {};
   }
-  // Without the audit hook every Home Assistant action a chat request takes
-  // would go unrecorded, so the prompt API does not start at all.
+  // Every Home Assistant action a chat request takes is recorded by the relay it
+  // must pass (core-relay.js), so the answer to "will this run's actions be
+  // recorded?" is the core's own and the same for every engine. It used to be
+  // the engine's answer about itself — whether its settings carried an audit
+  // hook — which an engine that cannot run hooks could not give truthfully, and
+  // which nothing behind the flag ever checked.
   const claudeSettings = process.env.CLAUDE_PROMPT_SETTINGS || '';
-  if (!hasAuditHook(claudeSettings)) {
-    log(`ERROR: ${claudeSettings ? 'CLAUDE_PROMPT_SETTINGS has no audit hook' : 'CLAUDE_PROMPT_SETTINGS is empty'}`
-      + ' — the prompt API is not started, because chat actions would not be audited');
-    return () => {};
-  }
 
   // A USD cap can only be kept by an engine that reports what a run cost; for any
   // other, the prompt API does not start rather than claim to enforce it.
@@ -320,4 +313,4 @@ async function start() {
   };
 }
 
-module.exports = { start, hasAuditHook, removeSavedPromptSessions };
+module.exports = { start, removeSavedPromptSessions };

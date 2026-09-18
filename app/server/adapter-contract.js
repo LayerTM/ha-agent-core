@@ -31,7 +31,6 @@ const REQUIRED = {
   'prompt.limitsSource': 'function',
   'prompt.authConfigured': 'function',
   'prompt.writeMcpConfig': 'function',
-  'prompt.hasAuditHook': 'function',
   'prompt.removeSavedSessions': 'function',
   'prompt.credentials': 'function',
   'prompt.secretValues': 'function',

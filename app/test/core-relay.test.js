@@ -358,3 +358,34 @@ test('a call Home Assistant never answers is recorded when the run ends, and an 
     h.done();
   }
 });
+
+test('a camera read is recorded too, with a line of its own', async () => {
+  const lines = [];
+  const pics = http.createServer((req, res) => {
+    if (req.url === '/api/camera_proxy/camera.missing') { res.writeHead(404); res.end(); return; }
+    res.writeHead(200, { 'content-type': 'image/jpeg' });
+    res.end(Buffer.from([0xff, 0xd8, 0xff]));
+  });
+  await new Promise((r) => pics.listen(0, '127.0.0.1', r));
+  const relayHere = await startCoreRelay({
+    coreOrigin: `http://127.0.0.1:${pics.address().port}`, haToken: HA_TOKEN, record: (line) => lines.push(line),
+  });
+  try {
+    const token = relayHere.issue('run-11');
+    const get = (entity) => fetch(`${relayHere.url}/api/camera_proxy/${entity}`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    await get('camera.front_door');
+    await get('camera.missing');
+    assert.deepEqual(lines, [
+      'camera run=run-11: camera.front_door',
+      'camera run=run-11 (failed): camera.missing',
+    ]);
+    // A read nobody may make is not a run's action, so it is not one run's record.
+    await fetch(`${relayHere.url}/api/camera_proxy/camera.front_door`, { headers: { authorization: 'Bearer nope' } });
+    assert.equal(lines.length, 2);
+  } finally {
+    relayHere.close();
+    pics.close();
+  }
+});
