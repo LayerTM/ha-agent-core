@@ -354,6 +354,21 @@ async function startCoreRelay({ coreOrigin, haToken, log = () => {}, record = ()
         }
         const type = String(upRes.headers['content-type'] || '');
         if (pathname !== MCP_PATH || !(upRes.statusCode >= 200 && upRes.statusCode < 300)) {
+          // An answer Home Assistant refused used to travel back untouched and
+          // unsaid: the agent reported that its tool was unavailable, this relay's
+          // log held nothing, and the audit records only calls that happened. A
+          // wrong Home Assistant token therefore looked exactly like an agent that
+          // never dialled — the failure that explains everything was the one fact
+          // nobody could see. The wording separates it from this relay's own
+          // refusal (`relay refused …`, a bearer THIS relay does not know), and
+          // 401/403 are named as configuration, because that is what the person
+          // running the add-on can fix. The token is never logged.
+          if (!(upRes.statusCode >= 200 && upRes.statusCode < 300)) {
+            const what = upRes.statusCode === 401 || upRes.statusCode === 403
+              ? `refused the add-on's Home Assistant token (${upRes.statusCode}) — check the token in the add-on's configuration`
+              : `answered ${upRes.statusCode}`;
+            log(`relay upstream: Home Assistant ${what} for ${req.method} ${pathname}`);
+          }
           res.writeHead(upRes.statusCode, out);
           upRes.pipe(res);
         } else if (type.startsWith('text/event-stream')) {
