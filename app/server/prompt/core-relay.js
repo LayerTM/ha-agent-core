@@ -43,6 +43,51 @@ const MCP_PATH = '/api/mcp';
 const MCP_METHODS = new Set(['POST', 'GET', 'DELETE']);
 const CAMERA_PATH_RE = /^\/api\/camera_proxy\/[a-z_]+\.[a-z0-9_]+$/;
 
+// The record of one call, in the shape the audit hook writes for a console run,
+// so one log holds one format: `<tool> run=<id><mark>: <arguments>`. The caps are
+// the hook's, in bytes, because the arguments are the model's text: capped so one
+// dashboard configuration cannot fill the log, and stripped of control characters
+// so nothing in them can start a line of its own.
+// eslint-disable-next-line no-control-regex -- these are exactly what must go
+const CONTROL = /[\u0000-\u001f\u007f]/g;
+const ARGS_CAP = 300;
+const LINE_CAP = 1000;
+const DRY_RUN_TEXT = /"dry_run"\s*:\s*true/;
+
+function capBytes(text, limit) {
+  const buf = Buffer.from(text, 'utf8');
+  if (buf.length <= limit) return text;
+  return buf.subarray(0, limit).toString('utf8').replace(/\uFFFD+$/, '');
+}
+
+// Only an explicit dry_run makes a line a preview — in the arguments, in the
+// answer, or in the text the answer carries. Anything unproven is a change.
+// (Same polarity, and the same three places, as cc-hook-audit.)
+function isDryRun(call, answer) {
+  if (call.args && typeof call.args === 'object' && call.args.dry_run === true) return true;
+  const result = answer && answer.result;
+  if (typeof result === 'string') return DRY_RUN_TEXT.test(result);
+  if (result && typeof result === 'object') {
+    if (result.dry_run === true) return true;
+    const texts = Array.isArray(result.content)
+      ? result.content.map((c) => (c && typeof c.text === 'string' ? c.text : '')).join(' ')
+      : '';
+    return DRY_RUN_TEXT.test(texts);
+  }
+  return false;
+}
+
+function describeCall(call, mark) {
+  let args;
+  try {
+    args = JSON.stringify(call.args === undefined ? {} : call.args);
+  } catch {
+    args = '(arguments that are not JSON)';
+  }
+  const line = `${call.name || '(unnamed tool)'} run=${call.runId}${mark}: ${capBytes(args, ARGS_CAP)}`;
+  return capBytes(line.replace(CONTROL, ' '), LINE_CAP);
+}
+
 // Headers copied client -> Core. `authorization` is deliberately absent: it is
 // replaced, never forwarded. Neither are `content-length` and
 // `transfer-encoding`: the relay sets the length of the one body it sends. The
@@ -108,6 +153,7 @@ function deny(res, status, message) {
  * @param {string} opts.coreOrigin  Origin derived from the Supervisor (never user input).
  * @param {string} opts.haToken     The Home Assistant LLAT. Stays in this process.
  * @param {(msg: string) => void} [opts.log]
+ * @param {(line: string) => void} [opts.record]  One audit line per tool call.
  * @returns {Promise<{
  *   url: string, port: number, issue: (runId: string) => string,
  *   revoke: (token: string) => void, close: () => void,
@@ -119,9 +165,27 @@ function deny(res, status, message) {
  * is the only thing that can tell them apart without asking Home Assistant for
  * something Home Assistant never promised.
  */
-async function startCoreRelay({ coreOrigin, haToken, log = () => {} }) {
+async function startCoreRelay({ coreOrigin, haToken, log = () => {}, record = () => {} }) {
   /** @type {Map<string, string>} bearer -> run id */
   const runs = new Map();
+  // Calls a run has sent and Home Assistant has not answered yet, per run rather
+  // than per request: the answer may come back on this POST or on the run's own
+  // event stream, and either resolves it.
+  /** @type {Map<string, Map<string, {id: unknown, name: string, args: unknown, runId: string}>>} */
+  const awaiting = new Map();
+
+  function observerFor(runId) {
+    return (message) => {
+      if (!message || typeof message !== 'object' || !('id' in message) || message.id === null) return;
+      const pending = awaiting.get(runId);
+      const call = pending && pending.get(String(message.id));
+      if (!call) return;
+      pending.delete(String(message.id));
+      const failed = message.error !== undefined
+        || (message.result && typeof message.result === 'object' && message.result.isError === true);
+      record(describeCall(call, isDryRun(call, message) ? ' (dry-run)' : (failed ? ' (failed)' : '')));
+    };
+  }
   const target = new URL(coreOrigin);
   const secure = target.protocol === 'https:';
   const transport = secure ? https : http;
@@ -160,7 +224,13 @@ async function startCoreRelay({ coreOrigin, haToken, log = () => {} }) {
         }
         const verdict = judgeClientBody(body.toString('utf8'));
         if (verdict.forward === true) {
-          forward(req, res, pathname, body);
+          // Registered before the body goes on, so an answer cannot arrive first.
+          if (verdict.calls && verdict.calls.length) {
+            let pending = awaiting.get(runId);
+            if (!pending) { pending = new Map(); awaiting.set(runId, pending); }
+            for (const call of verdict.calls) pending.set(String(call.id), { ...call, runId });
+          }
+          forward(req, res, pathname, body, observerFor(runId));
           return;
         }
         res.writeHead(verdict.status, verdict.type ? { 'content-type': verdict.type } : {});
@@ -174,13 +244,13 @@ async function startCoreRelay({ coreOrigin, haToken, log = () => {} }) {
       return;
     }
     req.resume();
-    forward(req, res, pathname, null);
+    forward(req, res, pathname, null, observerFor(runId));
   });
 
   // The request to Core, with the Home Assistant token in place of the relay's.
   // Only POST /api/mcp carries a body to Core: `body` is that body, already read
   // and judged, or null for a request that sends none. Nothing is streamed.
-  function forward(req, res, pathname, body) {
+  function forward(req, res, pathname, body, observe) {
     const headers = { authorization: `Bearer ${haToken}` };
     for (const [name, value] of Object.entries(req.headers)) {
       if (FORWARD_TO_CORE.has(name)) headers[name] = value;
@@ -223,12 +293,12 @@ async function startCoreRelay({ coreOrigin, haToken, log = () => {} }) {
           delete out['content-length'];
           res.writeHead(upRes.statusCode, out);
           upRes.setEncoding('utf8');
-          const sse = createSseFilter((chunk) => res.write(chunk));
+          const sse = createSseFilter((chunk) => res.write(chunk), observe);
           upRes.on('data', (chunk) => sse.push(chunk));
           upRes.on('end', () => { sse.end(); res.end(); });
         } else if (type.startsWith('application/json')) {
           readBody(upRes, (raw) => {
-            const kept = raw === null ? '' : filterServerJson(raw.toString('utf8'));
+            const kept = raw === null ? '' : filterServerJson(raw.toString('utf8'), observe);
             if (kept === '') {
               delete out['content-type'];
               delete out['content-length'];
@@ -281,7 +351,14 @@ async function startCoreRelay({ coreOrigin, haToken, log = () => {} }) {
       return token;
     },
     revoke(token) {
+      const runId = runs.get(token);
       runs.delete(token);
+      if (runId === undefined) return;
+      // The run is over. A call Home Assistant never answered is still something
+      // the run asked for, and silence is not a record of it.
+      const pending = awaiting.get(runId);
+      awaiting.delete(runId);
+      if (pending) for (const call of pending.values()) record(describeCall(call, ' (no answer)'));
     },
     close() {
       runs.clear();

@@ -567,6 +567,27 @@ check "it runs the upkeep at once and then every interval, with the sweep days" 
 check "more than once" "$(( $(wc -l < "${work}/upkeep-calls") >= 2 ))" 1
 check "a sweep that is not a number stops it" "$(USAGE_SWEEP_DAYS=x bash "${upkeep}" 2>/dev/null; echo $?)" 64
 
+echo "the relay's own record shares the log and must not be read as chat spend"
+# The relay writes one line per Home Assistant call a prompt run makes, into this
+# same log, in the audit hook's shape. Those arguments are the model's text: a
+# line of them must never be counted, whatever it says.
+ad_="${work}/relayrec"; mkdir -p "${ad_}/s"
+rlog_="${ad_}/claude-audit.log"
+RTR="${ad_}/s/t.jsonl"; : > "${RTR}"
+{
+    printf '%s 10:00:00  prompt[read] caller=a status=200 tokens=chat:100:0:0:0 cost=$0.5000\n' "${today}"
+    printf '%s 10:00:01  HassTurnOn run=abc123: {"name":"lamp","note":"cost=$99.0000 tokens=evil:1000000:0:0:0"}\n' "${today}"
+    printf '%s 10:00:02  GetLiveContext run=abc123 (dry-run): {}\n' "${today}"
+} > "${rlog_}"
+rrep_() { CC_USAGE_AGENT_CMD="${work}/agent-usage" USAGE_CALLS="${work}/calls" USAGE_STATES="${work}/states" \
+    USAGE_LINES="${RTR}" USAGE_MORE="" USAGE_SOURCE=x CC_AUDIT_DATA_DIR="${ad_}" \
+    python3 "${bin}" --json 1; }
+out="$(rrep_)"
+check "the run's own line counts, the relay's records do not" \
+    "$(printf '%s' "${out}" | jq -c '[.tokens.all_time.input, .prompt_api_cost_usd.total]')" '[100,0.5]'
+check "and no model is invented from their arguments" \
+    "$(printf '%s' "${out}" | jq -r '[.by_model_recent|keys[]]|join(",")')" "chat"
+
 echo "ha-usage --maintain — what a crash and a swapped path must not cost"
 # A mutant is the same script with one part of a fix taken out. It proves the
 # check below fails without that part; a replacement that matches nothing is a
@@ -787,8 +808,8 @@ else
     fail "the mutant for the identity the sweep checks still applies" "no match" "a match"
 fi
 
-if [ "${ran}" -lt 117 ]; then
-    echo "FAIL: only ${ran} ha-usage assertions ran — expected at least 117"
+if [ "${ran}" -lt 119 ]; then
+    echo "FAIL: only ${ran} ha-usage assertions ran — expected at least 119"
     exit 1
 fi
 if [ "${fails}" -eq 0 ]; then
