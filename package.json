@@ -21,6 +21,7 @@
         "test:alerts",
         "test:config",
         "test:curl",
+        "test:ready",
         "test:monitor",
         "test:digest",
         "test:audit",

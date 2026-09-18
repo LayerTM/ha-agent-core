@@ -72,6 +72,8 @@ jobs:
         run: npm run test:monitor && npm run test:digest
       - name: Run the curl helper tests (bash + jq + curl, reads live processes)
         run: npm run test:curl
+      - name: Run the start-up waiting tests (bash + curl)
+        run: npm run test:ready
       - name: Run the usage report tests (bash + python3 + jq)
         run: npm run test:usage
       - name: Run the audit hook tests (bash + jq)

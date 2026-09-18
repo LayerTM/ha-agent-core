@@ -6,6 +6,18 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- The start-up questions wait for Home Assistant Core to be up. The add-on and
+  Core start together and nothing orders the two, so the check that asks whether
+  the token is accepted, and the question of where Core listens, could both be
+  asked before Core answered anything — reporting "HA Token could not be checked"
+  and falling back to the default port as if those were Home Assistant's answers.
+  Both now ask through one waiting rule, which repeats the question for a few
+  seconds while nothing answers and stops the moment something does. A refusal is
+  an answer: a rejected token is still reported as rejected, on the first attempt.
+  Start-up is not blocked in any case.
+
 ### Security
 
 - The token a call carries no longer travels on a command line. Every HTTP call
