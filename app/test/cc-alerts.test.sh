@@ -174,6 +174,19 @@ for entities in '' ', "alert_offline_entities": []'; do
     if notified; then fail "${what} must watch nothing (got: $(msg))"; else pass "${what} watches nothing"; fi
 done
 
+# --- 8a. The behaviour check above can only catch a built-in that happens to name
+#         an entity THIS fixture carries, and a built-in names whatever its author
+#         chose — so on its own it would pass against a script that injects some
+#         other id, which is exactly the shape being removed. The rule is therefore
+#         also asserted where it lives: the fallback for an absent list is the empty
+#         list, and no other. This catches ANY re-introduced default, not one id,
+#         and it needs no entity id of anyone's home in this repository. ---
+fallback="$(grep -o "offline_entities='[^']*'" "${script}")"
+case "${fallback}" in
+    "offline_entities='[]'") pass "an absent offline list falls back to the empty list, in the script itself";;
+    *) fail "the only literal offline list in the script must be '[]' (got: ${fallback:-none})";;
+esac
+
 # --- 8b. And the same fixture DOES alert once the user names that entity, so the
 #         silence above is the rule doing its job rather than a broken fixture. ---
 rm -f "${work}/alerts-state.json"
