@@ -43,14 +43,27 @@ fail() { printf '  NOT ok - %s\n' "$1"; fails=$((fails + 1)); }
 
 # Run one cycle. $1 = fixture file, $2 = "now" HH:MM. Result message → $notify_out
 # (cleared first, so absence of the file means "no notification was sent").
+errfile="${work}/stderr.txt"
 run() {
+    local rc
     rm -f "${notify_out}" "${notify_out}.title"
     CC_ALERTS_DATA_DIR="${work}" \
     CC_ALERTS_STATES_FILE="${fixtures}/$1" \
     CC_ALERTS_NOW="$2" \
     CC_ALERTS_NOTIFY_CMD="${stub}" \
     NOTIFY_OUT="${notify_out}" \
-        "${script}" --once
+        "${script}" --once 2>"${errfile}"
+    rc=$?
+    # The script's own stderr belongs to this harness: it carries the loop's
+    # `[cc-alerts]` lines, and ANYTHING ELSE there is a crash inside the script
+    # that exit 0 would hide. Checked here rather than let through, so the suite
+    # itself stays silent (app/test/contract/shell-suites.test.js).
+    if [ -s "${errfile}" ]; then
+        if grep -qv '^\[cc-alerts\] ' "${errfile}"; then
+            fail "unexpected stderr from cc-alerts: $(cat "${errfile}")"
+        fi
+    fi
+    return "${rc}"
 }
 notified() { [ -s "${notify_out}" ]; }
 msg() { cat "${notify_out}" 2>/dev/null; }
@@ -273,6 +286,35 @@ run alerts-temp-scope.json "14:00"
 m="$(msg)"
 case "${m}" in *"Temperature out of range: Living room temp (2°)"*) pass "empty list (legacy): room sensor flags";; *) fail "empty list: room sensor should flag (got: ${m})";; esac
 case "${m}" in *"Temperature out of range: NAS CPU temp (62°)"*) pass "empty list (legacy): device temp also flags";; *) fail "empty list: device temp should also flag (got: ${m})";; esac
+
+# --- 15. "Watching nothing" says so. With the offline alert ON and the watch list
+#         EMPTY the loop can never report anything, and used to give no sign of it
+#         at all; it now says so ONCE at start-up, on stderr, and only in that one
+#         combination. The behaviour of an empty list is unchanged either way. ---
+stderr_of() {   # $1 = options JSON → the run's stderr
+    rm -f "${work}/alerts-state.json"
+    printf '%s\n' "$1" > "${work}/options.json"
+    run alerts-offline-up.json "14:00" >/dev/null
+    cat "${errfile}"
+}
+note='[cc-alerts] offline watch: no entities configured'
+
+e="$(stderr_of '{"proactive_alerts": true, "alert_offline": true, "alert_offline_entities": []}')"
+case "${e}" in *"${note}"*) pass "empty watch list with the offline alert on says so";; *) fail "expected the empty-list note (got: ${e})";; esac
+if [ "$(printf '%s\n' "${e}" | grep -c 'offline watch: no entities')" = "1" ]; then
+    pass "the note is said exactly once per run"
+else
+    fail "the note must be said once (got: ${e})"
+fi
+
+e="$(stderr_of '{"proactive_alerts": true, "alert_offline": true, "alert_offline_entities": ["device_tracker.something"]}')"
+case "${e}" in *"${note}"*) fail "a non-empty watch list must stay silent (got: ${e})";; *) pass "a non-empty watch list stays silent";; esac
+
+e="$(stderr_of '{"proactive_alerts": true, "alert_offline": false, "alert_offline_entities": []}')"
+case "${e}" in *"${note}"*) fail "offline alert off must stay silent (got: ${e})";; *) pass "offline alert off stays silent";; esac
+
+e="$(stderr_of '{"proactive_alerts": false, "alert_offline": true, "alert_offline_entities": []}')"
+case "${e}" in *"${note}"*) fail "master switch off must stay silent (got: ${e})";; *) pass "master switch off stays silent";; esac
 
 echo
 if [ "${fails}" -eq 0 ]; then
