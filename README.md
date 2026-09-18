@@ -633,9 +633,38 @@ node verify-core.js check --lock core.lock.json --adapter-api 1 --previous-lock 
 | `verify-core.js url --lock FILE` | print the validated archive URL |
 | `verify-core.js check --lock FILE --adapter-api N [--previous-lock FILE]` | validate a lock |
 | `verify-core.js install --lock FILE --adapter-api N [--previous-lock FILE] --archive FILE --dest DIR` | verify and install |
-| `verify-core.js check-assembly --core DIR --consumer DIR` | refuse an add-on whose `app/`, `ha-tools/` or `rootfs/` puts a file, link or special file where the core has a file or a directory, or a directory where the core has a file (letter case ignored), or has anything at or under `app/server` |
+| `verify-core.js check-assembly --core DIR --consumer DIR` | refuse an add-on whose `app/`, `ha-tools/` or `rootfs/` puts a file, link or special file where the core has a file or a directory, or a directory where the core has a file (letter case ignored), or has anything at or under `app/server`; and refuse an assembled tree in which a shipped script names a file neither half has (see [Shipped scripts](#shipped-scripts)) |
 
 Exit status: `0` verified, `1` refused (the reason is printed), `2` usage error.
+
+### Shipped scripts
+
+`check-assembly` also resolves what the scripts of a shipped `package.json` name.
+It is the one place that can: of the ten scripts `app/package.json` ships today,
+only `start` names a file the core itself carries — the other nine name the
+add-on's tests and its lint and type configuration, which the archive does not
+have and cannot judge.
+
+The rule it applies, stated because a heuristic that under-matches would make the
+check vacuous while it read green. A command is split on whitespace and each word
+is unquoted; a word is a claim about the tree when it does not begin with `-`, is
+not a shell operator, has no `://`, does not begin with `/` or `~`, and either
+contains `/` or ends in `.js`, `.mjs`, `.cjs`, `.sh`, `.json` or `.ts`. A claim
+with `*` or `?` must match at least one file of the assembled tree; any other
+claim must be a file of it. The word after `npm run` is checked differently: it
+must be a script the same manifest still declares.
+
+Two limits, both deliberate and both held by tests rather than by this paragraph.
+`eslint .` names no path by that rule, and its real dependency — the add-on's
+`eslint.config.js` — is named by nothing at all, so the check says nothing about
+`lint`; a binary is not checked either, because that needs `node_modules`, which
+assembly does not have. And only manifests inside `app/`, `ha-tools/` and
+`rootfs/` are checked: outside them the add-on's half of the tree is not walked,
+so a resolution check there would be one half answering for two.
+
+A refusal names the manifest, the script and the word that did not resolve, and
+the two ways out: supply the file, or have the core drop that script in
+`haAgentCore.unshippedScripts`.
 
 ## Releasing
 

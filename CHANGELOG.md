@@ -6,6 +6,20 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `verify-core.js check-assembly` now resolves what a shipped `package.json`'s
+  scripts name, against both halves of the assembled tree. Of the ten scripts
+  `app/package.json` ships, only `start` names a file the core carries, so the
+  archive could never answer for the other nine and `haAgentCore.unshippedScripts`
+  was kept by hand from what consumers were measured to run — a list whose being
+  out of date was invisible until a consumer's CI went red at a core bump. The
+  list keeps its job, which is to say what to strip and to record a decision
+  about every shipped manifest; it is no longer the only thing that knows whether
+  a script resolves. The word rule and its two deliberate limits (a script that
+  names no path, such as `eslint .`, and a manifest outside the assembly roots)
+  are documented and held by tests.
+
 ### Changed
 
 - The audit guarantee is now stated as what the code does. A failed append to

@@ -508,15 +508,35 @@ test('an archive built by the packer installs end to end', (t) => {
 
 // --- assembly ------------------------------------------------------------------
 
-function assemblyFixture(t, consumerFilesToWrite) {
+// An installed core next to an add-on's own files. The shipped `app/package.json`
+// is WRITTEN, not merely listed: the scripts check reads it off the installed
+// tree, so a fixture that only named it would be testing something else.
+// `scripts` is that manifest's scripts, and `extraFiles` are more core files to
+// list and write (a root `package.json`, for instance).
+/**
+ * @param {import('node:test').TestContext} t
+ * @param {string[]} consumerFilesToWrite
+ * @param {{ scripts?: Record<string, string>, extraFiles?: Record<string, unknown> }} [options]
+ */
+function assemblyFixture(t, consumerFilesToWrite, options = {}) {
+  const { scripts = { start: 'node server/index.js' }, extraFiles = {} } = options;
   const dir = tempDir(t);
   const core = path.join(dir, 'core');
   fs.mkdirSync(core);
+  const listed = ['app/server/index.js', 'app/package.json', 'rootfs/usr/local/bin/ha-state', 'LICENSE']
+    .concat(Object.keys(extraFiles));
   fs.writeFileSync(path.join(core, 'core-manifest.json'), JSON.stringify({
     name: 'ha-agent-core', version: '1.2.3', commit: COMMIT, adapterApi: 1,
-    files: ['app/server/index.js', 'app/package.json', 'rootfs/usr/local/bin/ha-state', 'LICENSE']
-      .map((p) => ({ path: p, mode: 0o644, size: 0, sha256: verify.sha256(Buffer.alloc(0)) })),
+    files: listed.map((p) => ({ path: p, mode: 0o644, size: 0, sha256: verify.sha256(Buffer.alloc(0)) })),
   }));
+  const writeCore = (rel, data) => {
+    fs.mkdirSync(path.dirname(path.join(core, rel)), { recursive: true });
+    fs.writeFileSync(path.join(core, rel), data);
+  };
+  writeCore('app/package.json', `${JSON.stringify({ name: 'app', scripts }, null, 2)}\n`);
+  for (const [rel, body] of Object.entries(extraFiles)) {
+    writeCore(rel, typeof body === 'string' ? body : `${JSON.stringify(body, null, 2)}\n`);
+  }
   const consumer = path.join(dir, 'addon');
   for (const rel of consumerFilesToWrite) {
     fs.mkdirSync(path.dirname(path.join(consumer, rel)), { recursive: true });
@@ -532,9 +552,98 @@ test('an add-on that adds only its own paths assembles', (t) => {
   ]);
   const result = cli('check-assembly', '--core', core, '--consumer', consumer);
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout, 'assembly verified: 3 add-on files, 4 files of ha-agent-core 1.2.3\n');
+  assert.equal(
+    result.stdout,
+    'assembly verified: 3 add-on files, 4 files of ha-agent-core 1.2.3, 1 path claims of 1 shipped scripts resolved\n',
+  );
   // Files outside the assembled roots are the add-on's business.
   assert.equal(verify.checkAssembly({ core, consumer }).consumerFiles, 3);
+});
+
+// --- assembly: what a shipped script names -------------------------------------
+
+test('a shipped script whose file neither half has is refused, and the way out is printed', (t) => {
+  const { core, consumer } = assemblyFixture(t, ['app/adapter/index.js'], {
+    scripts: { 'test:audit': 'bash test/cc-hook-audit.test.sh' },
+  });
+  refused(() => verify.checkAssembly({ core, consumer }),
+    /app\/package\.json script "test:audit" runs test\/cc-hook-audit\.test\.sh, and the assembled tree has no app\/test\/cc-hook-audit\.test\.sh/);
+  const result = cli('check-assembly', '--core', core, '--consumer', consumer);
+  assert.equal(result.status, 1);
+  // The escape hatch is the KEY, verbatim: nobody should have to guess where the
+  // decision to drop a script lives.
+  assert.match(result.stderr, /supply the file, or have the core drop the script in haAgentCore\.unshippedScripts/);
+});
+
+test('the same script resolves when the add-on supplies the file — nine of ten do', (t) => {
+  const { core, consumer } = assemblyFixture(t, ['app/test/cc-hook-audit.test.sh', 'app/jsconfig.json'], {
+    scripts: { 'test:audit': 'bash test/cc-hook-audit.test.sh', typecheck: 'tsc -p jsconfig.json' },
+  });
+  const result = verify.checkAssembly({ core, consumer });
+  assert.equal(result.scripts, 2);
+  assert.equal(result.claims, 2);
+});
+
+test('the rule says NOTHING about a script that names no path — its limit, held here', (t) => {
+  // `eslint .` has no path-shaped word, and its real dependency is the add-on's
+  // eslint.config.js, which no word names. So the check is silent about `lint`,
+  // by design: this asserts the silence rather than trusting a comment about it.
+  // The tree deliberately has no eslint.config.js anywhere.
+  const { core, consumer } = assemblyFixture(t, ['app/adapter/index.js'], {
+    scripts: { lint: 'eslint .', start: 'node server/index.js' },
+  });
+  const result = verify.checkAssembly({ core, consumer });
+  assert.equal(result.scripts, 2);
+  assert.equal(result.claims, 1, 'a claim was counted for a script that names no path');
+  assert.equal(cli('check-assembly', '--core', core, '--consumer', consumer).status, 0);
+});
+
+test('the check reads the TREE, not the list: a list in perfect agreement still refuses', (t) => {
+  // The anti-tautology control. This is the tree an EMPTIED unshippedScripts
+  // produces: the packed manifest keeps `test:usage`, so the list and the
+  // manifest agree completely — and the check must still refuse, because
+  // test/ha-usage.test.sh is in neither half of the tree. A check that passes
+  // this mutation is reading the list.
+  const { core, consumer } = assemblyFixture(t, ['app/adapter/index.js'], {
+    scripts: { start: 'node server/index.js', 'test:usage': 'bash test/ha-usage.test.sh' },
+  });
+  refused(() => verify.checkAssembly({ core, consumer }), /no app\/test\/ha-usage\.test\.sh/);
+});
+
+test('a glob must match at least one file, and matching one is enough', (t) => {
+  const none = assemblyFixture(t, ['app/adapter/index.js'], {
+    scripts: { test: 'node --test "test/**/*.test.js"' },
+  });
+  refused(() => verify.checkAssembly(none), /no app\/test\/\*\*\/\*\.test\.js/);
+  const one = assemblyFixture(t, ['app/test/deep/prompt.test.js'], {
+    scripts: { test: 'node --test "test/**/*.test.js"' },
+  });
+  assert.equal(verify.checkAssembly(one).claims, 1);
+  // `/**/` matches no directory at all as well as several.
+  const flat = assemblyFixture(t, ['app/test/prompt.test.js'], {
+    scripts: { test: 'node --test "test/**/*.test.js"' },
+  });
+  assert.equal(verify.checkAssembly(flat).claims, 1);
+});
+
+test('a script that runs a script the manifest no longer declares is refused', (t) => {
+  const { core, consumer } = assemblyFixture(t, ['app/adapter/index.js'], {
+    scripts: { ci: 'npm run lint && npm run test:gone', lint: 'eslint .' },
+  });
+  refused(() => verify.checkAssembly({ core, consumer }),
+    /script "ci" runs the script "test:gone", which app\/package\.json does not declare/);
+});
+
+test('a manifest outside the assembly roots is not checked, because only one half of it is known', (t) => {
+  // `consumerEntries` walks app/, ha-tools/ and rootfs/ only, so for the core's
+  // own root package.json the add-on's half of the tree is unknown. Checking it
+  // would be the archive-as-oracle mistake again — one half answering for two.
+  const { core, consumer } = assemblyFixture(t, ['app/adapter/index.js'], {
+    extraFiles: { 'package.json': { name: 'core', scripts: { 'pack:core': 'node tools/pack.js --out dist' } } },
+  });
+  const result = verify.checkAssembly({ core, consumer });
+  assert.equal(result.scripts, 1, 'the root manifest was checked');
+  assert.equal(result.claims, 1);
 });
 
 test('an add-on path that the core also ships is refused', (t) => {
