@@ -204,8 +204,10 @@ so `ha-audit` shows both and `ha-usage` reads neither as chat spend:
 The run id is the one the prompt server's own `prompt[...]` line carries, so a
 call can be read back to its caller, its status and its cost. A line is written
 when Home Assistant answers, and carries `(dry-run)` when the call or its answer
-says `dry_run: true`, `(failed)` when the answer is an error, and `(no answer)`
-when the run ended with the call unanswered. Arguments are the model's text: they
+says `dry_run: true`, `(failed)` when Home Assistant answered that call with an
+error — which says the answer was an error, not that nothing happened, since an
+error can follow a partial effect — and `(no answer)` when the run ended with the
+call unanswered. Arguments are the model's text: they
 are stripped of control characters and cut, as the hook cuts them, so nothing in
 them can pass for a line of its own.
 
