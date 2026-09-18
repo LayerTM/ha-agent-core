@@ -49,6 +49,9 @@ ENGINE_HOOKS=(
 # cannot be used for list options).
 # shellcheck source-path=SCRIPTDIR source=../lib/addon-config.sh
 source /usr/local/lib/addon-config.sh
+
+# shellcheck source-path=SCRIPTDIR source=../lib/background-loop.sh
+source /usr/local/lib/background-loop.sh
 # The engine's names, and AGENT_CONSOLE_DIR where every add-on installs the console.
 # shellcheck source-path=SCRIPTDIR source=../lib/addon-branding.sh
 source /usr/local/lib/addon-branding.sh
@@ -294,7 +297,7 @@ case "${retention_by}" in
         exit 1 ;;
 esac
 bashio::log.info "Transcripts kept ${retention_days} days (0 = forever), swept by the ${retention_by} side"
-USAGE_SWEEP_DAYS="${sweep_days}" nohup /usr/local/bin/usage-upkeep >/data/usage-upkeep.log 2>&1 &
+start_background_loop usage-upkeep env USAGE_SWEEP_DAYS="${sweep_days}" /usr/local/bin/usage-upkeep
 
 # --- Proactive monitoring (opt-in via monitoring_interval_hours > 0) ---
 # Periodically asks the agent to review the HA error log/config and pushes a
@@ -303,7 +306,7 @@ USAGE_SWEEP_DAYS="${sweep_days}" nohup /usr/local/bin/usage-upkeep >/data/usage-
 monitor_hours=$(jq -r '.monitoring_interval_hours // 0' /data/options.json 2>/dev/null || echo 0)
 if [ "${monitor_hours}" -gt 0 ] 2>/dev/null; then
     bashio::log.info "Proactive monitoring enabled (every ${monitor_hours}h)"
-    CLAUDE_MONITOR_HOURS="${monitor_hours}" nohup /usr/local/bin/cc-monitor >/data/monitor.log 2>&1 &
+    start_background_loop cc-monitor env CLAUDE_MONITOR_HOURS="${monitor_hours}" /usr/local/bin/cc-monitor
 fi
 
 # --- Morning digest (opt-in via daily_digest_time = "HH:MM") ---
@@ -312,7 +315,7 @@ fi
 digest_time=$(jq -r '.daily_digest_time // ""' /data/options.json 2>/dev/null || echo "")
 if [ -n "${digest_time}" ]; then
     bashio::log.info "Morning digest enabled (${digest_time})"
-    CLAUDE_DIGEST_TIME="${digest_time}" nohup /usr/local/bin/cc-digest >/data/digest.log 2>&1 &
+    start_background_loop cc-digest env CLAUDE_DIGEST_TIME="${digest_time}" /usr/local/bin/cc-digest
 fi
 
 # --- Proactive anomaly alerts (opt-in via proactive_alerts = true) ---
@@ -322,7 +325,7 @@ fi
 if [ "$(jq -r '.proactive_alerts // false' /data/options.json 2>/dev/null || echo false)" = "true" ]; then
     alerts_interval=$(jq -r '.proactive_alerts_interval_minutes // 15' /data/options.json 2>/dev/null || echo 15)
     bashio::log.info "Proactive alerts enabled (every ${alerts_interval}m)"
-    CC_ALERTS_INTERVAL_MINUTES="${alerts_interval}" nohup /usr/local/bin/cc-alerts >/data/alerts.log 2>&1 &
+    start_background_loop cc-alerts env CC_ALERTS_INTERVAL_MINUTES="${alerts_interval}" /usr/local/bin/cc-alerts
 else
     # Off: drop the loop's state. Its active-key list is also the "already notified"
     # memory, so keeping it would silence an anomaly that is still (or again) active

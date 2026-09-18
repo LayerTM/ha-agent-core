@@ -413,6 +413,23 @@ async function startCoreRelay({ coreOrigin, haToken, log = () => {}, record = ()
   }));
   server.on('error', (err) => log(`relay server error: ${err.message}`));
 
+  // A connection reaching the relay is itself a fact worth saying, and nothing
+  // else says it: every other line here is written by the request handler, which
+  // runs only once a whole HTTP request has been parsed. A caller that opens a
+  // socket and never completes a request therefore looked exactly like a caller
+  // that never dialled at all — the silence of "nobody came" and the silence of
+  // "came and did not finish" arrived by the same path. Measured 2026-09-18: an
+  // agent whose MCP transport failed left this relay's log empty either way.
+  //
+  // One line per accepted connection: when, which local port answered, which
+  // remote port dialled, and how many connections this relay has accepted since
+  // it started. No byte of any credential — a connection has none yet.
+  let accepted = 0;
+  server.on('connection', (socket) => {
+    accepted += 1;
+    log(`relay accepted connection ${accepted} on 127.0.0.1:${socket.localPort} from port ${socket.remotePort}`);
+  });
+
   const { port } = /** @type {import('node:net').AddressInfo} */ (server.address());
   return {
     url: `http://127.0.0.1:${port}`,

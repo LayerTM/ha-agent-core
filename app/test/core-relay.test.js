@@ -567,6 +567,9 @@ test('a confirmed intent that carries __ is not refused by the rule that reduces
 // are the lines that would have said which it was.
 async function withLoggingRelay(fn) {
   const lines = [];
+  // The relay also logs every accepted connection, so a test about refusals asks
+  // for the refusals rather than for "the first line".
+  lines.refusals = () => lines.filter((l) => l.includes('refused'));
   const relayHere = await startCoreRelay({ coreOrigin, haToken: HA_TOKEN, log: (line) => lines.push(line) });
   try {
     await fn({ relay: relayHere, lines, ask: (headers) => fetch(`${relayHere.url}/api/mcp`, { method: 'POST', headers, body: INIT }) });
@@ -579,12 +582,12 @@ test('a refused request is logged, with no header at all', async () => {
   await withLoggingRelay(async ({ lines, ask }) => {
     const res = await ask({ 'content-type': 'application/json' });
     assert.equal(res.status, 401);
-    assert.equal(lines.length, 1);
-    assert.match(lines[0], /relay refused POST \/api\/mcp: unauthorized/);
-    assert.match(lines[0], /authorization header absent/);
-    assert.match(lines[0], /bearer form no/);
-    assert.match(lines[0], /presented 0 chars/);
-    assert.match(lines[0], /0 run\(s\) known/);
+    assert.equal(lines.refusals().length, 1);
+    assert.match(lines.refusals()[0], /relay refused POST \/api\/mcp: unauthorized/);
+    assert.match(lines.refusals()[0], /authorization header absent/);
+    assert.match(lines.refusals()[0], /bearer form no/);
+    assert.match(lines.refusals()[0], /presented 0 chars/);
+    assert.match(lines.refusals()[0], /0 run\(s\) known/);
   });
 });
 
@@ -593,10 +596,10 @@ test('a refused request is logged when the header is not a bearer', async () => 
     relayHere.issue('run-a', MAY);
     const res = await ask({ authorization: 'Basic dXNlcjpwYXNz' });
     assert.equal(res.status, 401);
-    assert.match(lines[0], /authorization header present/);
-    assert.match(lines[0], /bearer form no/);
-    assert.match(lines[0], /presented 0 chars/);
-    assert.match(lines[0], /1 run\(s\) known/);
+    assert.match(lines.refusals()[0], /authorization header present/);
+    assert.match(lines.refusals()[0], /bearer form no/);
+    assert.match(lines.refusals()[0], /presented 0 chars/);
+    assert.match(lines.refusals()[0], /1 run\(s\) known/);
   });
 });
 
@@ -606,9 +609,9 @@ test('a bearer the relay does not know is logged with its length and the runs it
     relayHere.issue('run-b', MAY);
     const res = await ask({ authorization: 'Bearer not-a-token-of-any-run' });
     assert.equal(res.status, 401);
-    assert.match(lines[0], /bearer form yes/);
-    assert.match(lines[0], /presented 22 chars/);
-    assert.match(lines[0], /2 run\(s\) known/);
+    assert.match(lines.refusals()[0], /bearer form yes/);
+    assert.match(lines.refusals()[0], /presented 22 chars/);
+    assert.match(lines.refusals()[0], /2 run\(s\) known/);
   });
 });
 
@@ -618,8 +621,8 @@ test('a bearer whose run has ended is refused and logged', async () => {
     relayHere.revoke(token);
     const res = await ask({ authorization: `Bearer ${token}` });
     assert.equal(res.status, 401);
-    assert.match(lines[0], /bearer form yes/);
-    assert.match(lines[0], /0 run\(s\) known/);
+    assert.match(lines.refusals()[0], /bearer form yes/);
+    assert.match(lines.refusals()[0], /0 run\(s\) known/);
   });
 });
 
@@ -643,5 +646,41 @@ test('a bearer the relay knows is not logged as a refusal', async () => {
     const res = await ask({ authorization: `Bearer ${token}`, 'content-type': 'application/json' });
     assert.equal(res.status, 200);
     assert.deepEqual(lines.filter((l) => l.includes('refused')), []);
+  });
+});
+
+// --- the relay says it was dialled ----------------------------------------------
+
+// Every other line here is written once a whole request has been parsed, so a
+// caller that opens a socket and stops looked exactly like a caller that never
+// came. Measured 2026-09-18 against an agent whose MCP transport failed: the
+// relay's log was empty in both worlds, and the two are not the same problem.
+test('an accepted connection is logged, numbered, with no request of its own', async () => {
+  await withLoggingRelay(async ({ relay: relayHere, lines }) => {
+    const net = require('node:net');
+    // Opened and torn down before any request: the distinguishing leg.
+    await new Promise((done) => {
+      const socket = net.connect(relayHere.port, '127.0.0.1', () => socket.destroy());
+      socket.on('close', done);
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    const accepted = lines.filter((l) => l.includes('accepted connection'));
+    assert.equal(accepted.length, 1);
+    assert.match(accepted[0], /relay accepted connection 1 on 127\.0\.0\.1:\d+ from port \d+/);
+    // and nothing from the handler, which never ran
+    assert.deepEqual(lines.filter((l) => l.includes('refused')), []);
+  });
+});
+
+test('each connection is counted, and a refusal on one of them is a separate line', async () => {
+  await withLoggingRelay(async ({ lines, ask }) => {
+    await ask({ authorization: 'Bearer nobody-knows-this' });
+    const accepted = lines.filter((l) => l.includes('accepted connection'));
+    assert.equal(accepted.length, 1);
+    assert.match(accepted[0], /accepted connection 1 /);
+    assert.equal(lines.filter((l) => l.includes('refused')).length, 1);
+    // the order is a fact of its own: the connection is accepted before the
+    // request on it is judged
+    assert.match(lines[0], /relay accepted connection 1 /);
   });
 });

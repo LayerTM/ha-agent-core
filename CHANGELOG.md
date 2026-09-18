@@ -6,6 +6,25 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- The relay says when it was dialled. Every line it wrote came from the request
+  handler, which runs only once a whole HTTP request has been parsed, so a caller
+  that opened a socket and never finished a request left exactly the same silence
+  as a caller that never came — and those are not the same problem. Each accepted
+  connection is now logged once, with the local and remote port and how many
+  connections this relay has accepted since it started. A connection carries no
+  credential, and none is logged.
+- The background loops speak in the add-on's log. Each of the four (usage
+  upkeep, the proactive monitor, the morning digest, the alerts loop) was started
+  with its output redirected into a file inside the container, which the Log tab
+  does not show and no code ever read, so none of their lines could reach the
+  person running the add-on. They are now started through one helper that says
+  once where a loop's output goes, and each line carries the loop's name.
+- Because of that, what 0.7.3 said about the alerts loop announcing an empty
+  offline watch-list was not true for a user: the message was written, and then
+  swallowed by the redirect. It is visible from this version on.
+
 ## [0.7.4] - 2026-09-18
 
 ### Changed
