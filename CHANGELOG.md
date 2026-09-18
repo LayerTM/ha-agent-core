@@ -6,6 +6,8 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-18
+
 ### Added
 
 - `verify-core.js check-assembly` now resolves what a shipped `package.json`'s
