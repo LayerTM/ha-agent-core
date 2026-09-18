@@ -6,6 +6,8 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.0]
+
 ### Changed
 
 - The prompt API no longer requires the engine's settings to carry an audit
