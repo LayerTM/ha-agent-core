@@ -6,6 +6,8 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-09-18
+
 ### Added
 
 - A repeated heading inside one version section of this file fails the build.
