@@ -58,8 +58,7 @@ function judgeClientBody(text) {
   const refused = messages.map((m) => typeof m.method !== 'string' || !clientMayCall(m.method));
   if (!refused.some(Boolean)) {
     // What this body asks Home Assistant to DO, for the record the relay writes:
-    // a tool call that expects an answer. A notification (no id) is not one.
-    // Every tool call, including one sent without an id. Such a call still asks
+    // every tool call, including one sent without an id. Such a call still asks
     // Home Assistant to do something; what it does not do is expect an answer,
     // which is a fact about the RECORD, not about the action.
     const calls = messages

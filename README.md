@@ -213,9 +213,9 @@ error — which says the answer was an error, not that nothing happened, since a
 error can follow a partial effect — `(no answer)` when Home Assistant never
 answered it (the run ended with the call still in the air, or a camera read got
 no answer at all), and `(no answer possible)` for a call sent without a JSON-RPC
-id, which asks Home Assistant to act but leaves nothing that could ever answer. Arguments are the model's text: they
-are stripped of control characters and cut, as the hook cuts them, so nothing in
-them can pass for a line of its own.
+id, which asks Home Assistant to act but leaves nothing that could ever answer.
+Arguments are the model's text: they are stripped of control characters and cut,
+as the hook cuts them, so nothing in them can pass for a line of its own.
 
 This is why a prompt run's Home Assistant actions are recorded whatever the
 engine is, with hooks or without: the record is written where the call passes,
