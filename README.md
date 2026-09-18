@@ -200,9 +200,11 @@ keeps it within the tools the run's allowlist names.
   matched by BASENAME: `tools/call` carries the name Home Assistant published, and
   Home Assistant namespaces it (`homeassistant__GetLiveContext`) once more than
   one API is selected, so the part after the last `__` is the name. That is Home
-  Assistant's convention and not an engine's, which is why it belongs in the
-  relay; the engine's own spelling is the adapter's `runner.toolBasename`, a
-  different function on a different string.
+  Assistant's convention and not an engine's, which is why it belongs in the core;
+  it is stated once, in the leaf `app/server/prompt/ha-tool-names.js`, which an
+  adapter may require to spell the same rule without loading the relay. The
+  engine's own spelling is the adapter's `runner.toolBasename`, a different
+  function on a different string.
 - `tools/list` is deliberately NOT narrowed. Listing is not acting, and a run's
   rename detector reads the published catalogue to notice a wanted tool published
   under a name its allowlist misses.
@@ -328,8 +330,8 @@ taken from the same list the request is validated against. A client sends a
 field only when it is listed there.
 
 The adapter may require its own modules and the core's leaf modules
-`app/server/prompt/security.js`, `app/server/branding.js` and
-`app/server/theme.js`, and nothing else of the core; the core returns to the
+`app/server/prompt/security.js`, `app/server/prompt/ha-tool-names.js`,
+`app/server/branding.js` and `app/server/theme.js`, and nothing else of the core; the core returns to the
 adapter only through these members. `tools/check-adapter-graph.js <app dir>` checks that on an assembled
 tree: it reads every file under `server/` and `adapter/`, follows only
 `require('<string literal>')`, refuses every other way to load or evaluate code

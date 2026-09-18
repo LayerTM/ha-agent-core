@@ -37,8 +37,9 @@ const crypto = require('node:crypto');
 const http = require('node:http');
 const https = require('node:https');
 const {
-  MAX_BODY_BYTES, haBasename, judgeClientBody, filterServerJson, createSseFilter,
+  MAX_BODY_BYTES, judgeClientBody, filterServerJson, createSseFilter,
 } = require('./mcp-filter');
+const { haBasename } = require('./ha-tool-names');
 
 // Exactly what the add-on needs, and nothing else.
 const MCP_PATH = '/api/mcp';

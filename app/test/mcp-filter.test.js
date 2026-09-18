@@ -8,8 +8,9 @@ const assert = require('node:assert/strict');
 const http = require('node:http');
 
 const {
-  MAX_BODY_BYTES, haBasename, judgeClientBody, filterServerJson, createSseFilter,
+  MAX_BODY_BYTES, judgeClientBody, filterServerJson, createSseFilter,
 } = require('../server/prompt/mcp-filter');
+const { haBasename } = require('../server/prompt/ha-tool-names');
 const { startCoreRelay } = require('../server/prompt/core-relay');
 
 const rpc = (method, id, params) => ({ jsonrpc: '2.0', ...(id === undefined ? {} : { id }), method, ...(params ? { params } : {}) });
