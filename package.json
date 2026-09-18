@@ -12,7 +12,15 @@
     "node": ">=22"
   },
   "haAgentCore": {
-    "adapterApi": 5
+    "adapterApi": 5,
+    "unshippedScripts": {
+      "package.json": [],
+      "app/package.json": [
+        "test:usage",
+        "test:image"
+      ],
+      "ha-tools/package.json": []
+    }
   },
   "files": [
     "LICENSE",

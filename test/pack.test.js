@@ -12,6 +12,14 @@ const { git, tempDir, makeRepo, packageJson } = require('./helpers.js');
 
 const PACK = path.join(__dirname, '..', 'tools', 'pack.js');
 
+// One packed file's bytes, read the way a consumer's verifier reads them.
+function readEntry(archive, entryPath, lock) {
+  const entries = verify.inspectArchive(archive, verify.parseLock(JSON.stringify(lock)));
+  const entry = entries.filter((e) => e.path === entryPath)[0];
+  assert.ok(entry, `${entryPath} is not in the archive`);
+  return entry.data;
+}
+
 test('packs exactly the declared files with their modes, plus a manifest', (t) => {
   const repo = makeRepo(t);
   const { archive, lock } = pack.build({ repo });
@@ -149,4 +157,50 @@ test('the command line writes the archive, its checksum and the lock, and never 
 
   const usage = spawnSync(process.execPath, [PACK], { cwd: repo, encoding: 'utf8' });
   assert.equal(usage.status, 2);
+});
+
+test('a packed manifest keeps every script but the ones named as unshipped', (t) => {
+  const repo = makeRepo(t, {
+    'package.json': packageJson({
+      scripts: { start: 'node src/index.js', 'test:usage': 'bash test/usage.test.sh', lint: 'eslint .' },
+      haAgentCore: { adapterApi: 1, unshippedScripts: { 'package.json': ['test:usage'] } },
+    }),
+  });
+  const built = pack.build({ repo });
+  const packed = JSON.parse(readEntry(built.archive, 'ha-agent-core/package.json', built.lock).toString('utf8'));
+  assert.deepEqual(packed.scripts, { start: 'node src/index.js', lint: 'eslint .' },
+    'only the named one is left behind; a script this archive cannot judge is kept');
+  assert.equal(packed.version, '1.2.3', 'everything else is the manifest as it was');
+});
+
+test('a manifest with nothing named is packed byte for byte', (t) => {
+  const repo = makeRepo(t, {
+    'package.json': packageJson({ scripts: { 'test:usage': 'bash test/usage.test.sh' } }),
+  });
+  const built = pack.build({ repo });
+  const packed = readEntry(built.archive, 'ha-agent-core/package.json', built.lock);
+  assert.equal(packed.toString('utf8'), git(repo, 'show', 'HEAD:package.json'),
+    'keeping everything means changing nothing, not reformatting it');
+});
+
+test('refuses to drop a script the manifest does not have, and to ship a manifest it says nothing about', (t) => {
+  const stale = makeRepo(t, {
+    'package.json': packageJson({ haAgentCore: { adapterApi: 1, unshippedScripts: { 'package.json': ['test:gone'] } } }),
+  });
+  assert.throws(() => pack.build({ repo: stale }), /has no script test:gone/);
+
+  const silent = makeRepo(t, {
+    'src/package.json': '{"name":"inner","scripts":{"test:usage":"bash test/usage.test.sh"}}\n',
+  });
+  assert.throws(() => pack.build({ repo: silent }), /says nothing about src\/package\.json/);
+
+  const absent = makeRepo(t, {
+    'package.json': packageJson({ haAgentCore: { adapterApi: 1, unshippedScripts: { 'nowhere.json': [] } } }),
+  });
+  assert.throws(() => pack.build({ repo: absent }), /names nowhere\.json, which is not packed/);
+
+  const malformed = makeRepo(t, {
+    'package.json': packageJson({ haAgentCore: { adapterApi: 1, unshippedScripts: ['package.json'] } }),
+  });
+  assert.throws(() => pack.build({ repo: malformed }), /unshippedScripts is not a map/);
 });

@@ -20,6 +20,11 @@ uses [Semantic Versioning](https://semver.org/).
   MCP configuration is written per run, into a directory of that run's own.
   `prompt.writeMcpConfig` is called once per run and must be idempotent.
 
+- The release archive no longer carries `test:usage` and `test:image` in
+  `app/package.json`: their test files are not shipped, so running either in an
+  assembled tree named a file that is not there. Every other script is carried
+  as before.
+
 ### Removed
 
 - `prompt.hasAuditHook` is no longer part of the adapter contract; nothing asks

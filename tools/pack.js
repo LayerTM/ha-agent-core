@@ -12,7 +12,14 @@
  * anywhere and compared byte for byte with the published one.
  *
  * What is packed is `files` in the commit's package.json. Only regular files are
- * accepted; a symlink or submodule in that set stops the build. The archive gets a
+ * accepted; a symlink or submodule in that set stops the build. A package
+ * manifest is packed without the scripts `haAgentCore.unshippedScripts` names
+ * for it, and with every other one. The list says what to DROP, not what to
+ * keep, because the archive is not what runs these scripts: a consumer assembles
+ * a tree and adds its own tests and configuration, so only a consumer knows
+ * which of them still resolve. Keeping by default costs a stale line in a
+ * manifest, which is harmless and visible; dropping by default costs a live
+ * script in every consumer's CI. The archive gets a
  * manifest (`ha-agent-core/core-manifest.json`) listing version, commit, adapter
  * API and every file's mode, size and SHA-256, and is checked with the consumer's
  * own verifier before anything is written — the packer cannot emit an archive the
@@ -115,7 +122,15 @@ function readPackage(repo, commit) {
   if (missing.length) throw new Error(`package.json files must include ${missing.join(', ')}`);
   const repoUrl = /^git\+(https:\/\/github\.com\/[^/]+\/[^/]+?)\.git$/.exec((pkg.repository || {}).url || '');
   if (!repoUrl) throw new Error('package.json repository.url is not git+https://github.com/<owner>/<repo>.git');
-  return { version: pkg.version, adapterApi, files: pkg.files, releases: `${repoUrl[1]}/releases/download` };
+  const unshippedScripts = pkg.haAgentCore.unshippedScripts;
+  const wellFormed = unshippedScripts && typeof unshippedScripts === 'object' && !Array.isArray(unshippedScripts)
+    && Object.values(unshippedScripts).every((names) => Array.isArray(names) && names.every((n) => typeof n === 'string' && n));
+  if (!wellFormed) {
+    throw new Error('package.json haAgentCore.unshippedScripts is not a map of manifest path to script names');
+  }
+  return {
+    version: pkg.version, adapterApi, files: pkg.files, unshippedScripts, releases: `${repoUrl[1]}/releases/download`,
+  };
 }
 
 function listFiles(repo, commit, patterns) {
@@ -137,14 +152,44 @@ function listFiles(repo, commit, patterns) {
   return [...found.values()].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 }
 
+// A manifest as the archive carries it: the same file, without the scripts named
+// for it. A name on the list the manifest does not have is an error — a list that
+// drops something already gone is out of date and says so here, while it is cheap.
+function packedManifest(filePath, data, drop) {
+  let manifest;
+  try {
+    manifest = JSON.parse(data.toString('utf8'));
+  } catch (err) {
+    throw new Error(`${filePath}: unshippedScripts names it, but it is not JSON (${err.message})`, { cause: err });
+  }
+  const have = manifest.scripts && typeof manifest.scripts === 'object' ? manifest.scripts : {};
+  const absent = drop.filter((name) => !Object.hasOwn(have, name));
+  if (absent.length) throw new Error(`${filePath} has no script ${absent.join(', ')}, which unshippedScripts drops`);
+  if (!drop.length) return data;
+  const scripts = {};
+  for (const [name, command] of Object.entries(have)) if (!drop.includes(name)) scripts[name] = command;
+  if (Object.keys(scripts).length) manifest.scripts = scripts; else delete manifest.scripts;
+  return Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`);
+}
+
 function build({ repo, commit = 'HEAD' }) {
   const commitId = git(repo, ['rev-parse', '--verify', `${commit}^{commit}`]).trim();
   const mtime = Number(git(repo, ['show', '-s', '--format=%ct', commitId]).trim());
   const pkg = readPackage(repo, commitId);
   const files = listFiles(repo, commitId, pkg.files).map((file) => {
     const data = git(repo, ['cat-file', 'blob', file.object], 'buffer');
-    return { path: file.path, mode: file.mode, data };
+    const drop = pkg.unshippedScripts[file.path];
+    return { path: file.path, mode: file.mode, data: drop ? packedManifest(file.path, data, drop) : data };
   });
+  const unpacked = Object.keys(pkg.unshippedScripts).filter((p) => !files.some((f) => f.path === p));
+  if (unpacked.length) throw new Error(`unshippedScripts names ${unpacked.join(', ')}, which is not packed`);
+  // Every manifest that ships is decided about — an empty list is a decision and
+  // says it out loud. Adding one to `files` without a line here stops the build
+  // rather than shipping whatever it happens to declare.
+  const undecided = files
+    .filter((f) => path.basename(f.path) === 'package.json' && !Object.hasOwn(pkg.unshippedScripts, f.path))
+    .map((f) => f.path);
+  if (undecided.length) throw new Error(`unshippedScripts says nothing about ${undecided.join(', ')}`);
   const manifest = {
     name: verify.ROOT,
     version: pkg.version,
@@ -210,7 +255,7 @@ function main(argv) {
   }
 }
 
-module.exports = { build, write, buildTar, tarHeader, splitPath };
+module.exports = { build, write, buildTar, tarHeader, splitPath, packedManifest };
 
 if (require.main === module) {
   process.exitCode = main(process.argv.slice(2));
