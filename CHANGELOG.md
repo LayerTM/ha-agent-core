@@ -6,6 +6,17 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- The relay says when it refuses a request. A bearer it does not know was refused
+  with 401 in silence: the run still answered normally, and the audit records only
+  successful tool calls, so a rejected credential looked exactly like an engine
+  that chose to call nothing. Every such refusal is now logged with what can be
+  said without saying the credential — whether an `authorization` header arrived,
+  whether it had the `Bearer ` form, how many characters were presented and how
+  many runs the relay knows. No byte of the value is logged. Who is admitted is
+  unchanged; only what is visible afterwards.
+
 ## [0.7.3] - 2026-09-18
 
 ### Added
