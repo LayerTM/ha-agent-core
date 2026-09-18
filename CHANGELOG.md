@@ -6,6 +6,8 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-09-18
+
 ### Changed
 
 - The offline watch-list starts empty. Up to and including 0.7.1 the image carried
