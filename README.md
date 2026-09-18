@@ -225,6 +225,31 @@ engine whether its settings carry an audit hook before it starts — that was th
 engine's answer about itself, one an engine that cannot run hooks could not give
 truthfully, and nothing behind the flag was ever checked.
 
+**What the record promises, exactly.** A line is written when Home Assistant
+answers, so a write that fails cannot be un-failed: the effect has already
+happened. The guarantee is therefore not that no action escapes the log — it is
+that **an audit write that fails is announced, and acting stops until one
+succeeds.** A failed append names its errno on stderr (once per cause, so a full
+disk does not become one line per call), `/api/status` publishes
+`audit_recording` and `audit_error`, and while the record is not being kept a
+`write` request is refused with `503` and the code `audit_unavailable`, which
+carries the errno as `audit_error`. A `read` is not refused: it does not act on
+the home, so the home keeps answering.
+
+**Which writes are lost.** The writes already in flight when the log fails, not
+one of them. The state is read when a request is ADMITTED and not again for the
+life of its run, so every remaining Home Assistant call of every run already
+running loses its line — and two runs can be in flight at once
+(`MAX_CONCURRENT_RUNS`), each making several calls. A run with three calls left
+loses three lines. What the refusal stops is the NEXT request acting, not the run
+that is acting now; the announcement is about the writes that are already gone.
+
+The log is also probed once when the prompt API starts, because a read-only or
+unwritable `/data` is a fact of the boot and a chat request is the wrong way to
+discover one. The probe appends the empty string: it creates the log if it is
+missing and it opens it exactly as a line would, but not one byte of it reaches
+the record it protects.
+
 The record says nothing about a tool that never reaches Home Assistant. Those are
 the engine's to record, and a console run's hook still does.
 
@@ -252,6 +277,7 @@ The message is for people and may change. The code is stable:
 | `confirmation_required` | 403 | an unconfirmed write touches `domains` |
 | `rate_limited` | 429 | too many requests; see `Retry-After` |
 | `write_unavailable` | 503 | no Home Assistant MCP configuration for writes |
+| `audit_unavailable` | 503 | the audit log cannot be written, so a write is not allowed to act; the errno is in `audit_error` |
 | `busy` | 503 | the concurrent-run limit is reached |
 | `timeout` | 504 | the run passed its time limit |
 | `internal` | 500 | the run failed |

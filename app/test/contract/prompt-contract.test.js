@@ -177,6 +177,63 @@ test('a write whose intents are not acceptable is refused before anything runs',
   assert.ok(auditLines.some((line) => line.includes('reason=503-no-mcp')));
 });
 
+test('a write is refused while the audit log cannot be written, and a read is not', async () => {
+  // The reading is taken where the next action is decided — the same shape as
+  // asserting an allocation still EXISTS at the moment it is freed. The happy
+  // path is the control: the same request, the same server, the state the only
+  // difference.
+  let recording = false;
+  const app = await listen(makeApp({ auditState: () => (recording ? { recording: true, code: null } : { recording: false, code: 'EROFS' }) }));
+  const url = `http://127.0.0.1:${app.address().port}`;
+  try {
+    const refused = await post({ mode: 'write', intents: INTENT }, { url });
+    assert.equal(refused.status, 503);
+    // The code is what a client branches on, and the errno is what a person can
+    // act on. `write_unavailable` would have sent a read-only disk to the add-on
+    // options to look for a Home Assistant token.
+    assert.deepEqual(await refused.json(), {
+      error: 'write mode unavailable: the audit log cannot be written, so an action could not be recorded',
+      code: 'audit_unavailable',
+      audit_error: 'EROFS',
+    });
+    assert.equal(state.runs.length, 0, 'the write ran anyway');
+    assert.ok(auditLines.some((line) => line.includes('reason=503-no-audit') && line.includes('audit=EROFS')));
+
+    // A read does not act on the home, so the home still answers.
+    const read = await post({ prompt: 'what is the temperature?' }, { url });
+    assert.equal(read.status, 200);
+    assert.equal(state.runs.length, 1);
+
+    // The control: with the record kept, the very same write is dispatched.
+    recording = true;
+    const allowed = await post({ mode: 'write', intents: INTENT }, { url });
+    assert.equal(allowed.status, 200);
+    assert.equal(state.runs.length, 2);
+  } finally {
+    app.closeAllConnections();
+    app.close();
+  }
+});
+
+test('status publishes whether the record is being kept, and the errno with it', async () => {
+  let state_ = { recording: false, code: 'ENOSPC' };
+  const app = await listen(makeApp({ auditState: () => state_ }));
+  const url = `http://127.0.0.1:${app.address().port}`;
+  try {
+    const failing = await (await fetch(`${url}/api/status`, { headers: { Authorization: `Bearer ${TOKEN}` } })).json();
+    assert.equal(failing.audit_recording, false);
+    assert.equal(failing.audit_error, 'ENOSPC');
+    state_ = { recording: true, code: null };
+    const kept = await (await fetch(`${url}/api/status`, { headers: { Authorization: `Bearer ${TOKEN}` } })).json();
+    assert.equal(kept.audit_recording, true);
+    assert.equal(kept.audit_error, null);
+  } finally {
+    app.closeAllConnections();
+    app.close();
+  }
+});
+
+
 test('a server built without saying whether Home Assistant is configured refuses to start, loudly', () => {
   // Silently falsy would mean every write refused and nothing said; the start's
   // own gates refuse AND name the reason, and so does this.

@@ -44,6 +44,12 @@ const ERRORS = {
   confirmation_required: [403, 'sensitive action requires explicit confirmation'],
   rate_limited: [429, 'rate limited'],
   write_unavailable: [503, 'write mode unavailable: no HA MCP configured (set an HA token in the add-on options)'],
+  // A DIFFERENT cause with a different fix, so a different code: the record of
+  // what is done to a home cannot be written, so nothing is allowed to act.
+  // The errno is published beside it (`audit_error`) — EROFS and EACCES are the
+  // user's to fix, ENOSPC is a disk, and `write_unavailable`'s message would
+  // have sent all three to the add-on options to look for an HA token.
+  audit_unavailable: [503, 'write mode unavailable: the audit log cannot be written, so an action could not be recorded'],
   busy: [503, 'busy'],
   usage_unavailable: [503, 'usage unavailable'],
   limits_unavailable: [503, 'account limits unavailable'],
@@ -540,6 +546,10 @@ function createPromptApp({
   // from the environment inside, so the endpoint is testable without a login.
   apiKey = '', oauthToken = '', homeDir = '', limitsFetch = fetch,
   workDir, addonVersion, redact, audit, stateDir = null, dataDir = null, proactiveAlerts = false,
+  // Whether the audit log is being written, read at the moment a request is
+  // about to act. The default says yes, for the HTTP tests that do not care;
+  // the start passes the sink's own state.
+  auditState = () => ({ recording: true, code: null }),
   // The function that runs one agent call: the core's own, unless a test of the
   // HTTP layer replaces it to script outcomes.
   runAgent = run,
@@ -772,6 +782,8 @@ function createPromptApp({
     const home = process.env.HOME || '/data/home';
     const { descriptor, prompt } = adapter();
     const authConfigured = Boolean(prompt.authConfigured({ env: process.env, home }));
+    // Read ONCE, so the two keys below can never name different states.
+    const record = auditState();
     res.json({
       ready: Boolean(version) && authConfigured,
       // The add-on's own version; the agent's is engine_version.
@@ -787,6 +799,11 @@ function createPromptApp({
       model: model || '',
       ha_mcp: haConfigured,
       ha_mcp_connected: haConfigured ? lastMcpConnected : false,
+      // Is what a run does to the home still being recorded? Published rather
+      // than inferred: while this is false a write is refused, and the errno
+      // says whose problem it is (EROFS/EACCES a configuration, ENOSPC a disk).
+      audit_recording: record.recording,
+      audit_error: record.code,
       chat_health: chatHealth.snapshot(),
       // The add-on's wall-clock ceiling per request (a TIME) — lets the client pair
       // its own REQUEST_TIMEOUT dynamically. Distinct from the daily-$ budget below.
@@ -930,6 +947,17 @@ function createPromptApp({
         if (!haConfigured) {
           audit(`prompt[deny] reason=503-no-mcp caller=${caller}`);
           return sendError(res, 'write_unavailable');
+        }
+        // The record is the promise: a write is an action on someone's home, and
+        // the documentation says every such action is in the log. A line is
+        // written when Home Assistant answers, so a failed write cannot be
+        // un-failed — the effect already happened. What is still in hand is the
+        // NEXT one, and it is refused until a write succeeds. A read keeps
+        // working: it does not act, so the home still answers.
+        const record = auditState();
+        if (!record.recording) {
+          audit(`prompt[deny] reason=503-no-audit caller=${caller} audit=${sanitizeId(String(record.code), 32)}`);
+          return sendError(res, 'audit_unavailable', { audit_error: record.code || 'UNKNOWN' });
         }
         // Boundary backstop: an auto (unconfirmed) write may never touch an
         // inherently critical domain, regardless of caller/model intent.

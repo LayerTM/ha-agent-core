@@ -13,6 +13,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { createPromptApp } = require('./server');
 const { shutdown: shutdownRuns } = require('./run');
+const { createAuditSink } = require('./audit');
 const { buildRedactor } = require('./security');
 const { adapter } = require('../adapter-contract');
 const { resolveCoreTarget } = require('./core-target');
@@ -186,10 +187,17 @@ async function start() {
   // camera-snapshot fetch — talks plain HTTP to the relay and never sees the HA
   // token or has to reason about Core's TLS. (ClaudeInHA#47)
   const auditFile = path.join(DATA_DIR, 'claude-audit.log');
-  const audit = (line) => {
-    const ts = new Date().toISOString().replace('T', ' ').slice(0, 19);
-    fs.appendFile(auditFile, `${ts}  ${line}\n`, () => {});
-  };
+  // The sink knows whether the record is still being kept; the server asks it
+  // before it lets a request act on the home. Asked once here first, because a
+  // read-only or unwritable /data is a boot fact and a chat request is the wrong
+  // way for a user to discover one. The probe writes no byte into the log.
+  const auditSink = createAuditSink(auditFile);
+  // The line is fire-and-forget for every caller: `append` never rejects, and
+  // nothing here awaits the disk. Whether the record is still being kept is read
+  // separately, by whoever is about to act.
+  const audit = (line) => { auditSink.append(line); };
+  if (await auditSink.probe()) log(`audit log ${auditFile} is writable`);
+  else log(`audit log ${auditFile} cannot be written (${auditSink.state().code}) — Home Assistant actions are not being recorded, so acting is refused until a write succeeds`);
 
   const coreTarget = await resolveCoreTarget();
   log(`core at ${coreTarget.origin} (${coreTarget.source})`);
@@ -257,6 +265,9 @@ async function start() {
     haConfigured,
     beginRun,
     endRun,
+    // Whether the audit log is still being written, asked at the moment a
+    // request is about to act: an action that cannot be recorded is refused.
+    auditState: () => auditSink.state(),
     // A dedicated chat model (e.g. a faster/cheaper one) is preferred; fall back
     // to the console's model override, then the Claude default.
     model: optionString(options, 'chat_model') || optionString(options, 'model'),
