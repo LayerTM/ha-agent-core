@@ -18,6 +18,7 @@ const ROOT = path.join(APP, '..');
 const SUITES = [
   { file: 'background-loop.test.sh', success: /^PASS: all background-loop checks passed$/m },
   { file: 'cc-alerts.test.sh', success: /^PASS: all cc-alerts checks passed$/m },
+  { file: 'ha-token-check.test.sh', success: /^PASS: all ha-token-check checks passed$/m },
   { file: 'config-list.test.sh', success: /^All config_list tests passed\.$/m },
 ];
 

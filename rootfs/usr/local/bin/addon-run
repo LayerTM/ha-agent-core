@@ -52,6 +52,9 @@ source /usr/local/lib/addon-config.sh
 
 # shellcheck source-path=SCRIPTDIR source=../lib/background-loop.sh
 source /usr/local/lib/background-loop.sh
+
+# shellcheck source-path=SCRIPTDIR source=../lib/ha-token-check.sh
+source /usr/local/lib/ha-token-check.sh
 # The engine's names, and AGENT_CONSOLE_DIR where every add-on installs the console.
 # shellcheck source-path=SCRIPTDIR source=../lib/addon-branding.sh
 source /usr/local/lib/addon-branding.sh
@@ -166,7 +169,16 @@ if [ -n "${ha_token}" ]; then
     export HA_TOKEN="${ha_token}"
     export HASS_TOKEN="${ha_token}"
     export HASS_SERVER="${HA_URL}"
-    bashio::log.info "HA Token configured (dashboard screenshots + HA tools enabled)"
+    # Ask Home Assistant rather than the text box: a token that is present and a
+    # token that is accepted are different facts, and only the second one is what
+    # the next line used to claim. Start-up is not blocked either way — a console
+    # the user can open is how they read this line at all.
+    read -r ha_token_verdict ha_token_code <<<"$(ha_token_status "${HA_URL}" "${ha_token}")"
+    case "${ha_token_verdict}" in
+        accepted) bashio::log.info "$(ha_token_sentence "${ha_token_verdict}" "${ha_token_code}")" ;;
+        rejected) bashio::log.error "$(ha_token_sentence "${ha_token_verdict}" "${ha_token_code}")" ;;
+        *) bashio::log.warning "$(ha_token_sentence "${ha_token_verdict}" "${ha_token_code}")" ;;
+    esac
 fi
 
 # `ha` (Supervisor CLI) reads SUPERVISOR_API_TOKEN, but the runtime injects
