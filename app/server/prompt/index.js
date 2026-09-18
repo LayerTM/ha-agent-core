@@ -223,9 +223,13 @@ async function start() {
   // One run's identity and the two things that carry it: the bearer the relay
   // knows it by, and the MCP configuration its agent reads. Both are made here
   // and destroyed by endRun, whatever ends the run.
-  const beginRun = async (runId) => {
+  // `may` is what this request implies the run may do — the Home Assistant tool
+  // basenames and the camera entities — decided where the request was admitted
+  // and handed to the bearer at the moment it is minted. There is therefore no
+  // window in which a live bearer may do more than its run was allowed.
+  const beginRun = async (runId, may = {}) => {
     if (!relay) return { token: '', mcpConfigPath: null, dir: null };
-    const bearer = relay.issue(runId);
+    const bearer = relay.issue(runId, may);
     const dir = path.join(RUNS_DIR, runId);
     try {
       await fsp.mkdir(dir, { recursive: true, mode: 0o700 });

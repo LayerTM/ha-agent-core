@@ -132,7 +132,10 @@ receives `mode`, `read`, `vision`, `imagePath`, `haAllowed` and
 `haDisallowed` (the tools the run may and may not call), `schema`,
 `systemPrompt`, `maxTurns`, `mcpConfigPath`, `settings`, `model` and `stream`.
 It must deny every tool call outside `haAllowed` (plus reading `imagePath` for a
-vision run).
+vision run) — that is what keeps a tool out of the model's context at all. It is
+no longer the only enforcement: the relay refuses a call for a tool this run may
+not make, whatever the adapter does (see
+[Home Assistant MCP access](#home-assistant-mcp-access)).
 
 Its decoder reports these events:
 
@@ -173,6 +176,13 @@ loopback relay (`app/server/prompt/core-relay.js`):
 - the relay holds the Home Assistant token;
 - the agent gets a relay token of its own run instead, issued when the run starts
   and revoked when it ends, so every request names the run that made it;
+- **that token is what the run may do.** It is minted carrying the Home Assistant
+  tool basenames this request implies — live context for a read, exactly the
+  confirmed intents for a write — and the camera entity the request named, if any.
+  A token given nothing may call no tool and read no camera: an unset allowlist
+  refuses, rather than standing for "no gate". It is not narrowed further than
+  that: `tools/list`, `initialize` and `ping` still reach Home Assistant on such a
+  token, deliberately — see the list below;
 - the relay decides which JSON-RPC methods pass (`app/server/prompt/mcp-filter.js`);
 - the relay records what each run asked Home Assistant to do (below).
 
@@ -184,6 +194,22 @@ Every other method, `resources/*`, `prompts/*` and `completion/*` included, is
 answered by the relay with `-32601` ("method not found") and never reaches Home
 Assistant. Home Assistant publishes its whole live context as a resource, so this
 keeps it within the tools the run's allowlist names.
+- A `tools/call` for a tool this run may not call is answered `-32602` ("tool not
+  allowed for this run") and not forwarded; the messages that travelled with it
+  are answered `-32600`, so the agent can resend them on their own. The name is
+  matched by BASENAME: `tools/call` carries the name Home Assistant published, and
+  Home Assistant namespaces it (`homeassistant__GetLiveContext`) once more than
+  one API is selected, so the part after the last `__` is the name. That is Home
+  Assistant's convention and not an engine's, which is why it belongs in the
+  relay; the engine's own spelling is the adapter's `runner.toolBasename`, a
+  different function on a different string.
+- `tools/list` is deliberately NOT narrowed. Listing is not acting, and a run's
+  rename detector reads the published catalogue to notice a wanted tool published
+  under a name its allowlist misses.
+- A camera snapshot is a Home Assistant action carrying no tool name, so the
+  entity the request named is the whole permission: `GET
+  /api/camera_proxy/<other>` is refused with 404, and a run that named no camera
+  reads none.
 - A request body with a refused method is not forwarded at all.
 - A body that is not JSON-RPC 2.0 is refused with 400.
 - A body over 1 MiB is refused with 413.

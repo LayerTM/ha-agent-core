@@ -36,7 +36,9 @@
 const crypto = require('node:crypto');
 const http = require('node:http');
 const https = require('node:https');
-const { MAX_BODY_BYTES, judgeClientBody, filterServerJson, createSseFilter } = require('./mcp-filter');
+const {
+  MAX_BODY_BYTES, haBasename, judgeClientBody, filterServerJson, createSseFilter,
+} = require('./mcp-filter');
 
 // Exactly what the add-on needs, and nothing else.
 const MCP_PATH = '/api/mcp';
@@ -110,10 +112,16 @@ const FORWARD_TO_CLIENT = new Set([
   'mcp-session-id',
 ]);
 
-function allowed(method, pathname) {
+// What THIS run may reach, by method and path. The MCP door is the same for every
+// run — which tools it may call through it is judged from the body. The camera
+// door is not: a camera read is a Home Assistant action of its own, it carries no
+// tool name, and the bearer that opens it lives in the agent's own MCP
+// configuration, so a run given one camera must not be able to read another. The
+// run's entity is the whole permission: no entity, no camera path.
+function allowed(method, pathname, entry) {
   if (pathname === MCP_PATH) return MCP_METHODS.has(method);
-  if (method === 'GET' && CAMERA_PATH_RE.test(pathname)) return true;
-  return false;
+  if (method !== 'GET' || !CAMERA_PATH_RE.test(pathname)) return false;
+  return entry.cameras.has(pathname.slice(CAMERA_PREFIX.length));
 }
 
 // The whole body of a message, or null once it passes MAX_BODY_BYTES.
@@ -167,7 +175,12 @@ function deny(res, status, message) {
  * something Home Assistant never promised.
  */
 async function startCoreRelay({ coreOrigin, haToken, log = () => {}, record = () => {} }) {
-  /** @type {Map<string, string>} bearer -> run id */
+  // What a bearer IS: the run it belongs to and what that run may do — the Home
+  // Assistant tool basenames it may call and the camera entities it may read (a
+  // request names at most one). Both are given when the bearer is minted, so
+  // there is no moment in which a live bearer means less than it will mean later.
+  // An entry with an empty set may call nothing and read nothing: unset refuses.
+  /** @type {Map<string, {runId: string, basenames: Set<string>, cameras: Set<string>}>} */
   const runs = new Map();
   // Calls a run has sent and Home Assistant has not answered yet, per run rather
   // than per request: the answer may come back on this POST or on the run's own
@@ -205,13 +218,14 @@ async function startCoreRelay({ coreOrigin, haToken, log = () => {}, record = ()
     // loopback, and an attacker able to time it is already inside the container.
     // A lookup rather than a comparison, because the answer is WHICH run this is,
     // not merely whether it may pass; an unknown bearer is refused as before.
-    const runId = auth.startsWith('Bearer ') ? runs.get(auth.slice(7)) : undefined;
-    if (runId === undefined) {
+    const entry = auth.startsWith('Bearer ') ? runs.get(auth.slice(7)) : undefined;
+    if (entry === undefined) {
       deny(res, 401, 'unauthorized');
       req.resume();
       return;
     }
-    if (!allowed(req.method, pathname)) {
+    const { runId } = entry;
+    if (!allowed(req.method, pathname, entry)) {
       deny(res, 404, 'not found');
       req.resume();
       return;
@@ -223,7 +237,7 @@ async function startCoreRelay({ coreOrigin, haToken, log = () => {}, record = ()
           deny(res, 413, 'request body too large');
           return;
         }
-        const verdict = judgeClientBody(body.toString('utf8'));
+        const verdict = judgeClientBody(body.toString('utf8'), entry.basenames);
         if (verdict.forward === true) {
           // Registered before the body goes on, so an answer cannot arrive first.
           for (const call of (verdict.calls || [])) {
@@ -370,15 +384,31 @@ async function startCoreRelay({ coreOrigin, haToken, log = () => {}, record = ()
   return {
     url: `http://127.0.0.1:${port}`,
     port,
-    issue(runId) {
+    // A bearer for one run, carrying what that run may do. `cameras` are the
+    // entities the run may read. Anything absent means the run may not: this is
+    // the only place a bearer is created, so there is no window in which it means
+    // more.
+    //
+    // `basenames` go through `haBasename` here — the SAME rule the wire name is
+    // reduced by — so both sides of the comparison speak basenames and no name can
+    // mean one thing on the way in and another on the way out. A confirmed intent
+    // may legitimately carry `__` (`INTENT_RE` in security.js allows `_`), and
+    // storing it verbatim would refuse every call of that run while the adapter
+    // allowed it: fail-closed, silent, and impossible to see from either side.
+    issue(runId, { basenames = [], cameras = [] } = {}) {
       const token = crypto.randomBytes(32).toString('base64url');
-      runs.set(token, runId);
+      runs.set(token, {
+        runId,
+        basenames: new Set([...basenames].map(haBasename)),
+        cameras: new Set(cameras),
+      });
       return token;
     },
     revoke(token) {
-      const runId = runs.get(token);
+      const entry = runs.get(token);
       runs.delete(token);
-      if (runId === undefined) return;
+      if (entry === undefined) return;
+      const { runId } = entry;
       // The run is over. A call Home Assistant never answered is still something
       // the run asked for, and silence is not a record of it.
       const pending = awaiting.get(runId);

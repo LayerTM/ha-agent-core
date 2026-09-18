@@ -890,6 +890,7 @@ function run({
 module.exports = {
   run,
   shutdown,
+  wantedHaBasenames,
   haToolBasename,
   resolveHaTools,
   launchSpec,

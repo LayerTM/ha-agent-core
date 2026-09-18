@@ -8,6 +8,21 @@ uses [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- A run's relay token is now what that run may do. The per-call enforcement of
+  "this run may use these Home Assistant tools and no others" had exactly one
+  enforcer and it was the engine adapter, by contract: the relay extracted every
+  `tools/call`'s tool name for the audit record and forwarded it unjudged, and the
+  camera door opened for any valid bearer — a bearer the run's own MCP
+  configuration hands to an agent with a shell. The token is now minted carrying
+  the tool basenames the request implies and the camera entity it named; the relay
+  refuses a call for anything else with `-32602`, and a camera path that is not
+  the run's own with `404`. A token given nothing may call no tool and read no
+  camera; `tools/list`, `initialize` and `ping` are not narrowed and still reach
+  Home Assistant on it, because listing is not acting and the run's rename
+  detector needs the published catalogue. Tool names are matched by Home Assistant's own
+  basename rule — the part after the last `__` — which is the shape `tools/call`
+  actually carries, measured against the engine rather than assumed.
+
 - The archive no longer ships six script names only one engine can run.
   `test:alerts`, `test:config`, `test:monitor`, `test:digest`, `test:audit` and
   `test:statusline` join `haAgentCore.unshippedScripts`: their `.sh` files are the

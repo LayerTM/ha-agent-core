@@ -18,7 +18,7 @@ const { adapter, branding } = require('../adapter-contract');
 const { langOf, DEGRADE_TEXT, budgetNotice } = require('./notices');
 const { createHistoryStore } = require('./history');
 
-const { run, TIMEOUT_MS, safeLangTag } = require('./run');
+const { run, TIMEOUT_MS, safeLangTag, wantedHaBasenames } = require('./run');
 
 const MAX_PROMPT_BYTES = 8 * 1024;
 const MAX_BODY_BYTES = 64 * 1024;
@@ -536,7 +536,7 @@ function createPromptApp({
   token, claudeBin, claudeSettings = '', usageBin, haConfigured,
   // One run's bearer and MCP configuration: made when the run takes its slot,
   // destroyed when it gives it back. Neither outlives the run that owns it.
-  beginRun = async (_runId) => ({ token: '', mcpConfigPath: null, dir: null }), endRun = async (_run) => {},
+  beginRun = async (_runId, _may) => ({ token: '', mcpConfigPath: null, dir: null }), endRun = async (_run) => {},
   model, voiceModel = '', writeModel = '', cameraModel = '',
   dailyBudgetUsd = 0,
   coreRelayUrl = '',
@@ -1021,7 +1021,14 @@ function createPromptApp({
       let runHandle = null;
       let imagePath = null;
       try {
-        runHandle = await beginRun(runId);
+        // What this request may do, from what it already had to decide: a read
+        // needs live context, a write needs exactly the confirmed intents (the
+        // same function the run itself uses, so the two cannot disagree), and the
+        // only camera it may read is the entity this request named, if any.
+        runHandle = await beginRun(runId, {
+          basenames: wantedHaBasenames(mode, intents || []),
+          cameras: imageEntity ? [imageEntity] : [],
+        });
         // Fetch the requested camera snapshot (if any) before running Claude; a
         // failed fetch simply yields no image and the model answers without vision.
         imagePath = imageEntity
