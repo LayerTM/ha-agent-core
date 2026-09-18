@@ -44,7 +44,6 @@ valid (see [Names](#names) and [Console pages](#console-pages)):
 | `prompt.limitsSource({ apiKey, oauthToken, homeDir })` | function | the account's limits: `null` without a credential, or `{ mode, key, read(fetch)? }` (see below) |
 | `prompt.authConfigured({ env, home })` | function | whether the agent has credentials |
 | `prompt.writeMcpConfig({ dir, url, bearer })` | function | write (or, without a URL, remove) the MCP configuration in `dir` — called once per run, with that run's own `dir` and `bearer`, so it must write where it is told and must be idempotent: two runs are in flight at once, and neither may be handed the other's file |
-| `prompt.hasAuditHook(raw)` | function | whether the run settings carry the audit hook; without it the prompt API does not start |
 | `prompt.removeSavedSessions(homeDir, workDir)` | function | remove transcripts earlier versions saved |
 | `prompt.credentials({ options, env, optionString })` | function | `{ apiKey, oauthToken }` |
 | `prompt.secretValues({ options, env, optionString })` | function | `{ options: [...], env: [...] }`, added to the redactor |
@@ -201,18 +200,32 @@ so `ha-audit` shows both and `ha-usage` reads neither as chat spend:
 
     2026-09-18 02:31:07  HassTurnOn run=9f2c1a04b7e2: {"name":"desk lamp"}
 
+A camera read is a Home Assistant action too, and it is not a tool call, so it
+gets a line of its own:
+
+    2026-09-18 02:31:09  camera run=9f2c1a04b7e2: camera.front_door
+
 The run id is the one the prompt server's own `prompt[...]` line carries, so a
 call can be read back to its caller, its status and its cost. A line is written
 when Home Assistant answers, and carries `(dry-run)` when the call or its answer
-says `dry_run: true`, `(failed)` when the answer is an error, and `(no answer)`
-when the run ended with the call unanswered. Arguments are the model's text: they
-are stripped of control characters and cut, as the hook cuts them, so nothing in
-them can pass for a line of its own.
+says `dry_run: true`, `(failed)` when Home Assistant answered that call with an
+error — which says the answer was an error, not that nothing happened, since an
+error can follow a partial effect — `(no answer)` when Home Assistant never
+answered it (the run ended with the call still in the air, or a camera read got
+no answer at all), and `(no answer possible)` for a call sent without a JSON-RPC
+id, which asks Home Assistant to act but leaves nothing that could ever answer.
+Arguments are the model's text: they are stripped of control characters and cut,
+as the hook cuts them, so nothing in them can pass for a line of its own.
 
 This is why a prompt run's Home Assistant actions are recorded whatever the
 engine is, with hooks or without: the record is written where the call passes,
-not by the engine that made it. It says nothing about a tool that never reaches
-Home Assistant — those are the engine's to record.
+not by the engine that made it. It is also why the prompt API no longer asks an
+engine whether its settings carry an audit hook before it starts — that was the
+engine's answer about itself, one an engine that cannot run hooks could not give
+truthfully, and nothing behind the flag was ever checked.
+
+The record says nothing about a tool that never reaches Home Assistant. Those are
+the engine's to record, and a console run's hook still does.
 
 ### Error answers
 
