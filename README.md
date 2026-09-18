@@ -538,14 +538,18 @@ The archive is an uncompressed ustar stream with every entry under
 - the manifest records `name`, `version`, `commit`, `adapterApi` and, for every
   other file, its `path`, `mode`, `size` and `sha256`;
 - a `package.json` is packed without the scripts `haAgentCore.unshippedScripts`
-  names for it, and with every other one. Today that is `test:usage` and
-  `test:image` in `app/package.json`, whose test files no consumer has; the
-  scripts a consumer's own CI runs stay. The list says what to DROP rather than
-  what to keep, because the archive cannot answer the question: these scripts run
-  in an assembled tree, where the consumer supplies the tests and the lint and
-  type configuration, so only a consumer knows which of them resolve. Keeping by
-  default costs a stale line in a manifest; dropping by default costs a live
-  script in someone's CI. Everything else in the manifest, its dependencies
+  names for it, and with every other one. Today that is `test:usage`,
+  `test:image` and the six `cc-`/`config-list` shell suites (`test:alerts`,
+  `test:config`, `test:monitor`, `test:digest`, `test:audit`,
+  `test:statusline`) in `app/package.json`: the core runs all eight itself, and
+  their files are its own, so a shipped name would be one no other engine can
+  run. What ships is `start`, `test`, `lint` and `typecheck` — the four that
+  resolve in any add-on's tree. The list says what to DROP rather than what to
+  keep, because the archive cannot answer the question: these scripts run in an
+  assembled tree, where the consumer supplies the tests and the lint and type
+  configuration, so only a consumer knows which of them resolve. A name is
+  dropped when its file is the core's own; it stays when any add-on's tree can
+  answer for it. Everything else in the manifest, its dependencies
   included, is the file as the commit has it, so `npm ci` still matches the lock,
   and a manifest with nothing named is packed byte for byte. Packing refuses a
   manifest the list says nothing about, a name it drops that the manifest does
@@ -640,10 +644,10 @@ Exit status: `0` verified, `1` refused (the reason is printed), `2` usage error.
 ### Shipped scripts
 
 `check-assembly` also resolves what the scripts of a shipped `package.json` name.
-It is the one place that can: of the ten scripts `app/package.json` ships today,
-only `start` names a file the core itself carries — the other nine name the
-add-on's tests and its lint and type configuration, which the archive does not
-have and cannot judge.
+It is the one place that can: of the four scripts `app/package.json` ships today,
+only `start` names a file the core itself carries — `test` and `typecheck` name
+the add-on's tests and its type configuration, which the archive does not have
+and cannot judge, and `lint` names nothing at all (see the limits below).
 
 The rule it applies, stated because a heuristic that under-matches would make the
 check vacuous while it read green. A command is split on whitespace and each word
