@@ -8,6 +8,13 @@ uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- The relay says when Home Assistant refused. A non-2xx answer from Home
+  Assistant travelled back to the agent untouched and unmentioned, so an add-on
+  whose Home Assistant token is not accepted produced exactly one visible symptom:
+  the agent saying its tool was unavailable. The cause — a 401 from Home Assistant
+  — was written nowhere. It is now logged, worded as Home Assistant's answer
+  rather than this relay's own refusal, and a 401 or 403 names the add-on's Home
+  Assistant token as the thing to fix. No token is logged.
 - The relay says when it was dialled. Every line it wrote came from the request
   handler, which runs only once a whole HTTP request has been parsed, so a caller
   that opened a socket and never finished a request left exactly the same silence

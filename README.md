@@ -212,6 +212,11 @@ keeps it within the tools the run's allowlist names.
   entity the request named is the whole permission: `GET
   /api/camera_proxy/<other>` is refused with 404, and a run that named no camera
   reads none.
+- An answer from Home Assistant that is not a success is logged too, and said to
+  be **Home Assistant's**: a 401 or 403 names the add-on's Home Assistant token as
+  the thing to fix, any other status is named by its number. It reads differently
+  from this relay's own refusal, so a rejected Home Assistant token is never
+  mistaken for a bearer the relay does not know. The token is not logged.
 - An accepted connection is logged once, before any request: which ports, and how
   many connections this relay has accepted. A caller that dials and never
   completes a request is therefore distinguishable from one that never dialled.

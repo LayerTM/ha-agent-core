@@ -684,3 +684,80 @@ test('each connection is counted, and a refusal on one of them is a separate lin
     assert.match(lines[0], /relay accepted connection 1 /);
   });
 });
+
+// --- the relay says when Home Assistant refused ---------------------------------
+
+// A non-2xx answer from Home Assistant used to pass back untouched and unsaid, so
+// a rejected Home Assistant token looked exactly like an agent that never dialled.
+// Measured 2026-09-18 in a sandbox: the agent said its tool was unavailable, the
+// relay knew the run's bearer, and the 401 in between was written nowhere.
+async function withUpstream(status, fn) {
+  const lines = [];
+  const upstream = http.createServer((req, res) => {
+    res.writeHead(status, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ message: status === 401 ? 'Unauthorized' : 'whatever' }));
+  });
+  await new Promise((r) => upstream.listen(0, '127.0.0.1', r));
+  const relayHere = await startCoreRelay({
+    coreOrigin: `http://127.0.0.1:${upstream.address().port}`, haToken: HA_TOKEN, log: (l) => lines.push(l),
+  });
+  try {
+    const token = relayHere.issue('run-upstream', MAY);
+    const res = await fetch(`${relayHere.url}/api/mcp`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: INIT,
+    });
+    await fn({ res, lines, token });
+  } finally {
+    relayHere.close();
+    upstream.close();
+  }
+}
+
+test('a 401 from Home Assistant is logged as its configuration, not as this relay refusing', async () => {
+  await withUpstream(401, ({ res, lines }) => {
+    assert.equal(res.status, 401);
+    const said = lines.filter((l) => l.includes('upstream'));
+    assert.equal(said.length, 1);
+    assert.match(said[0], /relay upstream: Home Assistant refused the add-on's Home Assistant token \(401\)/);
+    assert.match(said[0], /for POST \/api\/mcp/);
+    // and it is not the line a bearer THIS relay does not know produces
+    assert.deepEqual(lines.filter((l) => l.includes('relay refused')), []);
+  });
+});
+
+test('this relay refusing and Home Assistant refusing are different lines', async () => {
+  // The relay's own 401: a bearer it does not know.
+  const mine = [];
+  await withLoggingRelay(async ({ lines, ask }) => {
+    await ask({ authorization: 'Bearer not-a-run' });
+    mine.push(...lines.filter((l) => l.includes('refused')));
+  });
+  // Home Assistant's 401: the run's bearer was fine.
+  const theirs = [];
+  await withUpstream(401, ({ lines }) => {
+    theirs.push(...lines.filter((l) => l.includes('upstream')));
+  });
+  assert.equal(mine.length, 1);
+  assert.equal(theirs.length, 1);
+  assert.notEqual(mine[0], theirs[0]);
+  assert.match(mine[0], /^relay refused /);
+  assert.match(theirs[0], /^relay upstream: /);
+});
+
+test('any other unsuccessful answer from Home Assistant is named by its status', async () => {
+  await withUpstream(503, ({ res, lines }) => {
+    assert.equal(res.status, 503);
+    const said = lines.filter((l) => l.includes('upstream'));
+    assert.equal(said.length, 1);
+    assert.match(said[0], /relay upstream: Home Assistant answered 503 for POST \/api\/mcp/);
+    assert.doesNotMatch(said[0], /token/);
+  });
+});
+
+test('the Home Assistant token never appears in what is logged', async () => {
+  await withUpstream(401, ({ lines }) => {
+    for (const line of lines) assert.equal(line.includes(HA_TOKEN), false, line);
+  });
+});
