@@ -6,6 +6,8 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.5] - 2026-09-18
+
 ### Fixed
 
 - The relay says when Home Assistant refused. A non-2xx answer from Home
