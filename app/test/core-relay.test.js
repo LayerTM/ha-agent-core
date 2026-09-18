@@ -761,3 +761,34 @@ test('the Home Assistant token never appears in what is logged', async () => {
     for (const line of lines) assert.equal(line.includes(HA_TOKEN), false, line);
   });
 });
+
+test('a camera read Home Assistant refuses is named the same way', async () => {
+  // The line is gated by the status, not by the path, and deliberately so: a
+  // rejected Home Assistant token explains a failed snapshot exactly as it
+  // explains a failed tool call, and the person reading the log has one answer
+  // for both.
+  const lines = [];
+  const upstream = http.createServer((req, res) => {
+    res.writeHead(401, { 'content-type': 'application/json' });
+    res.end('{"message":"Unauthorized"}');
+  });
+  await new Promise((r) => upstream.listen(0, '127.0.0.1', r));
+  const relayHere = await startCoreRelay({
+    coreOrigin: `http://127.0.0.1:${upstream.address().port}`, haToken: HA_TOKEN, log: (l) => lines.push(l),
+  });
+  try {
+    const token = relayHere.issue('run-camera-401', { basenames: [], cameras: ['camera.front'] });
+    const res = await fetch(`${relayHere.url}/api/camera_proxy/camera.front`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    assert.equal(res.status, 401);
+    const said = lines.filter((l) => l.includes('upstream'));
+    assert.equal(said.length, 1);
+    assert.match(said[0], /Home Assistant refused the add-on's Home Assistant token \(401\)/);
+    assert.match(said[0], /for GET \/api\/camera_proxy\/camera\.front$/);
+    for (const line of lines) assert.equal(line.includes(HA_TOKEN), false, line);
+  } finally {
+    relayHere.close();
+    upstream.close();
+  }
+});

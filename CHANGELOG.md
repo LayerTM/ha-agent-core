@@ -15,6 +15,15 @@ uses [Semantic Versioning](https://semver.org/).
   — was written nowhere. It is now logged, worded as Home Assistant's answer
   rather than this relay's own refusal, and a 401 or 403 names the add-on's Home
   Assistant token as the thing to fix. No token is logged.
+- The add-on asks Home Assistant whether the token is accepted, once, at start-up,
+  instead of calling a non-empty option "configured". A token Home Assistant
+  refuses used to be announced as "HA Token configured (dashboard screenshots + HA
+  tools enabled)", and the only later symptom was an agent saying its tools were
+  unavailable. Three answers now read differently: accepted, refused (with what
+  stops working and what to do about it), and "could not be checked" when Home
+  Assistant did not answer at all — a check that could not run is never reported
+  as a verdict. Start-up is not blocked in any of the three, and no token is
+  logged.
 - The relay says when it was dialled. Every line it wrote came from the request
   handler, which runs only once a whole HTTP request has been parsed, so a caller
   that opened a socket and never finished a request left exactly the same silence
