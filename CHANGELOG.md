@@ -6,6 +6,8 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.6] - 2026-09-18
+
 ### Fixed
 
 - The start-up questions wait for Home Assistant Core to be up. The add-on and
@@ -16,7 +18,10 @@ uses [Semantic Versioning](https://semver.org/).
   Both now ask through one waiting rule, which repeats the question for a few
   seconds while nothing answers and stops the moment something does. A refusal is
   an answer: a rejected token is still reported as rejected, on the first attempt.
-  Start-up is not blocked in any case.
+  Start-up is not blocked in any case: each of the two questions has its own
+  budget of eight seconds, so an add-on started while nothing answers at all
+  spends at most sixteen seconds on the pair and then carries on with what it
+  knew before.
 
 ### Security
 
