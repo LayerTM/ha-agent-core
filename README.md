@@ -212,6 +212,9 @@ keeps it within the tools the run's allowlist names.
   entity the request named is the whole permission: `GET
   /api/camera_proxy/<other>` is refused with 404, and a run that named no camera
   reads none.
+- An accepted connection is logged once, before any request: which ports, and how
+  many connections this relay has accepted. A caller that dials and never
+  completes a request is therefore distinguishable from one that never dialled.
 - A request whose bearer the relay does not know is refused with 401 **and
   logged**, on the add-on's own log channel: whether an `authorization` header
   came at all, whether it had the `Bearer ` form, how many characters were

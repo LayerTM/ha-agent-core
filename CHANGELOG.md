@@ -8,6 +8,13 @@ uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- The relay says when it was dialled. Every line it wrote came from the request
+  handler, which runs only once a whole HTTP request has been parsed, so a caller
+  that opened a socket and never finished a request left exactly the same silence
+  as a caller that never came — and those are not the same problem. Each accepted
+  connection is now logged once, with the local and remote port and how many
+  connections this relay has accepted since it started. A connection carries no
+  credential, and none is logged.
 - The background loops speak in the add-on's log. Each of the four (usage
   upkeep, the proactive monitor, the morning digest, the alerts loop) was started
   with its output redirected into a file inside the container, which the Log tab
