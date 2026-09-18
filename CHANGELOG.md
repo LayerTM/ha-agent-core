@@ -8,6 +8,14 @@ uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- An engine may declare `descriptor.closedSchemasOnly`, for a structured output
+  that cannot describe an OPEN object — one whose keys belong to the caller, like
+  an intent's `data` or a Home Assistant automation block. The core then gives
+  that engine no schema for an answer that needs one, and the answer's shape is
+  carried by the system prompt; what the answer must BE is unchanged, and it is
+  validated exactly as before. An engine that does not declare it is given
+  byte-for-byte the schema it was given before, and the write answer — which has
+  no open object — keeps its schema for every engine.
 - The proactive-alerts loop says so when it is watching nothing. With the offline
   alert switched on and the watch list empty the loop is correct and permanently
   silent, which from outside is indistinguishable from "watching, and all clear";
