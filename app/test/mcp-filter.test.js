@@ -29,17 +29,24 @@ test('a forwarded body names the calls it makes, and only those', () => {
   // What a record of this body would have to say: which tool, with what.
   assert.deepEqual(judge(rpc('tools/call', 3, { name: 'HassTurnOn', arguments: { name: 'lamp' } })), {
     forward: true,
-    calls: [{ id: 3, name: 'HassTurnOn', args: { name: 'lamp' } }],
+    calls: [{ id: 3, answerable: true, name: 'HassTurnOn', args: { name: 'lamp' } }],
   });
-  // A call without an id expects no answer, so there is nothing to resolve.
-  assert.deepEqual(judge(rpc('tools/call', undefined, { name: 'HassTurnOn' })), { forward: true, calls: [] });
+  // A call without an id is named too. It expects no answer — which is a fact
+  // about the record, not about the action: Home Assistant is still asked.
+  assert.deepEqual(judge(rpc('tools/call', undefined, { name: 'HassTurnOn' })), {
+    forward: true,
+    calls: [{ id: undefined, answerable: false, name: 'HassTurnOn', args: undefined }],
+  });
   // A batch names each of its calls, and nothing that is not one.
   assert.deepEqual(
     judge([rpc('tools/list', 1), rpc('tools/call', 2, { name: 'GetLiveContext', arguments: {} })]),
-    { forward: true, calls: [{ id: 2, name: 'GetLiveContext', args: {} }] },
+    { forward: true, calls: [{ id: 2, answerable: true, name: 'GetLiveContext', args: {} }] },
   );
   // A name the agent did not send is not invented.
-  assert.deepEqual(judge(rpc('tools/call', 4, {})), { forward: true, calls: [{ id: 4, name: '', args: undefined }] });
+  assert.deepEqual(judge(rpc('tools/call', 4, {})), {
+    forward: true,
+    calls: [{ id: 4, answerable: true, name: '', args: undefined }],
+  });
 });
 
 test('every other method is answered "method not found" and not forwarded', () => {

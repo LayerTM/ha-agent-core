@@ -226,10 +226,17 @@ async function startCoreRelay({ coreOrigin, haToken, log = () => {}, record = ()
         const verdict = judgeClientBody(body.toString('utf8'));
         if (verdict.forward === true) {
           // Registered before the body goes on, so an answer cannot arrive first.
-          if (verdict.calls && verdict.calls.length) {
+          for (const call of (verdict.calls || [])) {
+            if (!call.answerable) {
+              // Nothing will ever answer it, so waiting for an answer would mean
+              // never recording it. Written here, where it goes on to Home
+              // Assistant: the action happened, the answer could not.
+              record(describeCall({ ...call, runId }, ' (no answer possible)'));
+              continue;
+            }
             let pending = awaiting.get(runId);
             if (!pending) { pending = new Map(); awaiting.set(runId, pending); }
-            for (const call of verdict.calls) pending.set(String(call.id), { ...call, runId });
+            pending.set(String(call.id), { ...call, runId });
           }
           forward(req, res, pathname, body, observerFor(runId), runId);
           return;
@@ -251,6 +258,10 @@ async function startCoreRelay({ coreOrigin, haToken, log = () => {}, record = ()
   // The request to Core, with the Home Assistant token in place of the relay's.
   // Only POST /api/mcp carries a body to Core: `body` is that body, already read
   // and judged, or null for a request that sends none. Nothing is streamed.
+  function recordCamera(runId, pathname, mark) {
+    record(capBytes(`camera run=${runId}${mark}: ${pathname.slice(CAMERA_PREFIX.length)}`, LINE_CAP));
+  }
+
   function forward(req, res, pathname, body, observe, runId) {
     const headers = { authorization: `Bearer ${haToken}` };
     for (const [name, value] of Object.entries(req.headers)) {
@@ -272,17 +283,20 @@ async function startCoreRelay({ coreOrigin, haToken, log = () => {}, record = ()
         ...(secure ? { rejectUnauthorized: false } : {}),
       },
       (upRes) => {
+        const redirected = upRes.statusCode >= 300 && upRes.statusCode < 400;
         if (CAMERA_PATH_RE.test(pathname)) {
           // A camera read is a Home Assistant action too, and it is not a tool
           // call: no name, no arguments, so it gets a line of its own rather than
-          // a place in one that would have to leave them empty.
+          // a place in one that would have to leave them empty. A redirect is not
+          // an error answer to the read — it is no answer to it, and the mark says
+          // only what it means.
           const ok = upRes.statusCode >= 200 && upRes.statusCode < 300;
-          record(capBytes(`camera run=${runId}${ok ? '' : ' (failed)'}: ${pathname.slice(CAMERA_PREFIX.length)}`, LINE_CAP));
+          recordCamera(runId, pathname, ok ? '' : (redirected ? ' (no answer)' : ' (failed)'));
         }
         // A redirect is never followed: node does not follow by default, and the
         // Authorization header must not travel to another origin. Surfaced as a
         // plain error so it cannot be mistaken for an auth failure.
-        if (upRes.statusCode >= 300 && upRes.statusCode < 400) {
+        if (redirected) {
           upRes.resume();
           deny(res, 502, `core returned a redirect (${upRes.statusCode}) — not followed`);
           return;
@@ -332,6 +346,9 @@ async function startCoreRelay({ coreOrigin, haToken, log = () => {}, record = ()
 
     upstream.on('error', (err) => {
       log(`relay upstream error: ${err.message}`);
+      // The read never reached Home Assistant, or its answer never came back.
+      // Silence is not a record of it.
+      if (CAMERA_PATH_RE.test(pathname)) recordCamera(runId, pathname, ' (no answer)');
       if (!res.headersSent) deny(res, 502, 'core unreachable');
       else res.end();
     });

@@ -6,6 +6,25 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- The prompt API no longer requires the engine's settings to carry an audit
+  hook, and no longer starts or refuses on the engine's answer about itself.
+  Every Home Assistant action a chat request takes passes the core's loopback
+  relay, and the relay records it to `/data/claude-audit.log` — one line per
+  tool call and one per camera read, naming the run, in the shape the audit
+  hook writes for a console run, so `ha-audit` shows both and `ha-usage` reads
+  neither as chat spend. A prompt run's Home Assistant actions are therefore
+  recorded for every engine, including one whose runs cannot run hooks.
+- Adapter API 5: the relay token is issued per run instead of per boot, and the
+  MCP configuration is written per run, into a directory of that run's own.
+  `prompt.writeMcpConfig` is called once per run and must be idempotent.
+
+### Removed
+
+- `prompt.hasAuditHook` is no longer part of the adapter contract; nothing asks
+  it. An adapter may keep the method — it is ignored — or drop it.
+
 ## [0.5.0]
 
 ### Added

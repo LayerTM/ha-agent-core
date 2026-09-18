@@ -389,3 +389,51 @@ test('a camera read is recorded too, with a line of its own', async () => {
     pics.close();
   }
 });
+
+test('a tool call that expects no answer is recorded when it is sent', async () => {
+  // It asks Home Assistant to do something and nothing will ever answer it, so
+  // waiting for an answer would mean never recording it at all.
+  const h = await withRecording(ok);
+  try {
+    const token = h.relay.issue('run-12');
+    await h.call(token, { jsonrpc: '2.0', method: 'tools/call', params: { name: 'HassTurnOff', arguments: { name: 'lamp' } } });
+    assert.deepEqual(h.lines, ['HassTurnOff run=run-12 (no answer possible): {"name":"lamp"}']);
+    // And it is not waiting for anything: the run ends without a second line.
+    h.relay.revoke(token);
+    assert.equal(h.lines.length, 1);
+  } finally {
+    h.done();
+  }
+});
+
+test('a camera read that never gets an answer is recorded as such, and a redirect is not called a failure', async () => {
+  const lines = [];
+  const pics = http.createServer((req, res) => {
+    if (req.url === '/api/camera_proxy/camera.moved') {
+      res.writeHead(302, { location: 'http://elsewhere.invalid/x' });
+      res.end();
+      return;
+    }
+    // Nothing is answered: the socket is torn down mid-request.
+    req.socket.destroy();
+  });
+  await new Promise((r) => pics.listen(0, '127.0.0.1', r));
+  const relayHere = await startCoreRelay({
+    coreOrigin: `http://127.0.0.1:${pics.address().port}`, haToken: HA_TOKEN, record: (line) => lines.push(line),
+  });
+  try {
+    const token = relayHere.issue('run-13');
+    const get = (entity) => fetch(`${relayHere.url}/api/camera_proxy/${entity}`, {
+      headers: { authorization: `Bearer ${token}` },
+    }).catch(() => null);
+    await get('camera.moved');
+    await get('camera.silent');
+    assert.deepEqual(lines, [
+      'camera run=run-13 (no answer): camera.moved',
+      'camera run=run-13 (no answer): camera.silent',
+    ], 'neither says the answer was an error, because neither answer was one');
+  } finally {
+    relayHere.close();
+    pics.close();
+  }
+});

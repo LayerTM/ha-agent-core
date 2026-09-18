@@ -38,7 +38,7 @@ function errorFor(id, code, message) {
 /**
  * Judges one request body from the agent.
  * @param {string} text
- * @returns {{ forward: true, calls: {id: unknown, name: string, args: unknown}[] }
+ * @returns {{ forward: true, calls: {id: unknown, answerable: boolean, name: string, args: unknown}[] }
  *   | { forward: false, status: number, body: string, type?: string }}
  */
 function judgeClientBody(text) {
@@ -59,10 +59,14 @@ function judgeClientBody(text) {
   if (!refused.some(Boolean)) {
     // What this body asks Home Assistant to DO, for the record the relay writes:
     // a tool call that expects an answer. A notification (no id) is not one.
+    // Every tool call, including one sent without an id. Such a call still asks
+    // Home Assistant to do something; what it does not do is expect an answer,
+    // which is a fact about the RECORD, not about the action.
     const calls = messages
-      .filter((m) => m.method === 'tools/call' && 'id' in m && m.id !== null)
+      .filter((m) => m.method === 'tools/call')
       .map((m) => ({
         id: m.id,
+        answerable: 'id' in m && m.id !== null,
         name: typeof m.params?.name === 'string' ? m.params.name : '',
         args: m.params?.arguments,
       }));
