@@ -18,7 +18,11 @@ uses [Semantic Versioning](https://semver.org/).
   cause; `/api/status` publishes `audit_recording` and `audit_error`; a `write`
   request is refused while the record is not being kept, with the new code
   `audit_unavailable` and the errno beside it, and a `read` is not refused,
-  because it does not act on the home. The log is probed once at start, so an
+  because it does not act on the home. The writes already in flight when the log
+  fails are the ones that are lost: the state is read when a request is admitted
+  and not again for the life of its run, and two runs can be in flight at once,
+  each making several calls. The refusal stops the next request from acting, not
+  the run that is acting now. The log is probed once at start, so an
   unwritable `/data` is a fact of the boot rather than something a user finds
   out through a chat request; the probe writes no byte into the log.
 

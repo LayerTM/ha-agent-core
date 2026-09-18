@@ -60,12 +60,22 @@ function createAuditSink(file, { now = () => new Date(), appendFile = fs.appendF
     // them awaits this. The returned promise settles when the WRITE did, and
     // never rejects — it exists so a test can read the state after the write
     // rather than after a sleep, which is a race the runner wins sometimes.
+    //
+    // The body of an fs callback is the one place a throw has nowhere to go: it
+    // leaves the process with an uncaught error and the promise never settles.
+    // `announce` is injected, so it is the part that can throw; the state is
+    // assigned before it runs, so a lost announcement never leaves the record's
+    // state wrong. That is why the guard swallows rather than reports: there is
+    // no surface left to report it to, and the state it would report is already
+    // correct.
     append(line) {
       const ts = now().toISOString().replace('T', ' ').slice(0, 19);
       return new Promise((resolve) => {
         appendFile(file, `${ts}  ${line}\n`, (err) => {
-          if (err) failed(err);
-          else wrote();
+          try {
+            if (err) failed(err);
+            else wrote();
+          } catch { /* a broken announcer must not end the add-on */ }
           resolve(code === null);
         });
       });
@@ -91,9 +101,12 @@ function createAuditSink(file, { now = () => new Date(), appendFile = fs.appendF
       return new Promise((resolve) => {
         appendFile(file, '', (err) => {
           // A probe is not a line, so it is not counted as one; it still ends an
-          // outage, because it proves the same thing a line would.
-          if (err) failed(err);
-          else cleared();
+          // outage, because it proves the same thing a line would. Guarded for
+          // the same reason as the append above.
+          try {
+            if (err) failed(err);
+            else cleared();
+          } catch { /* a broken announcer must not end the add-on */ }
           resolve(code === null);
         });
       });

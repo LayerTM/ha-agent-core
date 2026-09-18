@@ -234,8 +234,15 @@ disk does not become one line per call), `/api/status` publishes
 `audit_recording` and `audit_error`, and while the record is not being kept a
 `write` request is refused with `503` and the code `audit_unavailable`, which
 carries the errno as `audit_error`. A `read` is not refused: it does not act on
-the home, so the home keeps answering. The first failing write is the one that
-is lost, and it is the one the announcement is about.
+the home, so the home keeps answering.
+
+**Which writes are lost.** The writes already in flight when the log fails, not
+one of them. The state is read when a request is ADMITTED and not again for the
+life of its run, so every remaining Home Assistant call of every run already
+running loses its line — and two runs can be in flight at once
+(`MAX_CONCURRENT_RUNS`), each making several calls. A run with three calls left
+loses three lines. What the refusal stops is the NEXT request acting, not the run
+that is acting now; the announcement is about the writes that are already gone.
 
 The log is also probed once when the prompt API starts, because a read-only or
 unwritable `/data` is a fact of the boot and a chat request is the wrong way to

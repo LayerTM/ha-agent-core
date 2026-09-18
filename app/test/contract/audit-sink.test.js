@@ -105,3 +105,29 @@ test('a probe that succeeds after a failure ends the outage without counting a l
   assert.equal(await sink.probe(), true);
   assert.deepEqual(sink.state(), { recording: true, code: null, failures: 1, writes: 0 });
 });
+
+test('an announcer that throws neither ends the process nor swallows the state', async () => {
+  // The body of an fs callback is the one place a throw has nowhere to go: it
+  // leaves the process with an uncaught error. This test IS that detector — if
+  // the guard is removed, the runner dies here rather than reporting a failure.
+  // Production passes no announcer, so this is the latent path the module's own
+  // "never throws" promises against, held by a test rather than by a comment.
+  const dir = tmp();
+  const file = path.join(dir, 'claude-audit.log');
+  fs.mkdirSync(file);
+  const broken = () => { throw new Error('the announcer is broken'); };
+  const sink = createAuditSink(file, { announce: broken });
+
+  assert.equal(await sink.probe(), false);
+  assert.equal(sink.state().code, 'EISDIR');
+
+  assert.equal(await sink.append('HassTurnOn run=1: {}'), false);
+  // The state is assigned before the announcement, so a lost announcement never
+  // leaves the record's state wrong.
+  assert.equal(sink.state().recording, false);
+  assert.equal(sink.state().failures, 2);
+
+  fs.rmdirSync(file);
+  assert.equal(await sink.append('HassTurnOn run=2: {}'), true);
+  assert.deepEqual(sink.state(), { recording: true, code: null, failures: 2, writes: 1 });
+});
