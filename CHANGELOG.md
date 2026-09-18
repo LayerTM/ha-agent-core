@@ -6,6 +6,16 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- A repeated heading inside one version section of this file fails the build.
+  The headings were consolidated by hand once and grew apart again in the very
+  next pair of merges, which is what a check is for: two branches that each add
+  a correct section produce the duplicate only once both are on `main`, where a
+  review of either branch cannot see it. The rule is read from the file — no
+  version heading repeats, and no heading repeats within one version — and it
+  knows none of the section names.
+
 ### Fixed
 
 - The relay records the calls still in the air when it shuts down. Ending a run
