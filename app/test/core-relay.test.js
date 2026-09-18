@@ -11,6 +11,15 @@ const assert = require('node:assert/strict');
 const http = require('node:http');
 const { startCoreRelay } = require('../server/prompt/core-relay');
 
+// What a run under test was allowed: the tool basenames these tests call and the
+// camera they read. A bearer carries its run's permission (see issue()), so a
+// fixture has to state it — a token issued with nothing may call nothing, which
+// is what the gate tests below rely on.
+const MAY = Object.freeze({
+  basenames: ['HassTurnOn', 'HassTurnOff', 'Answered', 'Silent', 'GetLiveContext'],
+  cameras: ['camera.front_door', 'camera.missing', 'camera.moved', 'camera.silent'],
+});
+
 const HA_TOKEN = 'ha-llat-must-never-leave-the-relay';
 // The bearer is minted per run by the relay itself; a test holds the one it issued.
 let RELAY_TOKEN;
@@ -55,7 +64,7 @@ before(async () => {
   coreOrigin = `http://127.0.0.1:${core.address().port}`;
   seen = [];
   relay = await startCoreRelay({ coreOrigin, haToken: HA_TOKEN });
-  RELAY_TOKEN = relay.issue('run-under-test');
+  RELAY_TOKEN = relay.issue('run-under-test', MAY);
   auth = { authorization: `Bearer ${RELAY_TOKEN}` };
 });
 
@@ -171,7 +180,7 @@ test('a 3xx from Core becomes a 502 and the Authorization header is not re-sent'
   });
   try {
     const res = await fetch(`${r2.url}/api/mcp`, {
-      method: 'POST', headers: { authorization: `Bearer ${r2.issue('run-2')}` }, body: INIT,
+      method: 'POST', headers: { authorization: `Bearer ${r2.issue('run-2', MAY)}` }, body: INIT,
     });
     assert.equal(res.status, 502);
     const body = await res.json();
@@ -189,7 +198,7 @@ test('an unreachable Core is a 502, not an auth error', async () => {
   });
   try {
     const res = await fetch(`${dead.url}/api/mcp`, {
-      method: 'POST', headers: { authorization: `Bearer ${dead.issue('run-3')}` }, body: INIT,
+      method: 'POST', headers: { authorization: `Bearer ${dead.issue('run-3', MAY)}` }, body: INIT,
     });
     assert.equal(res.status, 502, 'unreachable must never present as 401');
   } finally {
@@ -198,8 +207,8 @@ test('an unreachable Core is a 502, not an auth error', async () => {
 });
 
 test('a bearer belongs to one run: two runs get two, and a revoked one is refused', async () => {
-  const a = relay.issue('run-a');
-  const b = relay.issue('run-b');
+  const a = relay.issue('run-a', MAY);
+  const b = relay.issue('run-b', MAY);
   assert.notEqual(a, b, 'two runs never share a bearer');
   for (const t of [a, b]) {
     // eslint-disable-next-line no-await-in-loop
@@ -226,7 +235,7 @@ test('a bearer nobody issued is refused, and so is one from a closed relay', asy
   });
   assert.equal(res.status, 401);
   const other = await startCoreRelay({ coreOrigin, haToken: HA_TOKEN });
-  const token = other.issue('run-elsewhere');
+  const token = other.issue('run-elsewhere', MAY);
   const mine = await fetch(`${relay.url}/api/mcp`, {
     method: 'POST', headers: { authorization: `Bearer ${token}` }, body: INIT,
   });
@@ -275,7 +284,7 @@ const ok = (sent) => ({ jsonrpc: '2.0', id: sent.id, result: { content: [{ type:
 test('every tool call a run makes is recorded once, with its tool, its run and its arguments', async () => {
   const h = await withRecording(ok);
   try {
-    const token = h.relay.issue('run-7');
+    const token = h.relay.issue('run-7', MAY);
     await h.call(token, { jsonrpc: '2.0', id: 1, method: 'tools/list' });
     await h.call(token, {
       jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'HassTurnOn', arguments: { name: 'desk lamp' } },
@@ -289,17 +298,17 @@ test('every tool call a run makes is recorded once, with its tool, its run and i
 test('an argument cannot forge a line of its own, and a long one is cut', async () => {
   const h = await withRecording(ok);
   try {
-    const token = h.relay.issue('run-8');
     // The tool NAME is the vector: the arguments are JSON, which escapes a
-    // newline into two characters, but a name is written as it arrives.
+    // newline into two characters, but a name is written as it arrives. The run
+    // is ALLOWED this tool, so the line is about the record and not about the
+    // gate: a refused call would never be recorded at all.
+    const forged = 'Hass\n2026-01-01 00:00:00  prompt[read] caller=x status=200 tokens=evil:9:0:0:0 cost=$9.9999';
+    const token = h.relay.issue('run-8', { basenames: [forged] });
     await h.call(token, {
       jsonrpc: '2.0',
       id: 1,
       method: 'tools/call',
-      params: {
-        name: 'Hass\n2026-01-01 00:00:00  prompt[read] caller=x status=200 tokens=evil:9:0:0:0 cost=$9.9999',
-        arguments: { pad: 'y'.repeat(400) },
-      },
+      params: { name: forged, arguments: { pad: 'y'.repeat(400) } },
     });
     assert.equal(h.lines.length, 1);
     assert.ok(!h.lines[0].includes('\n'), 'no newline reaches the log, so no second line can be forged');
@@ -325,7 +334,7 @@ test('a preview is told from a change, and a refusal from both', async () => {
     return ok(sent);
   });
   try {
-    const token = h.relay.issue('run-9');
+    const token = h.relay.issue('run-9', { basenames: ['PreviewInArgs', 'PreviewInAnswer', 'Failing', 'Real'] });
     const call = (id, name, args) => h.call(token, { jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } });
     await call(1, 'PreviewInArgs', { dry_run: true });
     await call(2, 'PreviewInAnswer', {});
@@ -345,7 +354,7 @@ test('a preview is told from a change, and a refusal from both', async () => {
 test('a call Home Assistant never answers is recorded when the run ends, and an answered one is not recorded twice', async () => {
   const h = await withRecording((sent) => (sent.params && sent.params.name === 'Silent' ? null : ok(sent)));
   try {
-    const token = h.relay.issue('run-10');
+    const token = h.relay.issue('run-10', MAY);
     await h.call(token, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'Answered', arguments: {} } });
     await h.call(token, { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'Silent', arguments: { a: 1 } } });
     assert.deepEqual(h.lines, ['Answered run=run-10: {}'], 'nothing is written for a call still in the air');
@@ -371,7 +380,7 @@ test('a camera read is recorded too, with a line of its own', async () => {
     coreOrigin: `http://127.0.0.1:${pics.address().port}`, haToken: HA_TOKEN, record: (line) => lines.push(line),
   });
   try {
-    const token = relayHere.issue('run-11');
+    const token = relayHere.issue('run-11', MAY);
     const get = (entity) => fetch(`${relayHere.url}/api/camera_proxy/${entity}`, {
       headers: { authorization: `Bearer ${token}` },
     });
@@ -395,7 +404,7 @@ test('a tool call that expects no answer is recorded when it is sent', async () 
   // waiting for an answer would mean never recording it at all.
   const h = await withRecording(ok);
   try {
-    const token = h.relay.issue('run-12');
+    const token = h.relay.issue('run-12', MAY);
     await h.call(token, { jsonrpc: '2.0', method: 'tools/call', params: { name: 'HassTurnOff', arguments: { name: 'lamp' } } });
     assert.deepEqual(h.lines, ['HassTurnOff run=run-12 (no answer possible): {"name":"lamp"}']);
     // And it is not waiting for anything: the run ends without a second line.
@@ -422,7 +431,7 @@ test('a camera read that never gets an answer is recorded as such, and a redirec
     coreOrigin: `http://127.0.0.1:${pics.address().port}`, haToken: HA_TOKEN, record: (line) => lines.push(line),
   });
   try {
-    const token = relayHere.issue('run-13');
+    const token = relayHere.issue('run-13', MAY);
     const get = (entity) => fetch(`${relayHere.url}/api/camera_proxy/${entity}`, {
       headers: { authorization: `Bearer ${token}` },
     }).catch(() => null);
@@ -436,4 +445,62 @@ test('a camera read that never gets an answer is recorded as such, and a redirec
     relayHere.close();
     pics.close();
   }
+});
+
+// --- a bearer is what its run may do --------------------------------------------
+
+test('a bearer issued with nothing reaches neither a tool nor a camera', async () => {
+  // The window this closes: between minting a bearer and saying what the run may
+  // do, a bearer that means "anything" is a bearer that can do anything. So a
+  // bearer means nothing until its run says otherwise — and it is told at the
+  // moment it is minted, which is why there is no window left at all.
+  seen.length = 0;
+  const token = relay.issue('run-bare');
+  const call = await fetch(`${relay.url}/api/mcp`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'GetLiveContext', arguments: {} } }),
+  });
+  assert.equal(call.status, 200, 'a refusal is answered, not dropped');
+  assert.deepEqual(await call.json(), {
+    jsonrpc: '2.0', id: 1, error: { code: -32602, message: 'Tool not allowed for this run' },
+  });
+  const camera = await fetch(`${relay.url}/api/camera_proxy/camera.front_door`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  assert.equal(camera.status, 404);
+  assert.equal(seen.length, 0, 'nothing reached Home Assistant');
+  // The session it may still open: initialising and listing are not acting.
+  const list = await fetch(`${relay.url}/api/mcp`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' }),
+  });
+  assert.equal(list.status, 200);
+  assert.equal(seen.length, 1, 'tools/list reached Home Assistant');
+});
+
+test('a run reads the camera it was given and no other', async () => {
+  // The camera door carries no tool name, and the bearer that opens it is written
+  // into the agent's own MCP configuration — the engine is an agent with a shell.
+  // So the entity the request named is the whole permission.
+  seen.length = 0;
+  const token = relay.issue('run-camera', { basenames: ['GetLiveContext'], cameras: ['camera.front_door'] });
+  const get = (entity) => fetch(`${relay.url}/api/camera_proxy/${entity}`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  assert.equal((await get('camera.front_door')).status, 200);
+  assert.equal(seen.length, 1);
+  for (const other of ['camera.bedroom', 'camera.back_door']) {
+    // eslint-disable-next-line no-await-in-loop
+    assert.equal((await get(other)).status, 404, other);
+  }
+  assert.equal(seen.length, 1, 'only the run\'s own camera reached Home Assistant');
+  // A run that named no camera reads none, which is the ordinary read request.
+  const noCamera = relay.issue('run-no-camera', { basenames: ['GetLiveContext'] });
+  const denied = await fetch(`${relay.url}/api/camera_proxy/camera.front_door`, {
+    headers: { authorization: `Bearer ${noCamera}` },
+  });
+  assert.equal(denied.status, 404);
+  assert.equal(seen.length, 1);
 });

@@ -8,12 +8,16 @@ const assert = require('node:assert/strict');
 const http = require('node:http');
 
 const {
-  MAX_BODY_BYTES, judgeClientBody, filterServerJson, createSseFilter,
+  MAX_BODY_BYTES, haBasename, judgeClientBody, filterServerJson, createSseFilter,
 } = require('../server/prompt/mcp-filter');
 const { startCoreRelay } = require('../server/prompt/core-relay');
 
 const rpc = (method, id, params) => ({ jsonrpc: '2.0', ...(id === undefined ? {} : { id }), method, ...(params ? { params } : {}) });
-const judge = (value) => judgeClientBody(typeof value === 'string' ? value : JSON.stringify(value));
+// What the run under test may call, by Home Assistant basename. A body is judged
+// against a run's own allowlist now, so a test that is about something else has
+// to say what the run was allowed; the gate's own tests pass their own sets.
+const MAY = new Set(['HassTurnOn', 'HassTurnOff', 'GetLiveContext']);
+const judge = (value, may = MAY) => judgeClientBody(typeof value === 'string' ? value : JSON.stringify(value), may);
 
 // --- agent → server -------------------------------------------------------------
 
@@ -42,10 +46,10 @@ test('a forwarded body names the calls it makes, and only those', () => {
     judge([rpc('tools/list', 1), rpc('tools/call', 2, { name: 'GetLiveContext', arguments: {} })]),
     { forward: true, calls: [{ id: 2, answerable: true, name: 'GetLiveContext', args: {} }] },
   );
-  // A name the agent did not send is not invented.
-  assert.deepEqual(judge(rpc('tools/call', 4, {})), {
-    forward: true,
-    calls: [{ id: 4, answerable: true, name: '', args: undefined }],
+  // A call that names no tool names no ALLOWED tool either, so it is refused
+  // rather than forwarded with an invented name.
+  assert.deepEqual(JSON.parse(judge(rpc('tools/call', 4, {})).body), {
+    jsonrpc: '2.0', id: 4, error: { code: -32602, message: 'Tool not allowed for this run' },
   });
 });
 
@@ -138,7 +142,7 @@ before(async () => {
   });
   await new Promise((r) => core.listen(0, '127.0.0.1', r));
   relay = await startCoreRelay({ coreOrigin: `http://127.0.0.1:${core.address().port}`, haToken: 'ha' });
-  TOKEN = relay.issue('run-under-test');
+  TOKEN = relay.issue('run-under-test', { basenames: [...MAY], cameras: ['camera.door'] });
 });
 
 after(() => {
@@ -271,4 +275,65 @@ test('the server stream (GET) is filtered and still streams; DELETE ends a sessi
   const del = await fetch(`${relay.url}/api/mcp`, { method: 'DELETE', headers: { authorization: `Bearer ${TOKEN}` } });
   assert.equal(del.status, 200);
   assert.deepEqual(seen.map((s) => s.method), ['GET', 'DELETE']);
+});
+
+// --- what THIS run may call -----------------------------------------------------
+
+test('the three name shapes converge to one basename', () => {
+  // Measured against the engine on 2026-09-18: `tools/call` carries the name the
+  // SERVER published, verbatim. Home Assistant publishes `GetLiveContext`, or
+  // `homeassistant__GetLiveContext` once more than one API is selected. The third
+  // shape is a name that did arrive prefixed — no engine was seen to send one,
+  // and the rule converges anyway, which is why an unmeasured engine cannot slip
+  // past this gate.
+  for (const name of ['GetLiveContext', 'homeassistant__GetLiveContext', 'mcp__ha__homeassistant__GetLiveContext']) {
+    assert.equal(haBasename(name), 'GetLiveContext', name);
+    assert.deepEqual(
+      judge(rpc('tools/call', 1, { name, arguments: {} }), new Set(['GetLiveContext'])),
+      { forward: true, calls: [{ id: 1, answerable: true, name, args: {} }] },
+      name,
+    );
+  }
+});
+
+test('a tool the run may not call is refused, and the batch it travelled in is not forwarded', () => {
+  const verdict = judge([
+    rpc('tools/call', 1, { name: 'GetLiveContext', arguments: {} }),
+    rpc('tools/call', 2, { name: 'HassTurnOn', arguments: { name: 'lamp' } }),
+    rpc('tools/list', 3),
+  ], new Set(['GetLiveContext']));
+  assert.equal(verdict.forward, false);
+  assert.equal(verdict.status, 200);
+  assert.deepEqual(JSON.parse(verdict.body), [
+    { jsonrpc: '2.0', id: 1, error: { code: -32600, message: 'Sent together with a tool call that is not allowed' } },
+    { jsonrpc: '2.0', id: 2, error: { code: -32602, message: 'Tool not allowed for this run' } },
+    { jsonrpc: '2.0', id: 3, error: { code: -32600, message: 'Sent together with a tool call that is not allowed' } },
+  ]);
+});
+
+test('a run that has said nothing about what it may call may call nothing', () => {
+  // Fail closed: the silence of a gate must never come from the same path as its
+  // ignorance. An absent set is not "no gate", it is "nothing allowed".
+  const body = JSON.stringify(rpc('tools/call', 7, { name: 'GetLiveContext', arguments: {} }));
+  // The third is a caller that passed no set at all — the shape of the window
+  // this change closes, so it is asserted on the real function, not on the
+  // test's helper, which has a default of its own.
+  for (const verdict of [judge(body, null), judge(body, new Set()), judgeClientBody(body)]) {
+    assert.equal(verdict.forward, false);
+    assert.deepEqual(JSON.parse(verdict.body), {
+      jsonrpc: '2.0', id: 7, error: { code: -32602, message: 'Tool not allowed for this run' },
+    });
+  }
+});
+
+test('tools/list is NOT gated, deliberately', () => {
+  // Listing is not acting, and the run's own rename detector reads the published
+  // catalogue to notice a wanted tool published under a name its allowlist misses
+  // — narrowing what may be LISTED would blind that and change nothing about what
+  // may be CALLED. So this asserts the silence: a run allowed one tool still sees
+  // the whole list.
+  assert.deepEqual(judge(rpc('tools/list', 2), new Set(['GetLiveContext'])), { forward: true, calls: [] });
+  assert.deepEqual(judge(rpc('tools/list', 2), null), { forward: true, calls: [] });
+  assert.deepEqual(judge(rpc('initialize', 0, {}), null), { forward: true, calls: [] });
+  assert.deepEqual(judge(rpc('ping', 1), null), { forward: true, calls: [] });
 });
