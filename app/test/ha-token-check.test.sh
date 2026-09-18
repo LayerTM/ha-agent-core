@@ -52,6 +52,9 @@ kill "${stub_pid}" 2>/dev/null; wait "${stub_pid}" 2>/dev/null; : > "${work}/por
 # 3. could not ask — port 9 (discard) is closed on this machine, so curl gets no answer
 read -r verdict code <<<"$(ha_token_status "http://127.0.0.1:9" "${TOKEN}")"
 check "no answer is neither verdict" "unreachable" "${verdict}"
+# the code itself, not only the word: curl prints 000 when it never got a status,
+# and a second 000 was once appended to it
+check "no answer is reported as 000" "000" "${code}"
 unreachable_line="$(ha_token_sentence "${verdict}" "${code}")"
 
 # three states, three sentences

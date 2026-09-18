@@ -18,8 +18,13 @@
 # `unreachable <code>` (`000` when curl could not reach Core at all).
 ha_token_status() {
     local url=${1%/} token=$2 code
+    # curl prints `000` itself when it never got a status — a closed port, a
+    # refused connection, the 10 s timeout — and then exits non-zero. Adding
+    # `|| printf '000'` here appended a second `000` to that, so the line the user
+    # read said `HTTP 000000`.
     code=$(curl -s -o /dev/null -m 10 -w '%{http_code}' \
-        -H "Authorization: Bearer ${token}" "${url}/api/" 2>/dev/null || printf '000')
+        -H "Authorization: Bearer ${token}" "${url}/api/" 2>/dev/null)
+    code=${code:-000}
     case "${code}" in
         2??) printf 'accepted %s\n' "${code}" ;;
         401|403) printf 'rejected %s\n' "${code}" ;;
