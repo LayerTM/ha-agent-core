@@ -17,7 +17,13 @@
       "package.json": [],
       "app/package.json": [
         "test:usage",
-        "test:image"
+        "test:image",
+        "test:alerts",
+        "test:config",
+        "test:monitor",
+        "test:digest",
+        "test:audit",
+        "test:statusline"
       ],
       "ha-tools/package.json": []
     }

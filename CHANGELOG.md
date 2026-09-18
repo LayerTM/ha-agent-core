@@ -6,6 +6,18 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- The archive no longer ships six script names only one engine can run.
+  `test:alerts`, `test:config`, `test:monitor`, `test:digest`, `test:audit` and
+  `test:statusline` join `haAgentCore.unshippedScripts`: their `.sh` files are the
+  core's own and are not packed, so an add-on that assembled the manifest was
+  handed six names whose files it did not have. The scripts stay in
+  `app/package.json` and the core keeps running them; what ships is `start`,
+  `test`, `lint` and `typecheck`, the four that resolve in any add-on's tree. The
+  assembly-time check added in the same cycle is what made the stale names
+  visible, in the released 0.6.0 manifest rather than in a consumer's CI.
+
 ### Added
 
 - `verify-core.js check-assembly` now resolves what a shipped `package.json`'s
