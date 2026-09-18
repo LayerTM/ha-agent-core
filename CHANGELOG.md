@@ -8,6 +8,17 @@ uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- The relay records the calls still in the air when it shuts down. Ending a run
+  settled them and closing the server did not, so an add-on stopped mid-call
+  erased what a revoke would have written, and the reader of the log saw silence
+  where Home Assistant had simply not answered yet. The settling is one function
+  both endings call, rather than three lines copied into the second, so a third
+  way of ending cannot forget it. It is reachable: shutdown kills the run's child
+  processes and closes the relay, while the per-run revoke lives in the request's
+  own `finally` and is not guaranteed to run by then.
+
+### Fixed
+
 - The audit hook records a call that FAILED, marked `(failed)`. A failed tool is
   routed to the engine's failure event rather than to `PostToolUse`, and that
   event carries `error` in place of `tool_response`, so the hook was never
