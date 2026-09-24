@@ -57,6 +57,9 @@ const CONTROL = /[\u0000-\u001f\u007f]/g;
 const ARGS_CAP = 300;
 const LINE_CAP = 1000;
 const DRY_RUN_TEXT = /"dry_run"\s*:\s*true/;
+// The one tool a lookup calls, and how long Core has to answer one.
+const LIVE_CONTEXT = 'GetLiveContext';
+const LOOKUP_TIMEOUT_MS = 10000;
 
 function capBytes(text, limit) {
   const buf = Buffer.from(text, 'utf8');
@@ -167,6 +170,11 @@ function deny(res, status, message) {
  * @returns {Promise<{
  *   url: string, port: number, issue: (runId: string) => string,
  *   revoke: (token: string) => void, close: () => void,
+ *   lookup: (runId: string) => {
+ *     live: (name: string) => Promise<{ok: boolean, text: string}>,
+ *     liveDomain: (domain: string) => Promise<{ok: boolean, text: string}>,
+ *     states: () => Promise<Array<{entity_id: string, attributes?: object}>>,
+ *   },
  * }>}
  *
  * The bearer is per RUN, not per boot: `issue(runId)` mints one and `revoke`
@@ -445,6 +453,40 @@ async function startCoreRelay({ coreOrigin, haToken, log = () => {}, record = ()
     log(`relay accepted connection ${accepted} on 127.0.0.1:${socket.localPort} from port ${socket.remotePort}`);
   });
 
+  // One request of the relay's OWN to Core, with the Home Assistant token: no
+  // agent is behind it, so it opens no door on the loopback server. Resolves to
+  // {status, json} (json null when the body is not JSON); rejects when Core
+  // cannot be reached or does not answer within the timeout.
+  function coreRequest(method, pathname, payload) {
+    const body = payload === undefined ? null : Buffer.from(JSON.stringify(payload));
+    const headers = { authorization: `Bearer ${haToken}`, accept: 'application/json' };
+    if (body !== null) {
+      headers['content-type'] = 'application/json';
+      headers['content-length'] = String(body.length);
+    }
+    return new Promise((resolve, reject) => {
+      const upstream = transport.request({
+        protocol: target.protocol,
+        hostname: target.hostname,
+        port: target.port,
+        method,
+        path: pathname,
+        headers,
+        timeout: LOOKUP_TIMEOUT_MS,
+        ...(secure ? { rejectUnauthorized: false } : {}),
+      }, (upRes) => {
+        readBody(upRes, (raw) => {
+          let json;
+          try { json = raw === null ? null : JSON.parse(raw.toString('utf8')); } catch { json = null; }
+          resolve({ status: upRes.statusCode, json });
+        });
+      });
+      upstream.on('timeout', () => upstream.destroy(new Error('core did not answer in time')));
+      upstream.on('error', reject);
+      upstream.end(body === null ? undefined : body);
+    });
+  }
+
   const { port } = /** @type {import('node:net').AddressInfo} */ (server.address());
   return {
     url: `http://127.0.0.1:${port}`,
@@ -474,6 +516,56 @@ async function startCoreRelay({ coreOrigin, haToken, log = () => {}, record = ()
       runs.delete(token);
       if (entry === undefined) return;
       settleUnanswered(entry.runId);
+    },
+    // What the core asks Home Assistant to learn which entity a device the model
+    // named is (targets.js): the live-context tool by name, and the states list.
+    // Each tool call is recorded against the run, marked as a lookup.
+    lookup(runId) {
+      let toolName = null;
+      let rpcId = 0;
+      async function rpc(method, params) {
+        rpcId += 1;
+        const { status, json } = await coreRequest('POST', MCP_PATH, { jsonrpc: '2.0', id: rpcId, method, params });
+        if (status !== 200 || !json || json.error || !json.result) {
+          throw new Error(`Home Assistant answered ${method} with ${status}`);
+        }
+        return json.result;
+      }
+      async function callLive(args) {
+        if (toolName === null) {
+          const listed = await rpc('tools/list', {});
+          const tools = Array.isArray(listed.tools) ? listed.tools : [];
+          const published = tools.filter((t) => t && haBasename(t.name) === LIVE_CONTEXT);
+          if (published.length === 0) throw new Error(`Home Assistant publishes no ${LIVE_CONTEXT} tool`);
+          toolName = published[0].name;
+        }
+        const call = { name: toolName, args, runId };
+        let result;
+        try {
+          result = await rpc('tools/call', { name: toolName, arguments: args });
+        } catch (err) {
+          record(describeCall(call, ' (lookup, failed)'));
+          throw err;
+        }
+        const text = Array.isArray(result.content)
+          ? result.content.map((c) => (c && typeof c.text === 'string' ? c.text : '')).join('')
+          : '';
+        let answer;
+        try { answer = JSON.parse(text); } catch { answer = null; }
+        const ok = result.isError !== true && answer !== null && answer.success === true
+          && typeof answer.result === 'string';
+        record(describeCall(call, ok ? ' (lookup)' : ' (lookup, no match)'));
+        return { ok, text: ok ? answer.result : '' };
+      }
+      return {
+        live: (name) => callLive({ name }),
+        liveDomain: (domain) => callLive({ domain }),
+        async states() {
+          const { status, json } = await coreRequest('GET', '/api/states');
+          if (status !== 200 || !Array.isArray(json)) throw new Error(`Home Assistant answered the states list with ${status}`);
+          return json;
+        },
+      };
     },
     close() {
       // Every run still open ends here, so its calls are settled before the

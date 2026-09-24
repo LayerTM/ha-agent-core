@@ -269,6 +269,7 @@ async function start() {
     haConfigured,
     beginRun,
     endRun,
+    lookupFor: relay ? (runId) => relay.lookup(runId) : null,
     // Whether the audit log is still being written, asked at the moment a
     // request is about to act: an action that cannot be recorded is refused.
     auditState: () => auditSink.state(),

@@ -6,6 +6,21 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- A device the user names can become a proposal again. Home Assistant's live
+  context lists exposed devices by name, domain and area but no longer by entity
+  id, while a proposal had to carry entity ids — so a request such as "turn off
+  the desk lamp" was refused, or answered with an id the model made up. The
+  model now names each device as the live context names it, and the core asks
+  Home Assistant which exposed entity that is: its live-context matcher (names,
+  aliases, entity ids, exposure) confirms the one entity the states list offers
+  for the name. The same lookup fills every `entity_id` of an automation draft.
+  A name Home Assistant does not match, or matches to more than one device, is
+  not proposed: the answer says which name was not found, or lists the devices
+  it could mean. What the user confirms still carries exact entity ids, and each
+  lookup is recorded against its run.
+
 ## [0.7.8] - 2026-09-24
 
 ### Fixed
