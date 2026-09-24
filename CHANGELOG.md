@@ -6,6 +6,19 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- An engine that declares `descriptor.closedSchemasOnly` can no longer answer a
+  read in prose. It was given no schema for the read answer, so a request for a
+  format ("emoji only, nothing else") was obeyed literally and the run failed as
+  a model error. Such an engine is now given the closed form of the same answer,
+  derived from it: every open object travels as a string holding its JSON
+  encoding, under the field's name plus `_json`, and strict output admits
+  nothing else. The core decodes those strings back before the answer is
+  validated exactly as before; a string that is not the JSON object it stands
+  for is a model error, never a dropped proposal. An engine that does not
+  declare it is given byte-for-byte the schema it was given before.
+
 ## [0.7.7] - 2026-09-24
 
 ### Fixed

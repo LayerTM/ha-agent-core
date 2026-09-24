@@ -161,28 +161,101 @@ const WRITE_SCHEMA = JSON.stringify(schemaOf(WRITE_ANSWER));
 // ours? `data` and the automation blocks are exactly that, and they are the one
 // thing a strict structured output cannot describe: it requires every object to
 // close itself, and a closed object admits nothing.
+const isOpenObject = (node) => [].concat(node.type).includes('object') && !node.properties;
+
 function hasOpenObject(node) {
   if (!node || typeof node !== 'object') return false;
-  if ([].concat(node.type).includes('object') && !node.properties) return true;
+  if (isOpenObject(node)) return true;
   if (node.items && hasOpenObject(node.items)) return true;
   return Object.values(node.properties || {}).some(hasOpenObject);
 }
 
+// An engine that can only be given closed schemas (`descriptor.closedSchemasOnly`)
+// is given the CLOSED form of the same answer, derived here and nowhere else:
+// every open object is carried as a string holding its JSON encoding, under the
+// same name plus `_json` (an array of open objects becomes an array of such
+// strings). Strict output then admits no prose at all, for any prompt — measured
+// 2026-09-24, with NO schema the model obeyed a user's "emoji only, nothing else"
+// and answered in prose. The answer is decoded back into the open form right
+// after the engine returns it, and validated exactly as before
+// (validateProposal / validateAutomationDraft below still decide what is real).
+const ENCODED_SUFFIX = '_json';
+
+const encodesOpen = (node) => isOpenObject(node) || Boolean(node.items && isOpenObject(node.items));
+
+function closedOf(node) {
+  if (isOpenObject(node)) {
+    const { type: _type, ...rest } = node;
+    return { ...rest, type: 'string', description: 'A JSON object, encoded as a string.' };
+  }
+  const out = { ...node };
+  if (node.items) out.items = closedOf(node.items);
+  if (node.properties) {
+    out.properties = Object.fromEntries(Object.entries(node.properties)
+      .map(([k, v]) => [encodesOpen(v) ? k + ENCODED_SUFFIX : k, closedOf(v)]));
+  }
+  return out;
+}
+
+// A string the model had to encode that is not the JSON object it stands for.
+class EncodedFieldError extends Error {}
+
+function decodeObject(value, path) {
+  if (value === null) return null;
+  let parsed;
+  try { parsed = JSON.parse(value); } catch { parsed = undefined; }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new EncodedFieldError(`${path} is not a JSON-encoded object`);
+  }
+  return parsed;
+}
+
+// The inverse of closedOf, walked along the OPEN answer: the value comes back
+// exactly as the open schema would have delivered it. A value of the wrong type
+// is left for the validators, which already refuse it; only the strings this
+// form introduced are checked here, because nothing downstream knows about them.
+function openFrom(value, node, path = 'answer') {
+  if (value === null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) {
+    return node.items ? value.map((v, i) => openFrom(v, node.items, `${path}[${i}]`)) : value;
+  }
+  if (!node.properties) return value;
+  const out = {};
+  for (const [key, v] of Object.entries(value)) {
+    const child = node.properties[key];
+    const open = key.endsWith(ENCODED_SUFFIX) && node.properties[key.slice(0, -ENCODED_SUFFIX.length)];
+    const at = `${path}.${key}`;
+    if (child) out[key] = openFrom(v, child, at);
+    else if (!open || !encodesOpen(open)) out[key] = v;
+    else if (isOpenObject(open)) out[key.slice(0, -ENCODED_SUFFIX.length)] = typeof v === 'string' ? decodeObject(v, at) : v;
+    else {
+      out[key.slice(0, -ENCODED_SUFFIX.length)] = Array.isArray(v)
+        ? v.map((s, i) => (typeof s === 'string' ? decodeObject(s, `${at}[${i}]`) : s)) : v;
+    }
+  }
+  return out;
+}
+
+const READ_CLOSED = closedOf(READ_ANSWER);
+const READ_CLOSED_SCHEMA = JSON.stringify(schemaOf(READ_CLOSED));
+const WRITE_CLOSED_SCHEMA = JSON.stringify(schemaOf(closedOf(WRITE_ANSWER)));
+
+const closedSchemasOnly = () => adapter().descriptor.closedSchemasOnly === true;
+
 // The schema this ENGINE is given for this answer — the answer itself is the
 // same for every engine, and stays declared once above.
-//
-// An engine that can only be given closed schemas (`descriptor.closedSchemasOnly`)
-// gets NO schema for an answer that needs an open object: measured 2026-09-18,
-// such an engine refuses the request outright before the model is reached, so a
-// schema it cannot accept is worth less than none. The shape is then carried by
-// the system prompt, which describes every field already, and the answer is
-// validated here exactly as before — the schema never was the boundary
-// (validateProposal / validateAutomationDraft below still decide what is real).
-// An answer with no open object — the write answer — keeps its schema.
 function engineSchema(read) {
-  const closedOnly = adapter().descriptor.closedSchemasOnly === true;
-  if (closedOnly && hasOpenObject(read ? READ_ANSWER : WRITE_ANSWER)) return '';
+  if (closedSchemasOnly()) return read ? READ_CLOSED_SCHEMA : WRITE_CLOSED_SCHEMA;
   return read ? READ_SCHEMA : WRITE_SCHEMA;
+}
+
+// Told only to an engine given the closed form: the prompt names the fields as
+// the open answer has them.
+function closedDirective(read) {
+  if (!read || !closedSchemasOnly()) return '';
+  return ` Your structured output is strict: a field named X${ENCODED_SUFFIX} carries the value`
+    + ' of the field X described here, each object in it written as a JSON-encoded string'
+    + ` (null where X would be null). Never answer outside the structured output.`;
 }
 
 const READ_SYSTEM_PROMPT = [
@@ -475,7 +548,8 @@ function launchSpec({
     systemPrompt: (read ? READ_SYSTEM_PROMPT : WRITE_SYSTEM_PROMPT)
       + languageDirective(language)
       + (read ? voiceDirective(surface) : '')
-      + (read ? editDirective(editAutomation) : ''),
+      + (read ? editDirective(editAutomation) : '')
+      + closedDirective(read),
     maxTurns: MAX_TURNS,
     mcpConfigPath: mcpConfigPath || undefined,
     settings: settings || undefined,
@@ -874,7 +948,28 @@ function run({
       if (structured && typeof structured === 'object' && typeof structured.text === 'string') {
         text = structured.text;
         if (read) {
-          const answer = dropOptionalNulls(structured, READ_ANSWER);
+          let open = structured;
+          if (spec.schema === READ_CLOSED_SCHEMA) {
+            try {
+              open = openFrom(structured, READ_ANSWER);
+            } catch (err) {
+              if (!(err instanceof EncodedFieldError)) throw err;
+              // Like an answer that is not JSON at all: the model broke the form,
+              // and a retry may not — never a silent drop of the proposal.
+              finish({
+                status: 'error',
+                reason: 'model-error',
+                message: err.message,
+                numTurns: number(result.numTurns),
+                toolsUsed,
+                costUsd: number(result.costUsd),
+                tokens,
+                haTools: publishedHaTools,
+              });
+              return;
+            }
+          }
+          const answer = dropOptionalNulls(open, READ_ANSWER);
           proposal = validateProposal(answer.proposal);
           automation = validateAutomationDraft(answer.automation);
         }
@@ -933,6 +1028,11 @@ module.exports = {
   formatHistory,
   schemaOf,
   hasOpenObject,
+  closedOf,
+  openFrom,
+  EncodedFieldError,
+  READ_CLOSED_SCHEMA,
+  WRITE_CLOSED_SCHEMA,
   dropOptionalNulls,
   READ_ANSWER,
   READ_SCHEMA,

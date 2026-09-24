@@ -48,12 +48,10 @@ const OPTIONAL = {
   'descriptor.reportsCost': 'boolean',
   // An engine whose structured output cannot describe an OPEN object — one with
   // no fixed property list, like an intent's `data` or a Home Assistant
-  // automation block. Declaring it is a two-sided promise: the core answers with
-  // an EMPTY `schema` for any answer that needs an open object (the answer's
-  // shape is then carried by the system prompt alone, and the core validates it
-  // as it always did), and the adapter promises to send no schema at all in
-  // that case rather than an empty file. An adapter that does not declare it
-  // never sees an empty schema, so nothing about the existing engines changes.
+  // automation block. The core then gives it the CLOSED form of each answer,
+  // in which every open object is a string holding its JSON encoding, and
+  // decodes the answer back itself. An adapter that does not declare it is
+  // given exactly the schemas it always was.
   'descriptor.closedSchemasOnly': 'boolean',
   'prompt.secretPatterns': 'object',
 };
