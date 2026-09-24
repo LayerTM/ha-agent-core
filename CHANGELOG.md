@@ -6,6 +6,18 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- A streamed answer no longer breaks a character in two. Text is cut into
+  deltas at a position counted in UTF-16 code units, and a character outside
+  the Basic Multilingual Plane — an emoji, and much of the world's script
+  beyond it — is two of them, so a cut could land between the halves. Each
+  half alone is not text: the client's strict UTF-8 decoder rejected the line,
+  and with it the answer. A cut now steps back off half a character and the
+  next delta carries it whole. The same rule is applied wherever a length cap
+  trims text that leaves the process: the stored conversation history and the
+  agent's error output, which is now also decoded across chunk boundaries.
+
 ## [0.7.6] - 2026-09-18
 
 ### Fixed

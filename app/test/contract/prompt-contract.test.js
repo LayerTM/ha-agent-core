@@ -346,6 +346,31 @@ test('a streamed read sends deltas and ends with exactly one done line', async (
   assert.equal(lines.map((line) => line.text).join(''), answer);
 });
 
+test('no delta ends in the middle of a character', async () => {
+  // The safety window cuts the answer at length - STREAM_SAFETY_WINDOW (96).
+  // This answer puts the two code units of one emoji on either side of that
+  // cut: emitted as they fall, the first delta would end in a lone high
+  // surrogate and the next begin with its orphaned low half. Neither is text —
+  // a strict UTF-8 encoder on the receiving side rejects the line.
+  const answer = `${'a'.repeat(10)}\u{1F324}${'b'.repeat(95)}`;
+  state.script.push((opts) => {
+    opts.onText(answer);
+    return okOutcome({ text: answer });
+  });
+  const res = await post({ prompt: 'emoji on the boundary', stream: true });
+  assert.equal(res.status, 200);
+  const lines = await ndjson(res);
+  const last = lines.pop();
+  assert.equal(last.type, 'done');
+  assert.equal(last.text, answer);
+  assert.ok(lines.length >= 1);
+  for (const line of lines) {
+    assert.equal(line.type, 'delta');
+    assert.ok(line.text.isWellFormed(), `delta is not text: ${JSON.stringify(line.text)}`);
+  }
+  assert.equal(lines.map((line) => line.text).join(''), answer);
+});
+
 test('a read that fails transiently is retried within the remaining time, once', async () => {
   state.script.push(() => errorOutcome('model-error'), () => okOutcome({ text: 'second time' }));
   const res = await post({ prompt: 'retry me' });

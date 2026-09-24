@@ -12,7 +12,7 @@ const crypto = require('node:crypto');
 const express = require('express');
 const {
   ipAllowed, tokenMatches, sanitizePrompt, sanitizeId,
-  validateIntents, redactDeep, sha12,
+  validateIntents, redactDeep, sha12, wholeCharEnd,
 } = require('./security');
 const { adapter, branding } = require('../adapter-contract');
 const { langOf, DEGRADE_TEXT, budgetNotice } = require('./notices');
@@ -1060,7 +1060,10 @@ function createPromptApp({
         });
         onText = (fullText) => {
           const redacted = redact(fullText);
-          const safeLen = Math.max(0, redacted.length - STREAM_SAFETY_WINDOW);
+          // The window is counted in UTF-16 code units, so its edge can fall
+          // between the two halves of one character; the last half-character is
+          // held back for the next delta, which will carry it whole.
+          const safeLen = wholeCharEnd(redacted, Math.max(0, redacted.length - STREAM_SAFETY_WINDOW));
           if (safeLen > emittedLen) {
             const chunk = redacted.slice(emittedLen, safeLen);
             emittedLen = safeLen;

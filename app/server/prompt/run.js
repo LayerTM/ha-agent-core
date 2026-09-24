@@ -17,7 +17,7 @@
 
 const { spawn } = require('node:child_process');
 const { StringDecoder } = require('node:string_decoder');
-const { validateProposal, validateAutomationDraft } = require('./security');
+const { validateProposal, validateAutomationDraft, wholeCharEnd } = require('./security');
 const { adapter } = require('../adapter-contract');
 
 // Wall-clock ceiling per run; tunable for slow hardware via the add-on's
@@ -647,6 +647,7 @@ function run({
     // Hold partial multi-byte UTF-8 sequences across chunk boundaries so
     // non-ASCII model output is never corrupted into replacement characters.
     const decoder = new StringDecoder('utf8');
+    const stderrDecoder = new StringDecoder('utf8');
 
     const timer = setTimeout(() => {
       timedOut = true;
@@ -787,7 +788,11 @@ function run({
 
     child.stderr.on('data', (chunk) => {
       if (stderrBuf.length < STDERR_CAP_BYTES) {
-        stderrBuf += chunk.toString('utf8').slice(0, STDERR_CAP_BYTES - stderrBuf.length);
+        // Decoded across chunks, so a character split by the pipe is not lost,
+        // and cut on a whole character: this text is reported to the client
+        // inside a JSON line.
+        const text = stderrDecoder.write(chunk);
+        stderrBuf += text.slice(0, wholeCharEnd(text, STDERR_CAP_BYTES - stderrBuf.length));
       }
     });
 
@@ -833,7 +838,7 @@ function run({
         finish({
           status: 'error',
           reason: 'no-result',
-          message: `${engine} exited (${code}) without a result: ${stderrBuf.slice(0, 300)}`,
+          message: `${engine} exited (${code}) without a result: ${stderrBuf.slice(0, wholeCharEnd(stderrBuf, 300))}`,
           numTurns: null,
           toolsUsed,
           costUsd: null,
