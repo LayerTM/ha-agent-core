@@ -14,10 +14,10 @@ permissions:
 
 # A Dependabot update whose install code is not the reviewed one is still built
 # and tested here, as an untrusted test; the auto-merge workflow keeps it from
-# merging. Everything else must match the record (tools/npm-ci-checked.sh).
-env:
-  INSTALL_SCRIPTS_UNREVIEWED: ${{ github.event.pull_request.user.login == 'dependabot[bot]' && 'build' || '' }}
-
+# merging. Everything else must match the record (tools/npm-ci-checked.sh). The
+# permission is declared on the install step alone: as a workflow-wide variable
+# it would be inherited by every other program the job runs, including the tests
+# that assert an unreviewed install is refused.
 jobs:
   test:
     name: Tests
@@ -29,6 +29,8 @@ jobs:
           node-version: "26"
       - name: Install dependencies
         run: tools/npm-ci-checked.sh
+        env:
+          INSTALL_SCRIPTS_UNREVIEWED: ${{ github.event.pull_request.user.login == 'dependabot[bot]' && 'build' || '' }}
       - name: Run tests
         run: npm test
 
@@ -42,6 +44,8 @@ jobs:
           node-version: "26"
       - name: Install dependencies
         run: tools/npm-ci-checked.sh
+        env:
+          INSTALL_SCRIPTS_UNREVIEWED: ${{ github.event.pull_request.user.login == 'dependabot[bot]' && 'build' || '' }}
       - name: Lint (eslint)
         run: npm run lint
       - name: Type-check (tsc --checkJs)
@@ -62,6 +66,8 @@ jobs:
           node-version: "26"
       - name: Install dependencies
         run: ../tools/npm-ci-checked.sh
+        env:
+          INSTALL_SCRIPTS_UNREVIEWED: ${{ github.event.pull_request.user.login == 'dependabot[bot]' && 'build' || '' }}
       - name: Run tests
         run: npm test
       - name: Run alerts loop tests (bash + jq)
@@ -94,6 +100,8 @@ jobs:
           node-version: "26"
       - name: Install dependencies
         run: ../tools/npm-ci-checked.sh
+        env:
+          INSTALL_SCRIPTS_UNREVIEWED: ${{ github.event.pull_request.user.login == 'dependabot[bot]' && 'build' || '' }}
       - name: Lint (eslint)
         run: npm run lint
       - name: Type-check (tsc --checkJs)

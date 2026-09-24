@@ -558,6 +558,11 @@ other argument is accepted):
    script. Nothing else ever runs a dependency's script;
 4. loading each allowed package, and starting a terminal through node-pty.
 
+A failed step 1 stops the install. `INSTALL_SCRIPTS_UNREVIEWED=build` lets it go
+on as an untrusted test build; this script is the only program that reads that
+variable, and it then permits step 3 by passing `--unreviewed-build`. So a
+variable left in the environment cannot make any other build permissive.
+
 node-gyp compiles against the headers of the Node.js that runs it
 (`npm_package_config_node_gyp_nodedir`), so nothing is downloaded.
 

@@ -8,6 +8,12 @@ uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Permission to build install code that does not match the reviewed record is
+  given to `tools/build-allowed-packages.js` by an argument instead of an
+  inherited environment variable, and the continuous-integration workflow
+  declares that permission on the install step alone. Set for a whole job, it
+  reached every other program the job ran, so a build started for any other
+  reason — a test of the refusal itself — was silently permitted too.
 - A streamed answer no longer breaks a character in two. Text is cut into
   deltas at a position counted in UTF-16 code units, and a character outside
   the Basic Multilingual Plane — an emoji, and much of the world's script
