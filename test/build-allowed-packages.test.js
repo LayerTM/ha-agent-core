@@ -73,7 +73,7 @@ function installed(t) {
 }
 
 const npm = (dir, ...args) => spawnSync(process.execPath, [NPM_CLI, ...args], { cwd: dir, encoding: 'utf8' });
-const build = (dir, env = {}) => spawnSync(process.execPath, [BUILDER], {
+const build = (dir, env = {}, args = []) => spawnSync(process.execPath, [BUILDER, ...args], {
   cwd: dir, encoding: 'utf8', env: { ...process.env, NPM_CLI, ...env },
 });
 
@@ -103,9 +103,28 @@ test('an unreviewed install is not built unless the untrusted test build is aske
   assert.equal(r.status, 1);
   assert.match(r.stderr, /not reviewed/);
   assert.equal(fs.existsSync(path.join(dir, 'node_modules/native/build')), false);
-  r = build(dir, { INSTALL_SCRIPTS_UNREVIEWED: 'build' });
+  r = build(dir, {}, ['--unreviewed-build']);
   assert.equal(r.status, 0, r.stderr);
   assert.equal(fs.existsSync(path.join(dir, 'node_modules/native/build/Release/out.txt')), true);
+});
+
+test('no inherited environment can permit an unreviewed build', (t) => {
+  const { dir } = installed(t);
+  fs.rmSync(path.join(dir, 'install-scripts.json'));
+  // The permission travels on the call. A variable the process happened to
+  // inherit — a caller's shell, a CI job that set it for its install step —
+  // says nothing about this build.
+  const r = build(dir, { INSTALL_SCRIPTS_UNREVIEWED: 'build' });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /not reviewed/);
+  assert.equal(fs.existsSync(path.join(dir, 'node_modules/native/build')), false);
+});
+
+test('an unsupported argument is a usage error', (t) => {
+  const { dir } = installed(t);
+  const r = build(dir, {}, ['--rebuild-everything']);
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /unsupported argument/);
 });
 
 test('a failing install script fails the build and changes nothing', (t) => {

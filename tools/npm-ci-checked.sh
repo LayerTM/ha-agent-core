@@ -25,9 +25,11 @@
 # that must still be absent afterwards.
 #
 # INSTALL_SCRIPTS_UNREVIEWED=build lets step 3 go ahead after a failed step 1, as
-# an untrusted test build: the repository's CI sets it only for Dependabot pull
-# requests, which cannot be merged until the new packages are reviewed. Nothing
-# that ships sets it.
+# an untrusted test build: the repository's CI sets it on this step alone, and
+# only for Dependabot pull requests, which cannot be merged until the new
+# packages are reviewed. Nothing that ships sets it. This script is the one place
+# that reads it; step 3 is then told by an argument, so no other program in the
+# process tree is made permissive by an inherited environment.
 set -euo pipefail
 
 omit=()
@@ -97,15 +99,17 @@ devdir="$(mktemp -d)/node-gyp"
 export npm_package_config_node_gyp_nodedir="$nodedir"
 export npm_package_config_node_gyp_devdir="$devdir"
 
+build_args=()
 if ! "$NODE" "$tools/check-install-scripts.js" .; then
   if [ "${INSTALL_SCRIPTS_UNREVIEWED:-}" != build ]; then
     exit 1
   fi
   echo "::notice::building packages whose install code has not been reviewed, as an untrusted test"
+  build_args+=(--unreviewed-build)
 fi
 
 "$NODE" "$NPM_CLI" ci --ignore-scripts ${omit[@]+"${omit[@]}"}
-"$NODE" "$tools/build-allowed-packages.js"
+"$NODE" "$tools/build-allowed-packages.js" ${build_args[@]+"${build_args[@]}"}
 
 if [ -e "$devdir" ]; then
   echo "node-gyp downloaded headers instead of using $nodedir" >&2
