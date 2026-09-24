@@ -6,14 +6,10 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.7] - 2026-09-24
+
 ### Fixed
 
-- Permission to build install code that does not match the reviewed record is
-  given to `tools/build-allowed-packages.js` by an argument instead of an
-  inherited environment variable, and the continuous-integration workflow
-  declares that permission on the install step alone. Set for a whole job, it
-  reached every other program the job ran, so a build started for any other
-  reason — a test of the refusal itself — was silently permitted too.
 - A streamed answer no longer breaks a character in two. Text is cut into
   deltas at a position counted in UTF-16 code units, and a character outside
   the Basic Multilingual Plane — an emoji, and much of the world's script
@@ -23,6 +19,14 @@ uses [Semantic Versioning](https://semver.org/).
   next delta carries it whole. The same rule is applied wherever a length cap
   trims text that leaves the process: the stored conversation history and the
   agent's error output, which is now also decoded across chunk boundaries.
+  Reported against the companion integration as LayerTM/claude-ha#73, where an
+  answer containing an emoji failed for hours at a time.
+- Permission to build install code that does not match the reviewed record is
+  given to `tools/build-allowed-packages.js` by an argument instead of an
+  inherited environment variable, and the continuous-integration workflow
+  declares that permission on the install step alone. Set for a whole job, it
+  reached every other program the job ran, so a build started for any other
+  reason — a test of the refusal itself — was silently permitted too.
 
 ## [0.7.6] - 2026-09-18
 
