@@ -6,6 +6,8 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.9] - 2026-09-24
+
 ### Fixed
 
 - A device the user names can become a proposal again. Home Assistant's live
