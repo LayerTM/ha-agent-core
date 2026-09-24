@@ -6,6 +6,15 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Permission to build install code that does not match the reviewed record is
+  given to `tools/build-allowed-packages.js` by an argument instead of an
+  inherited environment variable, and the continuous-integration workflow
+  declares that permission on the install step alone. Set for a whole job, it
+  reached every other program the job ran, so a build started for any other
+  reason — a test of the refusal itself — was silently permitted too.
+
 ## [0.7.6] - 2026-09-18
 
 ### Fixed

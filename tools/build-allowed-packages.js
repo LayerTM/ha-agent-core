@@ -21,6 +21,11 @@
  * directory's node_modules/.bin first on the PATH, and it holds the bins of the
  * closure alone; a package outside the closure, hoisted or not, is not there.
  *
+ * `--unreviewed-build` builds the allowed packages even when their install code
+ * does not match the reviewed record, as an untrusted test. It is an argument
+ * and never an environment variable: the permission comes from the caller that
+ * decided it (tools/npm-ci-checked.sh), not from whatever the process inherited.
+ *
  * Dependency-free. Exit: 0 built (or nothing to build), 1 failure, 2 usage error.
  */
 
@@ -42,8 +47,14 @@ function copyPackage(from, to) {
   });
 }
 
-function main() {
+function main(argv) {
   const dir = process.cwd();
+  let unreviewed = false;
+  for (const arg of argv) {
+    if (arg === '--unreviewed-build') { unreviewed = true; continue; }
+    process.stderr.write(`build-allowed-packages: unsupported argument '${arg}' (only --unreviewed-build)\n`);
+    return 2;
+  }
   const npmCli = process.env.NPM_CLI;
   if (!npmCli || !path.isAbsolute(npmCli) || !fs.existsSync(npmCli)) {
     process.stderr.write('build-allowed-packages: NPM_CLI must be the absolute path of npm-cli.js\n');
@@ -52,7 +63,7 @@ function main() {
   const { closures, problems } = checkDir(dir);
   if (problems.length) {
     for (const problem of problems) process.stderr.write(`install scripts: ${problem}\n`);
-    if (process.env.INSTALL_SCRIPTS_UNREVIEWED !== 'build') return 1;
+    if (!unreviewed) return 1;
   }
   // An allowed package the install left out on purpose (INSTALL_OMIT, from
   // npm ci --omit) has nothing to build; one that should be there and is not
@@ -122,4 +133,4 @@ function main() {
   }
 }
 
-if (require.main === module) process.exitCode = main();
+if (require.main === module) process.exitCode = main(process.argv.slice(2));
