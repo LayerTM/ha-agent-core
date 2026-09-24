@@ -172,6 +172,7 @@ function deny(res, status, message) {
  *   revoke: (token: string) => void, close: () => void,
  *   lookup: (runId: string) => {
  *     live: (name: string) => Promise<{ok: boolean, text: string}>,
+ *     liveDomain: (domain: string) => Promise<{ok: boolean, text: string}>,
  *     states: () => Promise<Array<{entity_id: string, attributes?: object}>>,
  *   },
  * }>}
@@ -530,33 +531,35 @@ async function startCoreRelay({ coreOrigin, haToken, log = () => {}, record = ()
         }
         return json.result;
       }
+      async function callLive(args) {
+        if (toolName === null) {
+          const listed = await rpc('tools/list', {});
+          const tools = Array.isArray(listed.tools) ? listed.tools : [];
+          const published = tools.filter((t) => t && haBasename(t.name) === LIVE_CONTEXT);
+          if (published.length === 0) throw new Error(`Home Assistant publishes no ${LIVE_CONTEXT} tool`);
+          toolName = published[0].name;
+        }
+        const call = { name: toolName, args, runId };
+        let result;
+        try {
+          result = await rpc('tools/call', { name: toolName, arguments: args });
+        } catch (err) {
+          record(describeCall(call, ' (lookup, failed)'));
+          throw err;
+        }
+        const text = Array.isArray(result.content)
+          ? result.content.map((c) => (c && typeof c.text === 'string' ? c.text : '')).join('')
+          : '';
+        let answer;
+        try { answer = JSON.parse(text); } catch { answer = null; }
+        const ok = result.isError !== true && answer !== null && answer.success === true
+          && typeof answer.result === 'string';
+        record(describeCall(call, ok ? ' (lookup)' : ' (lookup, no match)'));
+        return { ok, text: ok ? answer.result : '' };
+      }
       return {
-        async live(name) {
-          if (toolName === null) {
-            const listed = await rpc('tools/list', {});
-            const tools = Array.isArray(listed.tools) ? listed.tools : [];
-            const published = tools.filter((t) => t && haBasename(t.name) === LIVE_CONTEXT);
-            if (published.length === 0) throw new Error(`Home Assistant publishes no ${LIVE_CONTEXT} tool`);
-            toolName = published[0].name;
-          }
-          const call = { name: toolName, args: { name }, runId };
-          let result;
-          try {
-            result = await rpc('tools/call', { name: toolName, arguments: { name } });
-          } catch (err) {
-            record(describeCall(call, ' (lookup, failed)'));
-            throw err;
-          }
-          const text = Array.isArray(result.content)
-            ? result.content.map((c) => (c && typeof c.text === 'string' ? c.text : '')).join('')
-            : '';
-          let answer;
-          try { answer = JSON.parse(text); } catch { answer = null; }
-          const ok = result.isError !== true && answer !== null && answer.success === true
-            && typeof answer.result === 'string';
-          record(describeCall(call, ok ? ' (lookup)' : ' (lookup, no match)'));
-          return { ok, text: ok ? answer.result : '' };
-        },
+        live: (name) => callLive({ name }),
+        liveDomain: (domain) => callLive({ domain }),
         async states() {
           const { status, json } = await coreRequest('GET', '/api/states');
           if (status !== 200 || !Array.isArray(json)) throw new Error(`Home Assistant answered the states list with ${status}`);

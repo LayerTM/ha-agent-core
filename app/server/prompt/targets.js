@@ -14,14 +14,18 @@
 // matches. The states list only proposes candidates: every entity whose id is
 // the reference or whose name is it. A candidate is the answer when asking the
 // matcher for its id returns the very device the name returned — same names,
-// same domain, same areas — and it is the only one. Anything else is refused:
+// same domain, same areas — it is the only such candidate, and no other exposed
+// device of that domain looks the same (the live context joins a device's
+// aliases with ", ", so two devices can print identically). Anything else is
+// refused:
 //
-//   unknown    the matcher finds no exposed device by that reference;
-//   ambiguous  it finds several, or several candidates are that one device;
-//   unpinned   it finds one, and no candidate is it (an alias, most likely).
+//   unknown      the matcher finds no exposed device by that reference;
+//   ambiguous    it finds several, or the device it found is not unique;
+//   unpinned     it finds one, and no candidate is it (an alias, most likely);
+//   unavailable  a lookup failed, or the answer names more devices, or takes
+//                longer, than one answer may.
 //
-// A lookup that fails is a refusal too. Nothing here ever returns an id Home
-// Assistant did not match.
+// Nothing here ever returns an id Home Assistant did not match.
 
 const { validateProposal } = require('./security');
 
@@ -50,10 +54,28 @@ function identity(text) {
   }
   return kept.join('\n');
 }
-const deviceCount = (text) => text.split('\n').filter((line) => line.startsWith('- ')).length;
+// The live context's device blocks, one text per device.
+function deviceBlocks(text) {
+  const blocks = [];
+  for (const line of text.split('\n')) {
+    if (line.startsWith('- ')) blocks.push([line]);
+    else if (blocks.length > 0) blocks[blocks.length - 1].push(line);
+  }
+  return blocks.map((b) => b.join('\n'));
+}
+const deviceCount = (text) => deviceBlocks(text).length;
+const domainOf = (text) => {
+  const m = /^(?:- | {2})domain: (\S+)$/m.exec(text);
+  return m ? m[1] : null;
+};
+
+// How many distinct devices one answer may name, and how long looking them up may take.
+const MAX_REFS = 60;
+const RESOLVE_DEADLINE_MS = 30000;
 
 /**
  * @param {{ live(name: string): Promise<{ok: boolean, text: string}>,
+ *           liveDomain(domain: string): Promise<{ok: boolean, text: string}>,
  *           states(): Promise<Array<{entity_id: string, attributes?: object}>> }} lookup
  */
 function createResolver(lookup) {
@@ -61,6 +83,11 @@ function createResolver(lookup) {
   const live = (name) => {
     if (!liveMemo.has(name)) liveMemo.set(name, lookup.live(name));
     return liveMemo.get(name);
+  };
+  const domainMemo = new Map();
+  const liveDomain = (domain) => {
+    if (!domainMemo.has(domain)) domainMemo.set(domain, lookup.liveDomain(domain));
+    return domainMemo.get(domain);
   };
   let statesMemo = null;
   const states = () => {
@@ -88,10 +115,16 @@ function createResolver(lookup) {
     const exposed = await exposedCandidates(ref);
     const candidates = exposed.map(({ id, name }) => ({ id, name }));
     if (deviceCount(byName.text) > 1) return { problem: 'ambiguous', ref, candidates };
-    const same = exposed.filter((c) => c.identity === identity(byName.text));
-    if (same.length === 1) return { id: same[0].id };
+    const found = identity(byName.text);
+    const same = exposed.filter((c) => c.identity === found);
     if (same.length > 1) return { problem: 'ambiguous', ref, candidates };
-    return { problem: 'unpinned', ref, candidates };
+    if (same.length === 0) return { problem: 'unpinned', ref, candidates };
+    // The identity must single out one exposed device, or it does not prove which one it is.
+    const domain = domainOf(byName.text);
+    const all = domain ? await liveDomain(domain) : { ok: false, text: '' };
+    const alike = all.ok ? deviceBlocks(all.text).filter((b) => identity(b) === found).length : 0;
+    if (alike !== 1) return { problem: 'ambiguous', ref, candidates };
+    return { id: same[0].id };
   }
 
   return { resolve };
@@ -115,13 +148,42 @@ function entityIdSlots(node, visit) {
  *
  * @returns {Promise<{proposal: object|null, automation: object|null, problems: object[]}>}
  */
-async function resolveAnswer({ proposal, automation }, lookup, { known = [] } = {}) {
-  const resolver = createResolver(lookup);
+async function resolveAnswer(answer, lookup, { known = [], deadlineMs = RESOLVE_DEADLINE_MS } = {}) {
+  const refused = { proposal: null, automation: null, problems: [{ problem: 'unavailable', ref: '', candidates: [] }] };
   const knownIds = new Set(known);
+  if (distinctRefs(answer, knownIds).size > MAX_REFS) return refused;
+  let timer;
+  const deadline = new Promise((resolve) => { timer = setTimeout(() => resolve(refused), deadlineMs); });
+  try {
+    return await Promise.race([resolveAll(answer, lookup, knownIds), deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// The references one answer asks to look up: proposal targets, and draft slots
+// that are not ids the edited automation already carried.
+function distinctRefs({ proposal, automation }, knownIds) {
+  const refs = new Set();
+  for (const intent of (proposal ? proposal.intents : [])) for (const t of intent.targets) refs.add(t);
+  for (const key of ['triggers', 'conditions', 'actions']) {
+    if (!automation || !automation[key]) continue;
+    entityIdSlots(automation[key], (_h, value) => {
+      for (const v of [].concat(value)) if (!knownIds.has(v)) refs.add(v);
+    });
+  }
+  return refs;
+}
+
+async function resolveAll({ proposal, automation }, lookup, knownIds) {
+  const resolver = createResolver(lookup);
   const problems = [];
   const cache = new Map();
-  const idOf = async (ref) => {
-    if (knownIds.has(ref)) return ref;
+  // `known` ids are the edited automation's own: they stand in ITS slots only.
+  // A proposal target is always looked up, so an id the caller sent cannot
+  // become an action on a device Home Assistant does not expose.
+  const idOf = async (ref, { inDraft = false } = {}) => {
+    if (inDraft && knownIds.has(ref)) return ref;
     if (!cache.has(ref)) cache.set(ref, resolver.resolve(ref));
     const result = await cache.get(ref);
     if (result.id) return result.id;
@@ -158,7 +220,7 @@ async function resolveAnswer({ proposal, automation }, lookup, { known = [] } = 
       if (!refs.every((r) => typeof r === 'string' && r.trim() !== '')) { malformed = true; continue; }
       const ids = [];
       for (const ref of refs) {
-        const id = await idOf(ref);
+        const id = await idOf(ref, { inDraft: true });
         if (id && !ids.includes(id)) ids.push(id);
       }
       holder.entity_id = Array.isArray(value) ? ids : (ids[0] ?? value);

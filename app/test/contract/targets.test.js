@@ -37,6 +37,14 @@ const HOME = [
   // device answers to it: the states list says "Reading Light", the matcher does not.
   { id: 'light.shelf', name: 'Reading Light', haNames: ['Shelf'] },
   { id: 'light.reading', name: 'Reading', aliases: ['Reading Light'] },
+  // The live context joins a device's aliases with ", ": X answers to the one alias
+  // "Lamp, Desk", Y to "Lamp" and "Desk" — and both print the same.
+  { id: 'light.x', name: 'Other', haNames: ['Lamp, Desk'], area: 'Study' },
+  { id: 'light.y', name: 'Lamp, Desk', haNames: ['Lamp', 'Desk'], area: 'Study' },
+  // The mirror: Y's one name "Shade, Top" meets X's two aliases.
+  { id: 'cover.x', name: 'Shade', haNames: ['Shade', 'Top'], area: 'Hall' },
+  { id: 'cover.y', name: 'Shade, Top', area: 'Hall' },
+  { id: 'lock.front_door', name: 'Front Door', exposed: false },
 ];
 const haNames = (e) => e.haNames || [e.name, ...(e.aliases || [])];
 
@@ -56,9 +64,10 @@ function dump(entities) {
     ])].join('\n');
 }
 
-function liveContext(name) {
-  const hits = HOME.filter((e) => e.exposed !== false
-    && (e.id === name || haNames(e).some((n) => norm(n) === norm(name))));
+function liveContext({ name, domain }) {
+  const hits = HOME.filter((e) => e.exposed !== false && (domain
+    ? e.id.startsWith(`${domain}.`)
+    : (e.id === name || haNames(e).some((n) => norm(n) === norm(name)))));
   if (hits.length === 0) return { success: false, error: `No device or entity named ${name}` };
   return { success: true, result: dump(hits) };
 }
@@ -86,7 +95,7 @@ before(async () => {
       if (msg.method === 'tools/list') {
         result = { tools: [{ name: 'intent__HassTurnOff' }, { name: 'homeassistant__GetLiveContext' }] };
       } else {
-        result = { content: [{ type: 'text', text: JSON.stringify(liveContext(msg.params.arguments.name)) }], isError: false };
+        result = { content: [{ type: 'text', text: JSON.stringify(liveContext(msg.params.arguments)) }], isError: false };
       }
       res.end(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result }));
     });
@@ -170,6 +179,15 @@ test('a candidate by name is not the answer unless the matcher found that very d
   assert.equal(out.problems[0].problem, 'unpinned');
 });
 
+test('two devices that print the same are not told apart by their print', async () => {
+  for (const [ref, twins] of [['Lamp, Desk', ['light.x', 'light.y']], ['Shade, Top', ['cover.x', 'cover.y']]]) {
+    const out = await resolveProposal(proposalOf(intent([ref])));
+    assert.equal(out.proposal, null, `${ref} must not become ${JSON.stringify(out.proposal)}`);
+    assert.equal(out.problems[0].problem, 'ambiguous', ref);
+    for (const id of twins) assert.ok(!JSON.stringify(out.proposal).includes(id));
+  }
+});
+
 test('an automation draft has every entity_id resolved, at any depth, in a string or a list', async () => {
   const automation = {
     alias: 'Night',
@@ -197,11 +215,41 @@ test('ids of an automation being edited pass without a lookup', async () => {
   assert.deepEqual(out.automation.actions[0].target.entity_id, 'light.hidden');
 });
 
+test('an id the edited automation carries stands in its slots only, never in a proposal', async () => {
+  const out = await resolveAnswer({ proposal: proposalOf(intent(['lock.front_door'])), automation: null },
+    relay.lookup('r5'), { known: ['lock.front_door'] });
+  assert.equal(out.proposal, null, 'lock.front_door is not exposed');
+  assert.equal(out.problems[0].problem, 'unknown');
+});
+
+// A lookup that counts what it is asked and never answers unless told to.
+function stalledLookup() {
+  const calls = [];
+  const never = () => new Promise(() => {});
+  return { calls, live: (n) => { calls.push(n); return never(); }, liveDomain: never, states: never };
+}
+
+test('an answer naming more devices than one answer may is refused before any lookup', async () => {
+  const lookup = stalledLookup();
+  const actions = Array.from({ length: 61 }, (_, i) => ({ action: 'light.turn_off', target: { entity_id: `Lamp ${i}` } }));
+  const out = await resolveAnswer({ proposal: null, automation: { alias: 'A', triggers: [{ trigger: 'time' }], actions } }, lookup);
+  assert.equal(out.automation, null);
+  assert.equal(out.problems[0].problem, 'unavailable');
+  assert.equal(lookup.calls.length, 0);
+});
+
+test('a resolution that outlasts its deadline proposes nothing', { timeout: 5000 }, async () => {
+  const out = await resolveAnswer({ proposal: proposalOf(intent(['Sandbox Test Lamp'])), automation: null },
+    stalledLookup(), { deadlineMs: 50 });
+  assert.equal(out.proposal, null);
+  assert.equal(out.problems[0].problem, 'unavailable');
+});
+
 test('every lookup is recorded against its run', async () => {
   records.length = 0;
   await resolveAnswer({ proposal: proposalOf(intent(['Sandbox Test Lamp'])), automation: null }, relay.lookup('run9'));
   assert.ok(records.length > 0);
-  for (const line of records) assert.match(line, /^homeassistant__GetLiveContext run=run9 \(lookup(, no match)?\): \{"name":/);
+  for (const line of records) assert.match(line, /^homeassistant__GetLiveContext run=run9 \(lookup(, no match)?\): \{"(name|domain)":/);
 });
 
 // --- through the prompt API ---------------------------------------------------------
