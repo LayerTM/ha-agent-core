@@ -55,7 +55,10 @@ const INTENT_RE = /^Hass[A-Za-z0-9_]{2,48}$/;
 
 // Validate a client-supplied confirmed-intents array (write mode). Returns
 // {ok:true, intents} with a normalized copy, or {ok:false, error}.
-function validateIntents(raw) {
+// `named`: the targets are the model's REFERENCES to devices (a name or an id),
+// not yet looked up — any short line of text. A proposal that leaves the add-on
+// is validated again without it, after every reference became an entity id.
+function validateIntents(raw, { named = false } = {}) {
   if (!Array.isArray(raw) || raw.length < 1 || raw.length > 5) {
     return { ok: false, error: 'intents must be an array of 1-5 entries' };
   }
@@ -69,7 +72,8 @@ function validateIntents(raw) {
       return { ok: false, error: 'invalid intent name' };
     }
     if (!Array.isArray(targets) || targets.length < 1 || targets.length > 10
-        || !targets.every((t) => typeof t === 'string' && t.length <= 100 && ENTITY_ID_RE.test(t))) {
+        || !targets.every((t) => typeof t === 'string' && t.length <= 100
+          && (named ? t.trim() !== '' && !/[\n\t]/.test(t) && sanitizePrompt(t) === t : ENTITY_ID_RE.test(t)))) {
       return { ok: false, error: 'invalid intent targets' };
     }
     let cleanData = {};
@@ -89,13 +93,13 @@ function validateIntents(raw) {
 // Validate the model-produced proposal from structured output. Anything that
 // does not strictly conform is dropped (null) — the model's output is
 // untrusted.
-function validateProposal(raw) {
+function validateProposal(raw, { named = false } = {}) {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null;
   if (typeof raw.summary !== 'string' || !Array.isArray(raw.intents)) return null;
   const summary = sanitizePrompt(raw.summary).slice(0, 500).trim();
   if (!summary) return null;
   const rawIntents = raw.intents.slice(0, 5);
-  const checked = validateIntents(rawIntents);
+  const checked = validateIntents(rawIntents, { named });
   if (!checked.ok) return null;
   // Attach the model's per-intent risk hint. It is UNTRUSTED (model output), so
   // it is only a UX hint for the integration; the integration's metadata-aware

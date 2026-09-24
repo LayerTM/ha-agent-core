@@ -15,7 +15,8 @@ const {
   validateIntents, redactDeep, sha12, wholeCharEnd,
 } = require('./security');
 const { adapter, branding } = require('../adapter-contract');
-const { langOf, DEGRADE_TEXT, budgetNotice } = require('./notices');
+const { langOf, DEGRADE_TEXT, budgetNotice, targetNotice } = require('./notices');
+const { resolveAnswer, entityIdsIn } = require('./targets');
 const { createHistoryStore } = require('./history');
 
 const { run, TIMEOUT_MS, safeLangTag, wantedHaBasenames } = require('./run');
@@ -537,6 +538,10 @@ function createPromptApp({
   // One run's bearer and MCP configuration: made when the run takes its slot,
   // destroyed when it gives it back. Neither outlives the run that owns it.
   beginRun = async (_runId, _may) => ({ token: '', mcpConfigPath: null, dir: null }), endRun = async (_run) => {},
+  // How the core asks Home Assistant which entity a named device is, for one run
+  // (the relay's `lookup`); null without Home Assistant, and then nothing named
+  // can become a proposal.
+  lookupFor = null,
   model, voiceModel = '', writeModel = '', cameraModel = '',
   dailyBudgetUsd = 0,
   coreRelayUrl = '',
@@ -1243,18 +1248,40 @@ function createPromptApp({
       // 7. Output: redact secrets from EVERY model-shaped field before it
       // leaves the add-on — text, the whole proposal (summary + each intent's
       // free-form data), and the tool names.
-      const text = redact(outcome.text);
+      // A device the model NAMED becomes an entity id here, by Home Assistant's own
+      // matcher (targets.js), or the proposal / draft does not leave at all and the
+      // answer says which name was not found or not one device.
+      let answerText = outcome.text;
+      let resolved = { proposal: null, automation: null };
+      if (mode === 'read' && (outcome.proposal || outcome.automation)) {
+        let problems;
+        try {
+          if (!lookupFor) throw new Error('no Home Assistant to look the devices up in');
+          ({ problems, ...resolved } = await resolveAnswer(
+            { proposal: outcome.proposal, automation: outcome.automation },
+            lookupFor(runId),
+            { known: body.edit_automation !== undefined ? entityIdsIn(body.edit_automation) : [] },
+          ));
+        } catch (err) {
+          console.error(`[prompt] device lookup failed (${caller}): ${redact(err.message)}`);
+          resolved = { proposal: null, automation: null };
+          problems = [{ problem: 'unavailable', ref: '', candidates: [] }];
+        }
+        if (problems.length > 0) answerText = targetNotice(language, problems);
+      }
+
+      const text = redact(answerText);
       // Remember this read turn (redacted text only) so the next turn in the same
       // conversation has context. Write turns are intent-driven and not recorded.
       if (mode === 'read' && conversationId) {
         conversations.append(conversationId, prompt, text);
       }
-      const proposal = outcome.proposal ? redactDeep(outcome.proposal, redact) : null;
+      const proposal = resolved.proposal ? redactDeep(resolved.proposal, redact) : null;
       // Automation draft (read-side): a model-drafted automation config, redacted like the
       // proposal. Additive/optional — absent on every non-automation turn, so an
       // old integration that doesn't read it is unaffected. The add-on never
       // commits it; the integration re-validates + writes it in-process on confirm.
-      const automation = outcome.automation ? redactDeep(outcome.automation, redact) : null;
+      const automation = resolved.automation ? redactDeep(resolved.automation, redact) : null;
       const toolsUsed = outcome.toolsUsed.map((t) => redact(t));
 
       audit(

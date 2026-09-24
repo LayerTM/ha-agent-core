@@ -275,7 +275,9 @@ const READ_SYSTEM_PROMPT = [
   'structured-output field "proposal" to {summary, intents:[{intent, targets,',
   'data, risk}]} — intent must be a Home Assistant Assist intent name (for',
   'example HassTurnOn, HassTurnOff, HassLightSet, HassSetPosition,',
-  'HassClimateSetTemperature), targets must be entity ids, and EVERY intent MUST',
+  'HassClimateSetTemperature), each target is ONE device named exactly as the',
+  'live context names it (an entity id only when you were given one; never make',
+  'one up — the add-on looks every name up in Home Assistant), and EVERY intent MUST',
   'include risk ("low" or "sensitive"). Use "low" for ordinary, easily reversible',
   'household actions — turning lights, TVs / media players, fans, air purifiers,',
   'humidifiers, lamp plugs, scenes or comfort settings on or off; these are the',
@@ -296,8 +298,10 @@ const READ_SYSTEM_PROMPT = [
   'is what gets created, so it must be in the "automation" field. "triggers",',
   '"conditions" and "actions" are arrays of standard HA automation blocks. If the',
   'rule references devices (lights, sensors, switches, doors), FIRST call',
-  'GetLiveContext to get their real entity ids and use those; target each action by',
-  'the specific entity_id(s), not by area, device, floor or label (list the',
+  'GetLiveContext and name each device exactly as it names it; put those names in',
+  '"entity_id" (the add-on looks each one up and writes the real entity id; never',
+  'make one up) and target each action by the specific entities, not by area,',
+  'device, floor or label (list the',
   'individual entities explicitly) so the rule stays scoped to exactly those devices;',
   'if the needed device',
   "isn't in the state, set \"automation\" to null and say so in \"text\". Draft only;",
@@ -970,7 +974,7 @@ function run({
             }
           }
           const answer = dropOptionalNulls(open, READ_ANSWER);
-          proposal = validateProposal(answer.proposal);
+          proposal = validateProposal(answer.proposal, { named: true });
           automation = validateAutomationDraft(answer.automation);
         }
       } else {
