@@ -8,6 +8,8 @@
 // idle TTL, and a per-conversation turn cap — and it holds only the already
 // secret-redacted answer text, never raw model output.
 
+const { wholeCharEnd } = require('./security');
+
 const MAX_CONVERSATIONS = 200; // LRU cap on distinct conversation ids
 const MAX_TURNS = 12; // ~6 user/assistant exchanges kept per conversation
 const TTL_MS = 30 * 60 * 1000; // idle conversations expire
@@ -29,7 +31,10 @@ function createHistoryStore(now = () => Date.now()) {
     }
   }
 
-  const clip = (s) => (typeof s === 'string' ? s.slice(0, CONTENT_CAP) : '');
+  // The cap is a count of code units, so it can land inside a character; a
+  // stored half-character would come back out in the next prompt and in the
+  // answer built from it.
+  const clip = (s) => (typeof s === 'string' ? s.slice(0, wholeCharEnd(s, CONTENT_CAP)) : '');
 
   return {
     // Recent turns for a conversation (oldest→newest), or [] if unknown/expired.

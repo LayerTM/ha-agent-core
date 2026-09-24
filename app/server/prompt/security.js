@@ -223,6 +223,21 @@ function redactDeep(value, redact, depth = 0) {
   return value;
 }
 
+// A JavaScript string is UTF-16: a character outside the Basic Multilingual
+// Plane (an emoji, most musical and many CJK extension characters) is stored as
+// two code units, and `.length` counts those units. So any cut at a computed
+// index can land between the two halves of one character, and half a character
+// is not text: JSON.stringify writes it as a lone surrogate escape, and a strict
+// UTF-8 encoder reading that back — Python's, which the companion integration
+// uses — refuses the whole line. Every cut of text that leaves this process goes
+// through here; it moves the end back off a trailing leading-surrogate, leaving
+// the character whole for the next cut (which sees both halves) to carry.
+function wholeCharEnd(text, end) {
+  if (!(end > 0) || end >= text.length) return Math.max(0, Math.min(end, text.length));
+  const code = text.charCodeAt(end - 1);
+  return code >= 0xD800 && code <= 0xDBFF ? end - 1 : end;
+}
+
 function sha12(text) {
   return crypto.createHash('sha256').update(text, 'utf8').digest('hex').slice(0, 12);
 }
@@ -238,4 +253,5 @@ module.exports = {
   buildRedactor,
   redactDeep,
   sha12,
+  wholeCharEnd,
 };
