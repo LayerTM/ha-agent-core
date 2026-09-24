@@ -6,6 +6,8 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.8] - 2026-09-24
+
 ### Fixed
 
 - An engine that declares `descriptor.closedSchemasOnly` can no longer answer a
