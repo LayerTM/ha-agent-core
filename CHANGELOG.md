@@ -6,6 +6,16 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- A background loop no longer ends without a word. Its output reached the log
+  through a reader that tags each line; when that reader was gone, the loop died
+  of SIGPIPE on its next line and nothing said so. The reader now ignores a
+  closed log and keeps draining, so the loop goes on doing its job, and when
+  either end of the pair stops with a non-zero status the log says which one and
+  with what status (`[<loop>] stopped: the loop exited …, its log reader exited …`).
+  A loop that ends with 0 because its feature is switched off is still quiet.
+
 ## [0.7.9] - 2026-09-24
 
 ### Fixed
