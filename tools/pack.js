@@ -21,9 +21,10 @@
  * manifest, which is harmless and visible; dropping by default costs a live
  * script in every consumer's CI. The archive gets a
  * manifest (`ha-agent-core/core-manifest.json`) listing version, commit, adapter
- * API and every file's mode, size and SHA-256, and is checked with the consumer's
- * own verifier before anything is written — the packer cannot emit an archive the
- * verifier would refuse.
+ * API and every file's mode, size and SHA-256, and `app/server/core-version.json`
+ * states the version and commit to the add-on that runs it. The archive is
+ * checked with the consumer's own verifier before anything is written — the
+ * packer cannot emit an archive the verifier would refuse.
  *
  * Usage:
  *   pack.js --out DIR [--commit REF]
@@ -37,6 +38,11 @@ const path = require('node:path');
 const { parseArgs } = require('node:util');
 
 const verify = require('./verify-core.js');
+const { CORE_VERSION_FILE } = require('../app/server/core-version.js');
+
+// Where the archive states its own version for a running add-on, which keeps only
+// `app/` of the core (app/server/core-version.js reads it).
+const CORE_VERSION_PATH = `app/server/${CORE_VERSION_FILE}`;
 
 const BLOCK = 512;
 const REQUIRED_FILES = ['LICENSE', 'package.json', 'package-lock.json'];
@@ -146,6 +152,7 @@ function listFiles(repo, commit, patterns) {
         throw new Error(`${filePath}: ${type} with mode ${gitMode} — only regular files are packed`);
       }
       if (filePath === verify.MANIFEST_NAME) throw new Error(`${filePath}: name reserved for the archive manifest`);
+      if (filePath === CORE_VERSION_PATH) throw new Error(`${filePath}: name reserved for the version the archive states`);
       found.set(filePath, { path: filePath, mode: GIT_MODES[gitMode], object });
     }
   }
@@ -181,6 +188,12 @@ function build({ repo, commit = 'HEAD' }) {
     const drop = pkg.unshippedScripts[file.path];
     return { path: file.path, mode: file.mode, data: drop ? packedManifest(file.path, data, drop) : data };
   });
+  files.push({
+    path: CORE_VERSION_PATH,
+    mode: 0o644,
+    data: Buffer.from(`${JSON.stringify({ version: pkg.version, commit: commitId }, null, 2)}\n`),
+  });
+  files.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
   const unpacked = Object.keys(pkg.unshippedScripts).filter((p) => !files.some((f) => f.path === p));
   if (unpacked.length) throw new Error(`unshippedScripts names ${unpacked.join(', ')}, which is not packed`);
   // Every manifest that ships is decided about — an empty list is a decision and

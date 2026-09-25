@@ -554,6 +554,16 @@ async function statusOf(app) {
   }
 }
 
+test('status states the core release it is given, and nothing when it has none', async () => {
+  const commit = 'a'.repeat(40);
+  const stated = await statusOf(makeApp({ core: { version: '9.8.7', commit } }));
+  assert.equal(stated.core_version, '9.8.7');
+  assert.equal(stated.core_commit, commit);
+  const unpacked = await statusOf(makeApp());
+  assert.equal(unpacked.core_version, '');
+  assert.equal(unpacked.core_commit, '');
+});
+
 test('status reports the engine version the adapter parses from the agent binary', async () => {
   const body = await statusOf(makeApp({ claudeBin: fakeAgent('neutral-ok', 'neutral-agent 4.5.6 (build 7)') }));
   assert.equal(body.engine, 'neutral');

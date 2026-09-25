@@ -19,6 +19,7 @@ const { adapter } = require('../adapter-contract');
 const { resolveCoreTarget } = require('./core-target');
 const { startCoreRelay } = require('./core-relay');
 const { boundAddress } = require('../listen');
+const { readCoreVersion } = require('../core-version');
 
 const PORT = Number(process.env.CLAUDE_PROMPT_PORT || 8126);
 // Every IPv4 interface unless one address is named (the tests name the one they use).
@@ -294,6 +295,7 @@ async function start() {
     homeDir: process.env.HOME || '/data/home',
     workDir,
     addonVersion: process.env.ADDON_VERSION || 'unknown',
+    core: readCoreVersion(),
     redact,
     audit,
     // Durable state (budget spend + chat-health window) lives alongside the MCP

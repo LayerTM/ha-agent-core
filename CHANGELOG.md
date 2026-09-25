@@ -6,6 +6,16 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- A running add-on states which core it runs. The archive now carries
+  `app/server/core-version.json` with the release and the commit it was packed
+  from — the core's own `package.json` never reaches an add-on's image, which
+  keeps only `app/`, `ha-tools/` and `rootfs/`. `GET /api/status` publishes them
+  as `core_version` and `core_commit`, and the console's listening line in the
+  add-on log ends with `(core X.Y.Z, commit <12 hex>)`. A console run from a
+  checkout states `""` and `core version unknown`.
+
 ### Fixed
 
 - A background loop no longer ends without a word. Its output reached the log
