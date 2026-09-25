@@ -27,6 +27,7 @@ test('packs exactly the declared files with their modes, plus a manifest', (t) =
   assert.deepEqual(entries.map((e) => [e.path, e.mode.toString(8)]), [
     ['ha-agent-core/core-manifest.json', '644'],
     ['ha-agent-core/LICENSE', '644'],
+    ['ha-agent-core/app/server/core-version.json', '644'],
     ['ha-agent-core/package-lock.json', '644'],
     ['ha-agent-core/package.json', '644'],
     ['ha-agent-core/src/deep/tool.sh', '755'],
@@ -108,6 +109,30 @@ test('refuses a file that would shadow the archive manifest', (t) => {
   const repo = makeRepo(t, { 'core-manifest.json': '{}\n' },
     packageJson({ files: ['LICENSE', 'package.json', 'package-lock.json', 'core-manifest.json'] }));
   assert.throws(() => pack.build({ repo }), /reserved for the archive manifest/);
+});
+
+test('refuses a file that would shadow the version the archive states', (t) => {
+  const repo = makeRepo(t, { 'app/server/core-version.json': '{}\n' },
+    packageJson({ files: ['LICENSE', 'package.json', 'package-lock.json', 'app/'] }));
+  assert.throws(() => pack.build({ repo }), /reserved for the version the archive states/);
+});
+
+// The add-on keeps only `app/` of the core, so the archive's own answer to "which
+// core is this?" must be readable from there by the module the add-on runs.
+test('the shipped reader, in the shipped layout, reads the packed version and commit', (t) => {
+  const reader = fs.readFileSync(path.join(__dirname, '..', 'app', 'server', 'core-version.js'), 'utf8');
+  const repo = makeRepo(t, { 'app/server/core-version.js': reader },
+    packageJson({ version: '4.5.6', files: ['LICENSE', 'package.json', 'package-lock.json', 'app/'] }));
+  const { archive, lock } = pack.build({ repo });
+  const app = path.join(tempDir(t), 'agent-console');
+  for (const rel of ['server/core-version.js', 'server/core-version.json']) {
+    fs.mkdirSync(path.dirname(path.join(app, rel)), { recursive: true });
+    fs.writeFileSync(path.join(app, rel), readEntry(archive, `ha-agent-core/app/${rel}`, lock));
+  }
+  const { readCoreVersion, describeCore } = require(path.join(app, 'server', 'core-version.js'));
+  const commit = git(repo, 'rev-parse', 'HEAD').trim();
+  assert.deepEqual(readCoreVersion(), { version: '4.5.6', commit });
+  assert.equal(describeCore(readCoreVersion()), `core 4.5.6, commit ${commit.slice(0, 12)}`);
 });
 
 test('refuses a malformed version, adapter API or repository', (t) => {

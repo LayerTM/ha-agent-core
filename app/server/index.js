@@ -14,6 +14,7 @@ const { loadConsoleAssets, mountConsoleAssets } = require('./console-assets');
 const sources = require('./sources');
 const { boundAddress } = require('./listen');
 const { adapter, branding, theme } = require('./adapter-contract');
+const { readCoreVersion, describeCore } = require('./core-version');
 
 const PORT = Number(process.env.CLAUDE_CONSOLE_PORT || 8099);
 // Every interface unless one address is named, as for the startup placeholder.
@@ -124,7 +125,7 @@ async function main() {
   setInterval(cleanupUploads, 6 * 3600 * 1000).unref();
 
   server.listen(PORT, HOST, () => {
-    console.log(`${branding().consoleName} listening on ${boundAddress(server)}`);
+    console.log(`${branding().consoleName} listening on ${boundAddress(server)} (${describeCore(readCoreVersion())})`);
   });
 
   // Companion prompt API for the claude_ha integration (separate listener,

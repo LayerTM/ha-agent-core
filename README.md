@@ -344,6 +344,14 @@ add-on's own) and `request_fields`, the body fields `POST /api/prompt` accepts,
 taken from the same list the request is validated against. A client sends a
 field only when it is listed there.
 
+It identifies the core with `core_version` and `core_commit`: the release and the
+commit the running archive was packed from, as `app/server/core-version.json`
+states them — the file the packer writes into the archive, since an add-on keeps
+only the core's `app/`, `ha-tools/` and `rootfs/`. The console's listening line
+in the add-on log names the same release (`… listening on 0.0.0.0:8099 (core
+X.Y.Z, commit <12 hex>)`). A console run from a checkout, which was never packed,
+states `""` and `core version unknown`.
+
 The adapter may require its own modules and the core's leaf modules
 `app/server/prompt/security.js`, `app/server/prompt/ha-tool-names.js`,
 `app/server/branding.js` and `app/server/theme.js`, and nothing else of the core; the core returns to the

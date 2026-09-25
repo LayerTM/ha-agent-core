@@ -550,7 +550,7 @@ function createPromptApp({
   // token the account-limits endpoint upstream accepts. Injected rather than read
   // from the environment inside, so the endpoint is testable without a login.
   apiKey = '', oauthToken = '', homeDir = '', limitsFetch = fetch,
-  workDir, addonVersion, redact, audit, stateDir = null, dataDir = null, proactiveAlerts = false,
+  workDir, addonVersion, core = { version: '', commit: '' }, redact, audit, stateDir = null, dataDir = null, proactiveAlerts = false,
   // Whether the audit log is being written, read at the moment a request is
   // about to act. The default says yes, for the HTTP tests that do not care;
   // the start passes the sink's own state.
@@ -793,6 +793,10 @@ function createPromptApp({
       ready: Boolean(version) && authConfigured,
       // The add-on's own version; the agent's is engine_version.
       version: addonVersion,
+      // The core release this add-on runs, as its archive states it ('' when the
+      // console runs from a tree that was not packed).
+      core_version: core.version,
+      core_commit: core.commit,
       engine: descriptor.engine,
       engine_version: version || '',
       // The same value under the key clients from before engine_version read.
