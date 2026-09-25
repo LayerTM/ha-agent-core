@@ -16,6 +16,15 @@ uses [Semantic Versioning](https://semver.org/).
   add-on log ends with `(core X.Y.Z, commit <12 hex>)`. A console run from a
   checkout states `""` and `core version unknown`.
 
+### Changed
+
+- Transcripts are deleted only when the add-on's options say so. An add-on
+  without a `transcript_retention_days` option used to have its transcripts
+  swept after 30 days, and a value that was not a whole number meant 30 as well;
+  both now keep them, and the start log says why in one line
+  (`Transcripts are kept: this add-on has no transcript_retention_days option`).
+  The engine's own sweep is told the same (`engine_transcript_retention 0`).
+
 ### Fixed
 
 - A background loop no longer ends without a word. Its output reached the log

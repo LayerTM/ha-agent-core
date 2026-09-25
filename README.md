@@ -398,7 +398,7 @@ The functions are called in this order; each may log and export variables.
 | `engine_provision` | after `environment_vars`, once `/data/workdir` and `/data/uploads` exist |
 | `engine_console_env` | with the console's environment |
 | `engine_prompt_settings` | prints `CLAUDE_PROMPT_SETTINGS`; an engine that restricts prompt runs on its command line prints nothing |
-| `engine_transcript_retention DAYS` | with the `transcript_retention_days` option (default 30; 0 = keep); prints `native` after setting the engine's own sweep of its transcripts to `DAYS`, or `core` to have the core delete them (see [Retention](#retention)); anything else stops the start |
+| `engine_transcript_retention DAYS` | with the `transcript_retention_days` option (0 = keep; an add-on without the option, or with a value that is not a whole number of days, gets 0); prints `native` after setting the engine's own sweep of its transcripts to `DAYS`, or `core` to have the core delete them (see [Retention](#retention)); anything else stops the start |
 
 The engine also installs two commands, which the start script requires to be
 executable.
@@ -491,7 +491,7 @@ tagged `[usage-upkeep]`, like every background loop's.
 
 | store | bound |
 |---|---|
-| the engine's transcripts | `transcript_retention_days`: the engine's own sweep, or the core's |
+| the engine's transcripts | `transcript_retention_days`, and kept when the add-on has no such option: the engine's own sweep, or the core's — which deletes only files `agent-usage --files` lists, so a transcript it does not list has no bound from the core |
 | `/data/claude-audit.log` | 16 MB, then one previous file |
 | `/data/usage-cache.json` | one entry per transcript that exists, plus totals per day and model |
 | `/data/uploads` | `upload_retention_days` (default 14) |

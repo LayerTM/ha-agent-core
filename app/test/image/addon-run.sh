@@ -148,9 +148,11 @@ for line in "Initializing Neutral Agent add-on..." "Home Assistant Core at http:
     contains "logs: ${line}" "${P}/run.out" "${line}"
 done
 [ -d /data/uploads ] && ok "/data/uploads exists" || bad "/data/uploads exists"
-contains "the retention hook gets the default 30 days" "${P}/hooks.log" "engine_transcript_retention 30"
-contains "the engine leaves the sweep to the core: the upkeep deletes after 30 days" "${P}/upkeep.out" "sweep_days=30"
-contains "logs the retention" "${P}/run.out" "Transcripts kept 30 days (0 = forever), swept by the core side"
+# An add-on without the option never configured a deletion: its transcripts are kept.
+contains "without the option the retention hook is told to keep" "${P}/hooks.log" "engine_transcript_retention 0"
+contains "and the core deletes nothing" "${P}/upkeep.out" "sweep_days=0"
+contains "and the log says so once" "${P}/run.out" "Transcripts are kept: this add-on has no transcript_retention_days option"
+lacks "and no sweep period is logged" "${P}/run.out" "Transcripts kept 30 days"
 
 echo "2. auto_update off, an empty prompt setting, existing /homeassistant instructions"
 SETTINGS_VALUE=''
@@ -178,8 +180,14 @@ engine_hooks
 options '{"transcript_retention_days":"soon"}'
 run_service
 eq "a retention that is not a whole number: starts" "${STATUS}" 0
-contains "and keeps 30 days" "${P}/hooks.log" "engine_transcript_retention 30"
-contains "and says so" "${P}/run.out" "transcript_retention_days is not a whole number (soon); keeping 30"
+contains "and keeps the transcripts" "${P}/hooks.log" "engine_transcript_retention 0"
+contains "and the core deletes nothing" "${P}/upkeep.out" "sweep_days=0"
+contains "and says so" "${P}/run.out" "transcript_retention_days is not a whole number (soon); transcripts are kept"
+options '{"transcript_retention_days":30}'
+run_service
+contains "a configured period is passed on" "${P}/hooks.log" "engine_transcript_retention 30"
+contains "the engine leaves the sweep to the core: the upkeep deletes after 30 days" "${P}/upkeep.out" "sweep_days=30"
+contains "logs the retention" "${P}/run.out" "Transcripts kept 30 days (0 = forever), swept by the core side"
 options '{"transcript_retention_days":0}'
 run_service
 contains "0 is passed as 0" "${P}/hooks.log" "engine_transcript_retention 0"

@@ -311,11 +311,17 @@ export ADDON_VERSION="$(bashio::app.version 2>/dev/null || echo "unknown-$(date 
 # Transcripts are kept transcript_retention_days (0 = forever). The engine sweeps
 # them itself where it can ("native"); otherwise the core's daily upkeep does
 # ("core"). Either way their usage stays counted (ha-usage keeps the totals).
-retention_days=$(jq -r '.transcript_retention_days // 30' /data/options.json 2>/dev/null || echo 30)
+# Deleting them is something the add-on's options must say: without the option,
+# or with one that is not a number of days, they are kept and the log says why.
+retention_days=$(jq -r '.transcript_retention_days // empty' /data/options.json 2>/dev/null || echo "")
+retention_said=""
 case "${retention_days}" in
-    ''|*[!0-9]*)
-        bashio::log.warning "transcript_retention_days is not a whole number (${retention_days}); keeping 30"
-        retention_days=30 ;;
+    '')
+        retention_said="Transcripts are kept: this add-on has no transcript_retention_days option"
+        retention_days=0 ;;
+    *[!0-9]*)
+        bashio::log.warning "transcript_retention_days is not a whole number (${retention_days}); transcripts are kept"
+        retention_days=0 ;;
 esac
 current_hook=engine_transcript_retention
 retention_by="$(engine_transcript_retention "${retention_days}")"
@@ -327,7 +333,7 @@ case "${retention_by}" in
         bashio::log.error "engine_transcript_retention printed '${retention_by}', not 'native' or 'core'"
         exit 1 ;;
 esac
-bashio::log.info "Transcripts kept ${retention_days} days (0 = forever), swept by the ${retention_by} side"
+bashio::log.info "${retention_said:-Transcripts kept ${retention_days} days (0 = forever), swept by the ${retention_by} side}"
 start_background_loop usage-upkeep env USAGE_SWEEP_DAYS="${sweep_days}" /usr/local/bin/usage-upkeep
 
 # --- Proactive monitoring (opt-in via monitoring_interval_hours > 0) ---
