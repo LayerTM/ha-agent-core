@@ -26,6 +26,11 @@
 #     started the pair waits for both and writes the exit status of each straight
 #     to the log, past the reader. A loop that ends with 0 chose to (a switched-off
 #     feature) and is not reported.
+#
+# The report must not depend on the caller's shell options. addon-run runs with
+# errexit (and errtrace), and under errexit a failing pipeline ends the subshell
+# before its PIPESTATUS is read — exactly the case the report exists for. So the
+# subshell sets its own: errexit off, no inherited ERR trap.
 
 # _tag_background_lines <name> — the reader: tags each line and passes it on.
 _tag_background_lines() {
@@ -44,6 +49,8 @@ start_background_loop() {
     local name=$1
     shift
     (
+        set +o errexit
+        trap - ERR
         nohup "$@" 2>&1 | _tag_background_lines "${name}"
         status=("${PIPESTATUS[@]}")
         if [ "${status[0]}" -ne 0 ] || [ "${status[1]}" -ne 0 ]; then

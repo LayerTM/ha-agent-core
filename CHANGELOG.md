@@ -34,6 +34,9 @@ uses [Semantic Versioning](https://semver.org/).
   either end of the pair stops with a non-zero status the log says which one and
   with what status (`[<loop>] stopped: the loop exited …, its log reader exited …`).
   A loop that ends with 0 because its feature is switched off is still quiet.
+  Both hold under the start script's own shell options (`errexit`,
+  `errtrace`, `nounset`, `pipefail`), which would otherwise end the reader on
+  its first unwritable line and end the report before it read the status.
 
 ## [0.7.9] - 2026-09-24
 
