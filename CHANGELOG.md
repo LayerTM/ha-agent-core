@@ -6,6 +6,8 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-10-01
+
 ### Fixed
 
 - A killed background loop is reported when it ends, not when its last child
