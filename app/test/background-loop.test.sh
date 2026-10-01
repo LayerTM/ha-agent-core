@@ -18,7 +18,11 @@
 #      sleeps 600 s between runs) is reported within seconds, not when that
 #      child ends, and the child does not outlive it;
 #  11. a loop does not outlive the service that started it: TERM to the
-#      caller's whole process group ends the loop and its child too.
+#      caller's whole process group ends the loop and its child too;
+#  12. one running service owns one copy of each loop: a caller that exec's
+#      into another program (addon-run exec's node) and is then killed alone,
+#      with SIGKILL on its pid, and started again, as a supervisor restarts a
+#      service, leaves exactly one copy of the loop running.
 #
 # Every check runs twice: in a caller with no shell options, and in a caller
 # with addon-run's own options, read from addon-run itself (its top-level `set`
@@ -103,6 +107,7 @@ alive() { kill -0 "$1" 2>/dev/null; }
 # that was signalled can still be seen for a moment, and a child its dead parent
 # left to init is seen until init reaps it.
 gone_within_5s() { for _ in $(seq 50); do alive "$1" || { echo yes; return; }; sleep 0.1; done; echo no; }
+gone_within_10s() { for _ in $(seq 100); do alive "$1" || { echo yes; return; }; sleep 0.1; done; echo no; }
 
 # suite <label> <shell options of the caller>
 suite() {
@@ -118,6 +123,10 @@ suite() {
         echo 'start_background_loop "$@"'
         echo 'wait'
     } > "${runner}"
+    # The same caller as a service: it becomes another program, as addon-run
+    # becomes the console.
+    local service="${dir}/service"
+    sed 's/^wait$/exec sleep 300/' "${runner}" > "${service}"
 
     local out
     out="$(cd "${dir}/cwd" && bash "${runner}" cc-fake "${work}/loop" 2>/dev/null)"
@@ -242,6 +251,30 @@ suite() {
         check "the loop started" "yes" "no"
     fi
     wait "${runner11}" 2>/dev/null
+
+    # 12. Kill the service alone and start it again; one copy of the loop runs.
+    local first12 second12 loop12a loop12b
+    bash "${service}" cc-nap "${work}/nap" "${dir}/t12a" > /dev/null 2>&1 &
+    first12=$!
+    if await_file "${dir}/t12a.pid"; then
+        read -r loop12a < "${dir}/t12a.pid"
+        kill -KILL "${first12}" 2>/dev/null; wait "${first12}" 2>/dev/null
+        bash "${service}" cc-nap "${work}/nap" "${dir}/t12b" > /dev/null 2>&1 &
+        second12=$!
+        if await_file "${dir}/t12b.pid"; then
+            read -r loop12b < "${dir}/t12b.pid"
+            check "the killed service's loop is gone within 10 s" "yes" "$(gone_within_10s "${loop12a}")"
+            check "the restarted service's loop runs" "yes" "$(alive "${loop12b}" && echo yes || echo no)"
+        else
+            check "the restarted loop started" "yes" "no"
+        fi
+        kill -KILL "${second12}" 2>/dev/null; wait "${second12}" 2>/dev/null
+        gone_within_10s "${loop12b}" > /dev/null
+        alive "${loop12a}" && kill "${loop12a}" 2>/dev/null
+        alive "${loop12b}" && kill "${loop12b}" 2>/dev/null
+    else
+        check "the loop started" "yes" "no"
+    fi
 }
 
 suite "no shell options" ""
