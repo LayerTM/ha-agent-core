@@ -16,7 +16,9 @@
 #   9. a loop that is killed is reported with its status;
 #  10. a loop killed while a child of its own is still running (usage-upkeep
 #      sleeps 600 s between runs) is reported within seconds, not when that
-#      child ends, and the child does not outlive it.
+#      child ends, and the child does not outlive it;
+#  11. a loop does not outlive the service that started it: TERM to the
+#      caller's whole process group ends the loop and its child too.
 #
 # Every check runs twice: in a caller with no shell options, and in a caller
 # with addon-run's own options, read from addon-run itself (its top-level `set`
@@ -209,6 +211,34 @@ suite() {
         check "the loop started" "yes" "no"
     fi
     kill "${runner10}" 2>/dev/null; wait "${runner10}" 2>/dev/null
+
+    # 11. Stop the caller as a supervisor may: TERM to its whole process group.
+    #     The caller gets a group of its own here, so the test is not in it.
+    local runner11 loop11 child11="" gone11=no
+    set -m
+    bash "${runner}" cc-nap "${work}/nap" "${dir}/t11" > /dev/null 2>&1 &
+    runner11=$!
+    set +m
+    if await_file "${dir}/t11.pid"; then
+        read -r loop11 < "${dir}/t11.pid"
+        check "the caller has a process group of its own" \
+            "${runner11}" "$(ps -o pgid= -p "${runner11}" | tr -d ' ')"
+        for _ in $(seq 50); do
+            child11="$(ps -A -o pid= -o ppid= | awk -v l="${loop11}" '$2 == l { print $1 }')"
+            [ -n "${child11}" ] && break
+            sleep 0.1
+        done
+        kill -TERM -- "-${runner11}" 2>/dev/null
+        for _ in $(seq 50); do alive "${loop11}" || { gone11=yes; break; }; sleep 0.1; done
+        check "TERM to the caller's group ends the loop within 5 s" "yes" "${gone11}"
+        check "TERM to the caller's group ends the loop's sleep" \
+            "no" "$( [ -n "${child11}" ] && alive "${child11}" && echo yes || echo no)"
+        alive "${loop11}" && kill "${loop11}" 2>/dev/null
+        [ -n "${child11}" ] && alive "${child11}" && kill "${child11}" 2>/dev/null
+    else
+        check "the loop started" "yes" "no"
+    fi
+    wait "${runner11}" 2>/dev/null
 }
 
 suite "no shell options" ""

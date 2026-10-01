@@ -12,7 +12,9 @@ uses [Semantic Versioning](https://semver.org/).
   does. A loop killed while it waited in `sleep` (usage-upkeep sleeps ten
   minutes between runs) left the sleep holding its log pipe, so the
   `stopped:` line reached the add-on log up to a whole interval late. Each loop
-  now runs in a process group of its own, and what it started is ended with it.
+  now runs in a process group of its own, and what it started is ended with it;
+  a signal that ends the service, to its process or to its whole group, ends
+  the loop's group as well, so no loop outlives the service that started it.
 
 ## [0.8.0] - 2026-10-01
 

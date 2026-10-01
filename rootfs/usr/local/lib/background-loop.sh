@@ -32,7 +32,8 @@
 # there, it left the sleep behind with the pipe, and its end reached the log up to
 # ten minutes late. So the loop runs in a process group of its own, and the moment
 # it ends, whatever it started goes with it: a child of a loop that has stopped
-# has no work left, only a pipe to keep open.
+# has no work left, only a pipe to keep open. The other direction holds as well:
+# when the service ends, the loop's group is ended with it.
 #
 # The report must not depend on the caller's shell options. addon-run runs with
 # errexit (and errtrace), and under errexit a failing pipeline ends the subshell
@@ -53,16 +54,28 @@ _tag_background_lines() {
 
 # _run_background_loop <command> [args...] — the loop in a process group of its
 # own: once it ends, that group is sent TERM, and the loop's own status returned.
+# A loop lives exactly as long as the service that started it, so a signal that
+# ends this wrapper (TERM to the service's pid or to its whole group) is passed
+# to the loop's group first: in a group of its own the loop would otherwise
+# outlive the service and run beside the next copy.
+# Only for the pipeline subshell below, which has errexit off: under errexit a
+# `kill` of a group already gone (status 1) would end the wrapper early.
 _run_background_loop() {
     local pid rc
     set -m
     nohup "$@" &
     pid=$!
     set +m
+    trap 'kill -TERM -- "-${pid}" 2>/dev/null' TERM HUP INT
     # A job that a signal ended is announced by the shell on stderr — here the
     # pipe — so the announcement is dropped; the status below says it once.
-    wait "${pid}" 2>/dev/null
-    rc=$?
+    # A trapped signal interrupts `wait`; the loop is then waited for again, so
+    # its own status is the one returned.
+    while :; do
+        wait "${pid}" 2>/dev/null
+        rc=$?
+        kill -0 "${pid}" 2>/dev/null || break
+    done
     kill -TERM -- "-${pid}" 2>/dev/null
     return "${rc}"
 }
