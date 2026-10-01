@@ -33,7 +33,7 @@
 # ten minutes late. So the loop runs in a process group of its own, and the moment
 # it ends, whatever it started goes with it: a child of a loop that has stopped
 # has no work left, only a pipe to keep open. The other direction holds as well:
-# when the service ends, the loop's group is ended with it.
+# when the service's process group is signalled, the loop's group is ended too.
 #
 # The report must not depend on the caller's shell options. addon-run runs with
 # errexit (and errtrace), and under errexit a failing pipeline ends the subshell
@@ -54,9 +54,9 @@ _tag_background_lines() {
 
 # _run_background_loop <command> [args...] — the loop in a process group of its
 # own: once it ends, that group is sent TERM, and the loop's own status returned.
-# A loop lives exactly as long as the service that started it, so a signal that
-# ends this wrapper (TERM to the service's pid or to its whole group) is passed
-# to the loop's group first: in a group of its own the loop would otherwise
+# A loop lives exactly as long as the process group of the service that started
+# it: a signal that ends this wrapper (TERM, HUP or INT to that whole group) is
+# passed to the loop's group first, or in a group of its own the loop would
 # outlive the service and run beside the next copy.
 # Only for the pipeline subshell below, which has errexit off: under errexit a
 # `kill` of a group already gone (status 1) would end the wrapper early.
