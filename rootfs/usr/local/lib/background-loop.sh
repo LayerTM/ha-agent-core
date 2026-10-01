@@ -54,19 +54,30 @@ _tag_background_lines() {
 
 # _run_background_loop <command> [args...] — the loop in a process group of its
 # own: once it ends, that group is sent TERM, and the loop's own status returned.
-# A loop lives exactly as long as the process group of the service that started
-# it: a signal that ends this wrapper (TERM, HUP or INT to that whole group) is
-# passed to the loop's group first, or in a group of its own the loop would
-# outlive the service and run beside the next copy.
+# A loop lives exactly as long as the service that started it, or in a group of
+# its own it would outlive the service and run beside the copy the supervisor
+# starts next. Two ways the service ends, both handled here:
+#   - a signal to its whole process group (TERM, HUP or INT) reaches this wrapper,
+#     which passes TERM to the loop's group first;
+#   - its own process alone ends (the start script exec's the console, and the
+#     console is killed): no signal reaches this wrapper, so a watcher checks
+#     every few seconds that the service's process is still there, and ends the
+#     loop's group once it is not.
 # Only for the pipeline subshell below, which has errexit off: under errexit a
 # `kill` of a group already gone (status 1) would end the wrapper early.
 _run_background_loop() {
-    local pid rc
+    local pid rc watcher service=$$
     set -m
     nohup "$@" &
     pid=$!
     set +m
     trap 'kill -TERM -- "-${pid}" 2>/dev/null' TERM HUP INT
+    # The watcher speaks nowhere, so it never holds the log pipe open.
+    (
+        while kill -0 "${service}" 2>/dev/null; do sleep 2; done
+        kill -TERM -- "-${pid}" 2>/dev/null
+    ) </dev/null >/dev/null 2>&1 &
+    watcher=$!
     # A job that a signal ended is announced by the shell on stderr — here the
     # pipe — so the announcement is dropped; the status below says it once.
     # A trapped signal interrupts `wait`; the loop is then waited for again, so
@@ -76,6 +87,7 @@ _run_background_loop() {
         rc=$?
         kill -0 "${pid}" 2>/dev/null || break
     done
+    kill "${watcher}" 2>/dev/null
     kill -TERM -- "-${pid}" 2>/dev/null
     return "${rc}"
 }
