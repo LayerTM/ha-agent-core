@@ -99,6 +99,10 @@ await_file() { for _ in $(seq 50); do [ -s "$1" ] && return 0; sleep 0.1; done; 
 # Waits up to ~5 s for <file> to hold a line matching <pattern>.
 await_line() { for _ in $(seq 50); do grep -q "$2" "$1" 2>/dev/null && return 0; sleep 0.1; done; return 1; }
 alive() { kill -0 "$1" 2>/dev/null; }
+# Waits up to ~5 s for process <pid> to be gone; prints yes or no. A process
+# that was signalled can still be seen for a moment, and a child its dead parent
+# left to init is seen until init reaps it.
+gone_within_5s() { for _ in $(seq 50); do alive "$1" || { echo yes; return; }; sleep 0.1; done; echo no; }
 
 # suite <label> <shell options of the caller>
 suite() {
@@ -203,7 +207,7 @@ suite() {
             "[cc-nap] stopped: the loop exited 143, its log reader exited 0" \
             "$(grep '^\[cc-nap\] stopped' "${log10}")"
         check "the loop's sleep does not outlive it" \
-            "no" "$( [ -n "${child10}" ] && alive "${child10}" && echo yes || echo no)"
+            "yes" "$( [ -n "${child10}" ] && gone_within_5s "${child10}" || echo no)"
         check "nothing but the loop's own lines reaches the log" \
             "" "$(grep -v -e '^\[cc-nap\] napping$' -e '^\[cc-nap\] stopped' "${log10}")"
         [ -n "${child10}" ] && alive "${child10}" && kill "${child10}" 2>/dev/null
@@ -214,7 +218,7 @@ suite() {
 
     # 11. Stop the caller as a supervisor may: TERM to its whole process group.
     #     The caller gets a group of its own here, so the test is not in it.
-    local runner11 loop11 child11="" gone11=no
+    local runner11 loop11 child11=""
     set -m
     bash "${runner}" cc-nap "${work}/nap" "${dir}/t11" > /dev/null 2>&1 &
     runner11=$!
@@ -229,10 +233,9 @@ suite() {
             sleep 0.1
         done
         kill -TERM -- "-${runner11}" 2>/dev/null
-        for _ in $(seq 50); do alive "${loop11}" || { gone11=yes; break; }; sleep 0.1; done
-        check "TERM to the caller's group ends the loop within 5 s" "yes" "${gone11}"
-        check "TERM to the caller's group ends the loop's sleep" \
-            "no" "$( [ -n "${child11}" ] && alive "${child11}" && echo yes || echo no)"
+        check "TERM to the caller's group ends the loop within 5 s" "yes" "$(gone_within_5s "${loop11}")"
+        check "TERM to the caller's group ends the loop's sleep within 5 s" \
+            "yes" "$( [ -n "${child11}" ] && gone_within_5s "${child11}" || echo no)"
         alive "${loop11}" && kill "${loop11}" 2>/dev/null
         [ -n "${child11}" ] && alive "${child11}" && kill "${child11}" 2>/dev/null
     else
