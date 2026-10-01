@@ -17,6 +17,11 @@ uses [Semantic Versioning](https://semver.org/).
   now runs in a process group of its own, and what it started is ended with it;
   a signal to the service's whole process group ends the loop's group as
   well, so the loop does not keep running beside the next copy.
+- A service restart no longer doubles the background loops. When the
+  console was killed on its own and the supervisor started the service again,
+  the previous run's loops kept running beside the new ones. A loop now ends
+  within a few seconds after the process of the service that started it ends,
+  so one running service has exactly one copy of each loop.
 
 ## [0.8.0] - 2026-10-01
 
