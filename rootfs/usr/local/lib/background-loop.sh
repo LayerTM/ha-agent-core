@@ -27,6 +27,14 @@
 #     to the log, past the reader. A loop that ends with 0 chose to (a switched-off
 #     feature) and is not reported.
 #
+# The reader sees the end only when every writer of the pipe has closed it, and a
+# loop's children hold it too. usage-upkeep spends its life in `sleep 600`; killed
+# there, it left the sleep behind with the pipe, and its end reached the log up to
+# ten minutes late. So the loop runs in a process group of its own, and the moment
+# it ends, whatever it started goes with it: a child of a loop that has stopped
+# has no work left, only a pipe to keep open. The other direction holds as well:
+# when the service's process group is signalled, the loop's group is ended too.
+#
 # The report must not depend on the caller's shell options. addon-run runs with
 # errexit (and errtrace), and under errexit a failing pipeline ends the subshell
 # before its PIPESTATUS is read — exactly the case the report exists for. So the
@@ -44,6 +52,34 @@ _tag_background_lines() {
     done 2>/dev/null
 }
 
+# _run_background_loop <command> [args...] — the loop in a process group of its
+# own: once it ends, that group is sent TERM, and the loop's own status returned.
+# A loop lives exactly as long as the process group of the service that started
+# it: a signal that ends this wrapper (TERM, HUP or INT to that whole group) is
+# passed to the loop's group first, or in a group of its own the loop would
+# outlive the service and run beside the next copy.
+# Only for the pipeline subshell below, which has errexit off: under errexit a
+# `kill` of a group already gone (status 1) would end the wrapper early.
+_run_background_loop() {
+    local pid rc
+    set -m
+    nohup "$@" &
+    pid=$!
+    set +m
+    trap 'kill -TERM -- "-${pid}" 2>/dev/null' TERM HUP INT
+    # A job that a signal ended is announced by the shell on stderr — here the
+    # pipe — so the announcement is dropped; the status below says it once.
+    # A trapped signal interrupts `wait`; the loop is then waited for again, so
+    # its own status is the one returned.
+    while :; do
+        wait "${pid}" 2>/dev/null
+        rc=$?
+        kill -0 "${pid}" 2>/dev/null || break
+    done
+    kill -TERM -- "-${pid}" 2>/dev/null
+    return "${rc}"
+}
+
 # start_background_loop <name> <command> [args...]
 start_background_loop() {
     local name=$1
@@ -51,7 +87,7 @@ start_background_loop() {
     (
         set +o errexit
         trap - ERR
-        nohup "$@" 2>&1 | _tag_background_lines "${name}"
+        _run_background_loop "$@" 2>&1 | _tag_background_lines "${name}"
         status=("${PIPESTATUS[@]}")
         if [ "${status[0]}" -ne 0 ] || [ "${status[1]}" -ne 0 ]; then
             printf '[%s] stopped: the loop exited %s, its log reader exited %s\n' \
