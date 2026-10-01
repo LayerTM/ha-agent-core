@@ -13,7 +13,10 @@
 #   7. a log that stops reading does not stop the loop: once nobody reads the
 #      add-on log, the loop keeps doing its job instead of dying of SIGPIPE;
 #   8. a loop that exits non-zero is reported with its status;
-#   9. a loop that is killed is reported with its status.
+#   9. a loop that is killed is reported with its status;
+#  10. a loop killed while a child of its own is still running (usage-upkeep
+#      sleeps 600 s between runs) is reported within seconds, not when that
+#      child ends, and the child does not outlive it.
 #
 # Every check runs twice: in a caller with no shell options, and in a caller
 # with addon-run's own options, read from addon-run itself (its top-level `set`
@@ -80,7 +83,14 @@ cat > "${work}/fail" <<'LOOP'
 echo "cannot go on"
 exit 7
 LOOP
-chmod +x "${work}/loop" "${work}/tick" "${work}/fail"
+# A loop that waits for a long child between runs, as usage-upkeep does.
+cat > "${work}/nap" <<'LOOP'
+#!/usr/bin/env bash
+echo "$$" > "$1.pid"
+echo napping
+sleep 30
+LOOP
+chmod +x "${work}/loop" "${work}/tick" "${work}/fail" "${work}/nap"
 
 # Waits up to ~5 s for <file> to exist.
 await_file() { for _ in $(seq 50); do [ -s "$1" ] && return 0; sleep 0.1; done; return 1; }
@@ -119,12 +129,15 @@ suite() {
         "" "$(ls "${dir}/cwd")"
 
     # 6. Kill the reader; the log must say the loop ended.
-    local log6="${dir}/log6" runner6 loop6 parent6 reader6
+    local log6="${dir}/log6" runner6 loop6 parent6 reader6 pipeline6
     bash "${runner}" cc-tick "${work}/tick" "${dir}/t6" > "${log6}" 2>&1 &
     runner6=$!
     if await_file "${dir}/t6.pid"; then
         read -r loop6 parent6 < "${dir}/t6.pid"
-        reader6="$(ps -A -o pid= -o ppid= | awk -v p="${parent6}" -v l="${loop6}" '$2 == p && $1 != l { print $1 }')"
+        # The loop runs under a wrapper that is the pipe's first end; the reader
+        # is the wrapper's sibling.
+        pipeline6="$(ps -o ppid= -p "${parent6}" | tr -d ' ')"
+        reader6="$(ps -A -o pid= -o ppid= | awk -v p="${pipeline6}" -v w="${parent6}" '$2 == p && $1 != w { print $1 }')"
         check "the log reader is found beside the loop" "1" "$(printf '%s\n' "${reader6}" | grep -c .)"
         kill "${reader6}" 2>/dev/null
         check "a loop whose log reader died is reported within 5 s" \
@@ -168,6 +181,34 @@ suite() {
         check "the loop started" "yes" "no"
     fi
     kill "${runner9}" 2>/dev/null; wait "${runner9}" 2>/dev/null
+
+    # 10. Kill a loop while its long sleep is pending; the end is reported
+    #     promptly and the sleep goes with it.
+    local log10="${dir}/log10" runner10 loop10 child10=""
+    bash "${runner}" cc-nap "${work}/nap" "${dir}/t10" > "${log10}" 2>&1 &
+    runner10=$!
+    if await_file "${dir}/t10.pid"; then
+        read -r loop10 < "${dir}/t10.pid"
+        for _ in $(seq 50); do
+            child10="$(ps -A -o pid= -o ppid= | awk -v l="${loop10}" '$2 == l { print $1 }')"
+            [ -n "${child10}" ] && break
+            sleep 0.1
+        done
+        check "the loop's sleep is found" "1" "$(printf '%s\n' "${child10}" | grep -c .)"
+        kill "${loop10}" 2>/dev/null
+        await_line "${log10}" '^\[cc-nap\] stopped' >/dev/null
+        check "a loop killed during a long sleep is reported within 5 s" \
+            "[cc-nap] stopped: the loop exited 143, its log reader exited 0" \
+            "$(grep '^\[cc-nap\] stopped' "${log10}")"
+        check "the loop's sleep does not outlive it" \
+            "no" "$( [ -n "${child10}" ] && alive "${child10}" && echo yes || echo no)"
+        check "nothing but the loop's own lines reaches the log" \
+            "" "$(grep -v -e '^\[cc-nap\] napping$' -e '^\[cc-nap\] stopped' "${log10}")"
+        [ -n "${child10}" ] && alive "${child10}" && kill "${child10}" 2>/dev/null
+    else
+        check "the loop started" "yes" "no"
+    fi
+    kill "${runner10}" 2>/dev/null; wait "${runner10}" 2>/dev/null
 }
 
 suite "no shell options" ""

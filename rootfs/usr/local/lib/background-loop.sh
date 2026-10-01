@@ -27,6 +27,13 @@
 #     to the log, past the reader. A loop that ends with 0 chose to (a switched-off
 #     feature) and is not reported.
 #
+# The reader sees the end only when every writer of the pipe has closed it, and a
+# loop's children hold it too. usage-upkeep spends its life in `sleep 600`; killed
+# there, it left the sleep behind with the pipe, and its end reached the log up to
+# ten minutes late. So the loop runs in a process group of its own, and the moment
+# it ends, whatever it started goes with it: a child of a loop that has stopped
+# has no work left, only a pipe to keep open.
+#
 # The report must not depend on the caller's shell options. addon-run runs with
 # errexit (and errtrace), and under errexit a failing pipeline ends the subshell
 # before its PIPESTATUS is read — exactly the case the report exists for. So the
@@ -44,6 +51,22 @@ _tag_background_lines() {
     done 2>/dev/null
 }
 
+# _run_background_loop <command> [args...] — the loop in a process group of its
+# own: once it ends, that group is sent TERM, and the loop's own status returned.
+_run_background_loop() {
+    local pid rc
+    set -m
+    nohup "$@" &
+    pid=$!
+    set +m
+    # A job that a signal ended is announced by the shell on stderr — here the
+    # pipe — so the announcement is dropped; the status below says it once.
+    wait "${pid}" 2>/dev/null
+    rc=$?
+    kill -TERM -- "-${pid}" 2>/dev/null
+    return "${rc}"
+}
+
 # start_background_loop <name> <command> [args...]
 start_background_loop() {
     local name=$1
@@ -51,7 +74,7 @@ start_background_loop() {
     (
         set +o errexit
         trap - ERR
-        nohup "$@" 2>&1 | _tag_background_lines "${name}"
+        _run_background_loop "$@" 2>&1 | _tag_background_lines "${name}"
         status=("${PIPESTATUS[@]}")
         if [ "${status[0]}" -ne 0 ] || [ "${status[1]}" -ne 0 ]; then
             printf '[%s] stopped: the loop exited %s, its log reader exited %s\n' \
