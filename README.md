@@ -4,6 +4,8 @@ Shared core for Home Assistant add-ons that run a coding agent. Each add-on
 consumes the core as a pinned release archive, verified before anything from it
 is unpacked or executed.
 
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-support-FFDD00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/layertme)
+
 ## What the core contains
 
 | path | what |
