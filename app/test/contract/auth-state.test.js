@@ -172,35 +172,64 @@ test('an adapter that cannot tell, or throws, never makes the sign-in look expir
 });
 
 test('the state machine: the newer evidence wins, and only a readable saved state is trusted', () => {
-  let clock = 1_000_000;
+  const T = 1_800_000_000_000; // an epoch-millis base; times below are offsets from it
+  let clock = T + 1000;
   const now = () => clock;
   const iso = (ms) => new Date(ms).toISOString();
 
   const fresh = createAuthState(null, now);
   assert.deepEqual(fresh.snapshot(), { state: 'unknown', since: null });
   // An expiry already passed with no run: expired since that moment.
-  assert.deepEqual(fresh.snapshot(900_000), { state: 'expired', since: iso(900_000) });
+  assert.deepEqual(fresh.snapshot(T + 900), { state: 'expired', since: iso(T + 900) });
 
-  fresh.record(true); // answered at 1 000 000
-  assert.deepEqual(fresh.snapshot(900_000), { state: 'ok', since: iso(1_000_000) }, 'answered after the expiry');
-  clock = 2_000_000;
-  assert.deepEqual(fresh.snapshot(1_500_000), { state: 'expired', since: iso(1_500_000) }, 'expired after the answer');
+  fresh.record(true); // answered at T+1000
+  assert.deepEqual(fresh.snapshot(T + 900), { state: 'ok', since: iso(T + 1000) }, 'answered after the expiry');
+  clock = T + 2000;
+  assert.deepEqual(fresh.snapshot(T + 1500), { state: 'expired', since: iso(T + 1500) }, 'expired after the answer');
 
-  fresh.record(false); // refused at 2 000 000
-  assert.deepEqual(fresh.snapshot(1_500_000), { state: 'expired', since: iso(2_000_000) });
-  clock = 2_500_000;
+  fresh.record(false); // refused at T+2000
+  assert.deepEqual(fresh.snapshot(T + 1500), { state: 'expired', since: iso(T + 2000) });
+  clock = T + 2500;
   fresh.record(false); // still refused: the moment it became true does not move
-  assert.deepEqual(fresh.snapshot(), { state: 'expired', since: iso(2_000_000) });
+  assert.deepEqual(fresh.snapshot(), { state: 'expired', since: iso(T + 2000) });
 
   const saves = [];
   const store = (saved) => ({ load: () => saved, save: (v) => saves.push(v) });
   for (const junk of [null, 'expired', { state: 'gone', since: 5 }, { state: 'ok', since: -1 }, { state: 'ok' }]) {
     assert.deepEqual(createAuthState(store(junk), now).snapshot(), { state: 'unknown', since: null }, JSON.stringify(junk));
   }
-  const restored = createAuthState(store({ state: 'expired', since: 1234 }), now);
-  assert.deepEqual(restored.snapshot(), { state: 'expired', since: iso(1234) });
+  const restored = createAuthState(store({ state: 'expired', since: T + 1234 }), now);
+  assert.deepEqual(restored.snapshot(), { state: 'expired', since: iso(T + 1234) });
   restored.record(true);
-  assert.deepEqual(saves, [{ state: 'ok', since: 2_500_000 }]);
+  assert.deepEqual(saves, [{ state: 'ok', since: T + 2500, answeredAt: T + 2500 }]);
+});
+
+test('an answer while already ok outdates an expiry that passed in between, and that survives a restart', () => {
+  // The credential file can go stale while another credential (a token in the
+  // options) keeps every run answering: the newest answer must win over it.
+  const T = 1_800_000_000_000;
+  let clock = T + 1000;
+  const now = () => clock;
+  let saved = null;
+  const store = { load: () => saved, save: (v) => { saved = v; } };
+
+  const auth = createAuthState(store, now);
+  auth.record(true); // ok at T+1000
+  clock = T + 6000;
+  auth.record(true); // answered again at T+6000, after the expiry at T+3000
+  assert.deepEqual(auth.snapshot(T + 3000), { state: 'ok', since: new Date(T + 1000).toISOString() });
+
+  const reloaded = createAuthState(store, now);
+  assert.deepEqual(reloaded.snapshot(T + 3000), { state: 'ok', since: new Date(T + 1000).toISOString() });
+  // An expiry after that last answer still wins.
+  clock = T + 9000;
+  assert.equal(reloaded.snapshot(T + 7000).state, 'expired');
+});
+
+test('an expiry in seconds, not milliseconds, is "cannot tell", never expired', () => {
+  const now = () => 1_800_000_000_000;
+  const auth = createAuthState(null, now);
+  assert.deepEqual(auth.snapshot(1_700_000_000), { state: 'unknown', since: null });
 });
 
 test('credentialsExpiry is an optional adapter member, a function when present', () => {

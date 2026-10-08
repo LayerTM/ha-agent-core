@@ -337,6 +337,62 @@ function createBudget(limitUsd, now = () => new Date(), persist = null) {
   };
 }
 
+// Is the engine still signed in? Published on /api/status as
+// `{ state: 'ok' | 'expired' | 'unknown', since }`, so a client can say "sign in
+// again" without spending a model call to learn it. Two kinds of evidence, and
+// the NEWER one wins:
+// - a run: one the engine refused for its sign-in ('auth-expired') says expired,
+//   one that answered says ok. Every other ending says nothing about the sign-in
+//   and leaves the state as it was. Durable across restarts when a store is
+//   given, or an update would hide an expiry until the next request. Two runs in
+//   flight are recorded in the order they finish, so the last to finish wins.
+// - the local credential: the adapter may know, from timestamps alone, the
+//   moment after which its credential cannot be used without a sign-in
+//   (`credentialsExpiry`). Once that moment has passed it is expired SINCE then,
+//   unless a run answered after it, which proves the credential was renewed or
+//   is not the one in use. That is why the LAST answer is kept apart from
+//   `since`: an answer while already ok does not move `since`, but it does
+//   outdate an expiry that passed in between.
+// `since` is when the published state became true (ISO-8601), or null.
+const AUTH_STATES = new Set(['ok', 'expired']);
+// An epoch-millis time; anything earlier than 2001-09-09 (1e12 ms) is a time in
+// seconds or nonsense, and either way not something to call a sign-in dead by.
+const epochMs = (v) => (Number.isFinite(v) && v >= 1e12 ? v : null);
+function createAuthState(persist = null, now = Date.now) {
+  const saved = persist && persist.load ? persist.load() : null;
+  let state = 'unknown';
+  let since = null;
+  let answeredAt = null;
+  if (saved && AUTH_STATES.has(saved.state) && Number.isFinite(saved.since) && saved.since > 0) {
+    ({ state, since } = saved);
+    if (Number.isFinite(saved.answeredAt) && saved.answeredAt > 0) ({ answeredAt } = saved);
+  }
+  return {
+    // From one run's outcome: true = answered, false = the sign-in was refused.
+    record(answered) {
+      const at = now();
+      const next = answered ? 'ok' : 'expired';
+      if (answered) answeredAt = at;
+      if (next !== state) {
+        state = next;
+        since = at;
+      } else if (!answered) {
+        return; // still refused: nothing new to keep
+      }
+      if (persist && persist.save) persist.save({ state, since, answeredAt });
+    },
+    // `credentialExpiry`: epoch millis, or null when the adapter cannot tell.
+    snapshot(credentialExpiry = null) {
+      const at = epochMs(credentialExpiry);
+      const answeredSince = answeredAt !== null && at !== null && answeredAt > at;
+      if (at !== null && at <= now() && state !== 'expired' && !answeredSince) {
+        return { state: 'expired', since: new Date(at).toISOString() };
+      }
+      return { state, since: since === null ? null : new Date(since).toISOString() };
+    },
+  };
+}
+
 // Durable, best-effort JSON state under the add-on's /data (survives restarts).
 // load() is synchronous (called once, at startup); save() stays fire-and-forget,
 // because a write failure must never break the chat.
@@ -359,48 +415,6 @@ function createBudget(limitUsd, now = () => new Date(), persist = null) {
 //
 // The payload is stringified at CALL time, so what eventually lands is the state
 // as of the save() that queued it, applied in that order.
-// Is the engine still signed in? Published on /api/status as
-// `{ state: 'ok' | 'expired' | 'unknown', since }`, so a client can say "sign in
-// again" without spending a model call to learn it. Two kinds of evidence, and
-// the NEWER one wins:
-// - a run: one the engine refused for its sign-in ('auth-expired') says expired,
-//   one that answered says ok. Every other ending says nothing about the sign-in
-//   and leaves the state as it was. Durable across restarts when a store is
-//   given, or an update would hide an expiry until the next request.
-// - the local credential: the adapter may know, from timestamps alone, the
-//   moment after which its credential cannot be used without a sign-in
-//   (`credentialsExpiry`). Once that moment has passed it is expired SINCE then,
-//   unless a run answered after it, which proves the credential was renewed.
-// `since` is when the published state became true (ISO-8601), or null.
-const AUTH_STATES = new Set(['ok', 'expired']);
-function createAuthState(persist = null, now = Date.now) {
-  const saved = persist && persist.load ? persist.load() : null;
-  let state = 'unknown';
-  let since = null;
-  if (saved && AUTH_STATES.has(saved.state) && Number.isFinite(saved.since) && saved.since > 0) {
-    ({ state, since } = saved);
-  }
-  return {
-    // From one run's outcome: true = answered, false = the sign-in was refused.
-    record(answered) {
-      const next = answered ? 'ok' : 'expired';
-      if (next === state) return;
-      state = next;
-      since = now();
-      if (persist && persist.save) persist.save({ state, since });
-    },
-    // `credentialExpiry`: epoch millis, or null when the adapter cannot tell.
-    snapshot(credentialExpiry = null) {
-      const at = Number.isFinite(credentialExpiry) && credentialExpiry > 0 ? credentialExpiry : null;
-      const runIsNewer = since !== null && since > at;
-      if (at !== null && at <= now() && !runIsNewer && state !== 'expired') {
-        return { state: 'expired', since: new Date(at).toISOString() };
-      }
-      return { state, since: since === null ? null : new Date(since).toISOString() };
-    },
-  };
-}
-
 function fileStore(file) {
   // Reporting must never be able to affect a write. It is the only step in the
   // chain that calls out of this module, and if it threw, the terminal handler
