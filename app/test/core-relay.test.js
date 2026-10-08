@@ -792,3 +792,51 @@ test('a camera read Home Assistant refuses is named the same way', async () => {
     upstream.close();
   }
 });
+
+// --- the device lookup ------------------------------------------------------
+
+// The live-context tool as Home Assistant answers it: before 2026.10 the JSON
+// carried `success: true` beside `result`; from 2026.10 it carries `result`
+// alone, and a miss is `isError` with an `error` instead.
+async function lookupAnswered(isError, body) {
+  const h = await withRecording((sent) => {
+    if (sent.method === 'tools/list') {
+      return { jsonrpc: '2.0', id: sent.id, result: { tools: [{ name: 'homeassistant__GetLiveContext' }] } };
+    }
+    return { jsonrpc: '2.0', id: sent.id, result: { isError, content: [{ type: 'text', text: JSON.stringify(body) }] } };
+  });
+  try {
+    return { answer: await h.relay.lookup('run-lookup').live('Desk Lamp'), lines: h.lines };
+  } finally {
+    h.done();
+  }
+}
+
+const LIVE = 'Live Context: An overview of the areas and the devices in this smart home:\n- names: Desk Lamp\n';
+
+test('a device lookup is read from the answer Home Assistant gave before 2026.10, with success', async () => {
+  const { answer, lines } = await lookupAnswered(false, { success: true, result: LIVE });
+  assert.deepEqual(answer, { ok: true, text: LIVE });
+  assert.match(lines[0], / \(lookup\): /);
+});
+
+test('a device lookup is read from the answer Home Assistant gives from 2026.10, without success', async () => {
+  const { answer, lines } = await lookupAnswered(false, { result: LIVE });
+  assert.deepEqual(answer, { ok: true, text: LIVE });
+  assert.match(lines[0], / \(lookup\): /);
+});
+
+test('a device lookup is refused when the answer says it did not succeed', async () => {
+  for (const [isError, body] of [
+    [false, { success: false, result: LIVE }],
+    [true, { result: LIVE }],
+    [true, { error: "No exposed entities matched name 'Desk Lamp'" }],
+    [false, { error: 'no result at all' }],
+    [false, LIVE],
+    [false, null],
+  ]) {
+    const { answer, lines } = await lookupAnswered(isError, body);
+    assert.deepEqual(answer, { ok: false, text: '' }, JSON.stringify({ isError, body }));
+    assert.match(lines[0], / \(lookup, no match\): /);
+  }
+});

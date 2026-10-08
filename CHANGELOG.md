@@ -6,6 +6,20 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- The dashboard screenshot helper uses `playwright-core` 1.64.0 (was 1.63.0;
+  [release notes](https://github.com/microsoft/playwright/releases/tag/v1.64.0)).
+
+### Fixed
+
+- Named devices are found again on Home Assistant 2026.10. Its live-context
+  tool no longer puts `success: true` beside the result, and the core read
+  every answer without it as no match, so an action on a device named in the
+  request was refused as an unknown device. A result is now read unless Home
+  Assistant marks the call as an error or says `success: false`; answers from
+  earlier versions are read as before.
+
 ### Security
 
 - `proxy-addr` 2.0.8 (was 2.0.7), the Express dependency that resolves client
@@ -17,11 +31,6 @@ uses [Semantic Versioning](https://semver.org/).
 - Every check that gates a release now runs `npm audit --omit=dev
   --audit-level=high` against each lock in the archive, so a runtime
   dependency with a known high or critical advisory is not released.
-
-### Changed
-
-- The dashboard screenshot helper uses `playwright-core` 1.64.0 (was 1.63.0;
-  [release notes](https://github.com/microsoft/playwright/releases/tag/v1.64.0)).
 
 ## [0.8.1] - 2026-10-01
 
