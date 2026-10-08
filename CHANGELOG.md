@@ -6,6 +6,24 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- A sign-in the engine no longer accepts is reported as such. A run the engine
+  refuses for its sign-in ends with the reason `auth-expired`, which is never
+  retried; a degraded read names it in `reason`, and a write is refused with
+  `503 auth_expired`. `GET /api/status` publishes `auth` (`ok`, `expired` or
+  `unknown`, and since when), kept across restarts and computed without
+  running the agent. The adapter reports the refusal as `authExpired` on its
+  `result` event and may state when its local credential expires through the
+  optional `prompt.credentialsExpiry`; an adapter that does neither works as
+  before.
+
+### Changed
+
+- A degraded read carries `reason`, the reason the run failed.
+- An engine's sign-in failure was reported as a transient model error and
+  retried, and a write that met it answered `500 internal`.
+
 ## [0.8.2] - 2026-10-08
 
 ### Changed
