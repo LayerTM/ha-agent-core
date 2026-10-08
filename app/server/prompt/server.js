@@ -1156,10 +1156,11 @@ function createPromptApp({
 
       let outcome;
       let attempts = 0;
-      // Why a retry was needed, for the success audit below. A run that only
+      // Why each retry was needed, in order, for the audit below. A run that only
       // succeeded on the second attempt looked identical to a clean one before —
-      // which is how a whole class of silent failures stayed invisible (#58).
-      let recoveredFrom = null;
+      // which is how a whole class of silent failures stayed invisible (#58) —
+      // and a failure that was retried named only how its LAST attempt ended.
+      const retriedFrom = [];
       let spent = 0; // real API cost of EVERY attempt (billed even on a failed/degraded read)
       const spentTokens = new Map(); // tokens of every attempt, per model
       // Resolved ONCE here so the run and the audit can't disagree about which
@@ -1233,7 +1234,7 @@ function createPromptApp({
             && !res.writableEnded // client still connected
             && (TIMEOUT_MS - (Date.now() - started)) > MIN_RETRY_BUDGET_MS; // budget left to be worth it
           if (!retryable) break;
-          recoveredFrom = outcome.reason;
+          retriedFrom.push(outcome.reason);
           // eslint-disable-next-line no-await-in-loop
           await delay(RETRY_BACKOFF_MS);
         }
@@ -1281,8 +1282,10 @@ function createPromptApp({
       });
       if (outcome.status === 'ok') authState.record(true);
       else if (outcome.reason === 'auth-expired') authState.record(false);
+      // How the earlier attempts of a request that still failed ended.
+      const retried = retriedFrom.length ? ` retried=${retriedFrom.join('+')}` : '';
       if (outcome.status === 'timeout') {
-        audit(`prompt[${mode}] ${base} status=504 dur=${seconds}s${spendFields(spentTokens, reportsCost() ? spent : null)}`);
+        audit(`prompt[${mode}] ${base} status=504${retried} dur=${seconds}s${spendFields(spentTokens, reportsCost() ? spent : null)}`);
         if (mode === 'read') chatHealth.record(false, 'timeout', false);
         if (streaming) { streamDone(degradedBody('timeout')); return undefined; }
         return sendError(res, 'timeout');
@@ -1291,7 +1294,7 @@ function createPromptApp({
         // Observability: carry the reason + whatever turns/tools the failed run did
         // show into the audit — all of this was dropped before, leaving 500s blind.
         const reason = outcome.reason || 'unknown';
-        const diag = `reason=${reason} attempts=${attempts} turns=${outcome.numTurns ?? '?'}`
+        const diag = `reason=${reason} attempts=${attempts}${retried} turns=${outcome.numTurns ?? '?'}`
           + ` tools=${(outcome.toolsUsed || []).map((t) => sanitizeId(t, 64)).join('|') || '-'}`
           + spendFields(spentTokens, reportsCost() ? spent : null);
         console.error(`[prompt] run failed (${caller}): ${reason} — ${redact(outcome.message || 'unknown')}`);
@@ -1370,7 +1373,7 @@ function createPromptApp({
         `prompt[${mode}] ${base} status=200 dur=${seconds}s turns=${outcome.numTurns ?? '?'}`
         + ` tools=${outcome.toolsUsed.map((t) => sanitizeId(t, 64)).join('|') || '-'}`
         + ` out=${Buffer.byteLength(text, 'utf8')}B${outcome.truncated ? ' truncated' : ''}`
-        + `${attempts > 1 ? ` attempts=${attempts} recovered=${recoveredFrom}` : ''}`
+        + `${attempts > 1 ? ` attempts=${attempts} recovered=${retriedFrom[retriedFrom.length - 1]}` : ''}`
         + `${outcome.mcpFailed ? ' mcp=FAILED' : ''}${proposal ? ' proposal=yes' : ''}`
         + `${automation ? ' automation=draft' : ''}${spendFields(spentTokens, reportsCost() ? spent : null)}`,
       );

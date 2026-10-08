@@ -23,6 +23,9 @@ uses [Semantic Versioning](https://semver.org/).
 - A degraded read carries `reason`, the reason the run failed.
 - An engine's sign-in failure was reported as a transient model error and
   retried, and a write that met it answered `500 internal`.
+- The audit line of a request that failed after a retry names how each earlier
+  attempt ended (`retried=`), as a recovered one already did (`recovered=`);
+  before, only the last attempt's reason was recorded.
 
 ## [0.8.2] - 2026-10-08
 
