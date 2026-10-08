@@ -6,6 +6,11 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- The dashboard screenshot helper uses `playwright-core` 1.64.0 (was 1.63.0;
+  [release notes](https://github.com/microsoft/playwright/releases/tag/v1.64.0)).
+
 ## [0.8.1] - 2026-10-01
 
 ### Fixed
