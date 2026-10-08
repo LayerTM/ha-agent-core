@@ -552,8 +552,11 @@ async function startCoreRelay({ coreOrigin, haToken, log = () => {}, record = ()
           : '';
         let answer;
         try { answer = JSON.parse(text); } catch { answer = null; }
-        const ok = result.isError !== true && answer !== null && answer.success === true
-          && typeof answer.result === 'string';
+        // Home Assistant before 2026.10 answered {success: true, result}; from
+        // 2026.10 it answers {result} and marks a miss with isError alone. A
+        // result is read unless one of the two says it failed.
+        const ok = result.isError !== true && answer !== null && typeof answer === 'object'
+          && typeof answer.result === 'string' && answer.success !== false;
         record(describeCall(call, ok ? ' (lookup)' : ' (lookup, no match)'));
         return { ok, text: ok ? answer.result : '' };
       }
