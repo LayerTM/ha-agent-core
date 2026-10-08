@@ -389,6 +389,37 @@ test('a read that fails transiently is retried within the remaining time, once',
   assert.equal(state.runs.length, 2, 'no more attempts than the configured maximum');
 });
 
+test('a read that still fails names how every earlier attempt ended', async () => {
+  const lineOf = () => auditLines.filter((l) => l.startsWith('prompt[read]')).at(-1);
+  auditLines.length = 0;
+  state.script.push(() => errorOutcome('model-error'), () => errorOutcome('no-result'));
+  await post({ prompt: 'both fail' });
+  assert.match(lineOf(), / status=200-degraded reason=no-result attempts=2 retried=model-error turns=/);
+
+  // A run killed at init for its tool names, then refused for its sign-in: the
+  // sign-in was met once, and the line says so.
+  auditLines.length = 0;
+  state.runs.length = 0;
+  state.script.push(
+    () => errorOutcome('tool-name-mismatch', { toolsUsed: [], haTools: ['ha_GetLiveContext'] }),
+    () => errorOutcome('auth-expired'),
+  );
+  await post({ prompt: 'renamed, then signed out' });
+  assert.equal(state.runs.length, 2);
+  assert.match(lineOf(), / reason=auth-expired attempts=2 retried=tool-name-mismatch turns=/);
+
+  auditLines.length = 0;
+  state.script.push(() => errorOutcome('model-error'), () => okOutcome({ status: 'timeout', text: '' }));
+  await post({ prompt: 'then too slow' });
+  assert.match(lineOf(), / status=504 retried=model-error dur=/);
+
+  auditLines.length = 0;
+  state.script.push(() => errorOutcome('auth-expired'));
+  await post({ prompt: 'signed out' });
+  assert.match(lineOf(), / reason=auth-expired attempts=1 turns=/);
+  assert.doesNotMatch(lineOf(), /retried=/);
+});
+
 test('a read that fails permanently degrades to a friendly answer without a retry', async () => {
   state.script.push(() => errorOutcome('permission-denied'));
   const res = await post({ prompt: 'fail', language: 'en' });
