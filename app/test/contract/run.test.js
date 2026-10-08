@@ -202,6 +202,21 @@ test('an engine error is deterministic (max-turns) or transient (model-error)', 
   assert.equal(model.message, 'neutral reported an error');
 });
 
+test('an engine that refuses its sign-in ends auth-expired, whatever else the result says', async () => {
+  const expired = await runWith([{ emit: {
+    type: 'result', isError: true, authExpired: true, deterministic: true, text: 'Failed to authenticate', costUsd: 0,
+  } }]);
+  assert.equal(expired.status, 'error');
+  assert.equal(expired.reason, 'auth-expired');
+  assert.equal(expired.message, 'Failed to authenticate');
+  // Only a literal true counts: a truthy string from a careless decoder does not.
+  const loose = await runWith([{ emit: { type: 'result', isError: true, authExpired: 'yes' } }]);
+  assert.equal(loose.reason, 'model-error');
+  // A result that is not an error is an answer, flag or not.
+  const answered = await runWith([{ emit: { type: 'result', isError: false, authExpired: true, text: 'fine' } }]);
+  assert.equal(answered.status, 'ok');
+});
+
 test('an agent that ends without a result is a transient no-result naming its exit and stderr', async () => {
   const outcome = await runWith([
     { emit: { type: 'tool-use', id: 'x', name: 'Other' } }, { stderr: 'boom' }, { exit: 3 },

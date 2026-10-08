@@ -51,6 +51,9 @@ const ERRORS = {
   // user's to fix, ENOSPC is a disk, and `write_unavailable`'s message would
   // have sent all three to the add-on options to look for an HA token.
   audit_unavailable: [503, 'write mode unavailable: the audit log cannot be written, so an action could not be recorded'],
+  // The engine no longer accepts its sign-in. Not `internal`: nothing about the
+  // request or the add-on failed, and only a person signing in again fixes it.
+  auth_expired: [503, 'the agent is no longer signed in: sign in again'],
   busy: [503, 'busy'],
   usage_unavailable: [503, 'usage unavailable'],
   limits_unavailable: [503, 'account limits unavailable'],
@@ -356,6 +359,48 @@ function createBudget(limitUsd, now = () => new Date(), persist = null) {
 //
 // The payload is stringified at CALL time, so what eventually lands is the state
 // as of the save() that queued it, applied in that order.
+// Is the engine still signed in? Published on /api/status as
+// `{ state: 'ok' | 'expired' | 'unknown', since }`, so a client can say "sign in
+// again" without spending a model call to learn it. Two kinds of evidence, and
+// the NEWER one wins:
+// - a run: one the engine refused for its sign-in ('auth-expired') says expired,
+//   one that answered says ok. Every other ending says nothing about the sign-in
+//   and leaves the state as it was. Durable across restarts when a store is
+//   given, or an update would hide an expiry until the next request.
+// - the local credential: the adapter may know, from timestamps alone, the
+//   moment after which its credential cannot be used without a sign-in
+//   (`credentialsExpiry`). Once that moment has passed it is expired SINCE then,
+//   unless a run answered after it, which proves the credential was renewed.
+// `since` is when the published state became true (ISO-8601), or null.
+const AUTH_STATES = new Set(['ok', 'expired']);
+function createAuthState(persist = null, now = Date.now) {
+  const saved = persist && persist.load ? persist.load() : null;
+  let state = 'unknown';
+  let since = null;
+  if (saved && AUTH_STATES.has(saved.state) && Number.isFinite(saved.since) && saved.since > 0) {
+    ({ state, since } = saved);
+  }
+  return {
+    // From one run's outcome: true = answered, false = the sign-in was refused.
+    record(answered) {
+      const next = answered ? 'ok' : 'expired';
+      if (next === state) return;
+      state = next;
+      since = now();
+      if (persist && persist.save) persist.save({ state, since });
+    },
+    // `credentialExpiry`: epoch millis, or null when the adapter cannot tell.
+    snapshot(credentialExpiry = null) {
+      const at = Number.isFinite(credentialExpiry) && credentialExpiry > 0 ? credentialExpiry : null;
+      const runIsNewer = since !== null && since > at;
+      if (at !== null && at <= now() && !runIsNewer && state !== 'expired') {
+        return { state: 'expired', since: new Date(at).toISOString() };
+      }
+      return { state, since: since === null ? null : new Date(since).toISOString() };
+    },
+  };
+}
+
 function fileStore(file) {
   // Reporting must never be able to affect a write. It is the only step in the
   // chain that calls out of this module, and if it threw, the terminal handler
@@ -596,6 +641,18 @@ function createPromptApp({
   const chatHealth = createChatHealth(
     50, stateDir ? fileStore(path.join(stateDir, 'chat-health.json')) : null,
   );
+  const authState = createAuthState(stateDir ? fileStore(path.join(stateDir, 'auth-state.json')) : null);
+  // When the engine's local credential stops being usable, if the adapter can
+  // tell without a call. A throw or a non-number is "cannot tell", never expired.
+  const credentialExpiry = (prompt, home) => {
+    if (typeof prompt.credentialsExpiry !== 'function') return null;
+    try {
+      const at = prompt.credentialsExpiry({ env: process.env, home });
+      return Number.isFinite(at) ? at : null;
+    } catch {
+      return null;
+    }
+  };
 
   // Cached agent `--version`, parsed by the adapter (refreshed lazily, at most
   // every 5 minutes). A single in-flight refresh is shared by all concurrent
@@ -814,6 +871,8 @@ function createPromptApp({
       audit_recording: record.recording,
       audit_error: record.code,
       chat_health: chatHealth.snapshot(),
+      // Whether the engine is still signed in (see createAuthState).
+      auth: authState.snapshot(credentialExpiry(prompt, home)),
       // The add-on's wall-clock ceiling per request (a TIME) — lets the client pair
       // its own REQUEST_TIMEOUT dynamically. Distinct from the daily-$ budget below.
       prompt_timeout_ms: TIMEOUT_MS,
@@ -1201,13 +1260,17 @@ function createPromptApp({
         try { res.write(`${JSON.stringify({ type: 'error', error: ERRORS[err][1], code: err })}\n`); } catch { /* gone */ }
         try { res.end(); } catch { /* gone */ }
       };
-      const degradedBody = {
-        text: DEGRADE_TEXT[language], proposal: null, tools_used: [], truncated: false, degraded: true,
-      };
+      // `reason` is the failed run's reason token, the one chat_health records,
+      // so a client can tell a sign-in to renew from a passing failure.
+      const degradedBody = (reason) => ({
+        text: DEGRADE_TEXT[language], proposal: null, tools_used: [], truncated: false, degraded: true, reason,
+      });
+      if (outcome.status === 'ok') authState.record(true);
+      else if (outcome.reason === 'auth-expired') authState.record(false);
       if (outcome.status === 'timeout') {
         audit(`prompt[${mode}] ${base} status=504 dur=${seconds}s${spendFields(spentTokens, reportsCost() ? spent : null)}`);
         if (mode === 'read') chatHealth.record(false, 'timeout', false);
-        if (streaming) { streamDone(degradedBody); return undefined; }
+        if (streaming) { streamDone(degradedBody('timeout')); return undefined; }
         return sendError(res, 'timeout');
       }
       if (outcome.status !== 'ok') {
@@ -1231,12 +1294,13 @@ function createPromptApp({
           const delivered = streaming && emittedLen > 0;
           chatHealth.record(delivered, delivered ? null : reason, delivered);
           audit(`prompt[read] ${base} status=200-degraded ${diag} dur=${seconds}s`);
-          if (streaming) { streamDone(degradedBody); return undefined; }
-          return res.status(200).json(degradedBody);
+          if (streaming) { streamDone(degradedBody(reason)); return undefined; }
+          return res.status(200).json(degradedBody(reason));
         }
-        audit(`prompt[write] ${base} status=500 ${diag} dur=${seconds}s`);
-        if (streaming) return failStream('internal');
-        return sendError(res, 'internal');
+        const failure = reason === 'auth-expired' ? 'auth_expired' : 'internal';
+        audit(`prompt[write] ${base} status=${ERRORS[failure][0]} ${diag} dur=${seconds}s`);
+        if (streaming) return failStream(failure);
+        return sendError(res, failure);
       }
 
       // (Cost was already billed for every attempt above, via budget.add(spent).)
@@ -1345,6 +1409,6 @@ function createPromptApp({
 }
 
 module.exports = {
-  createPromptApp, createRateLimiter, createBudget, createChatHealth, fileStore, fetchSnapshot, resizeSnapshot, Bucket,
+  createPromptApp, createRateLimiter, createBudget, createChatHealth, createAuthState, fileStore, fetchSnapshot, resizeSnapshot, Bucket,
   resolveChatModel, USAGE_TIMEOUT_MS, USAGE_READER_TIMEOUT_MS,
 };

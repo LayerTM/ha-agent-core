@@ -46,6 +46,7 @@ valid (see [Names](#names) and [Console pages](#console-pages)):
 | `runner.toolBasename(name)` | function | the basename of such a tool name, or `null` for any other tool |
 | `prompt.limitsSource({ apiKey, oauthToken, homeDir })` | function | the account's limits: `null` without a credential, or `{ mode, key, read(fetch)? }` (see below) |
 | `prompt.authConfigured({ env, home })` | function | whether the agent has credentials |
+| `prompt.credentialsExpiry({ env, home })` | optional function | the moment (epoch milliseconds) after which the agent's local credential cannot be used without signing in again, read from its timestamps alone, or `null` when that cannot be known (a token or key given in the options, no credential file) |
 | `prompt.writeMcpConfig({ dir, url, bearer })` | function | write (or, without a URL, remove) the MCP configuration in `dir` — called once per run, with that run's own `dir` and `bearer`, so it must write where it is told and must be idempotent: two runs are in flight at once, and neither may be handed the other's file |
 | `prompt.removeSavedSessions(homeDir, workDir)` | function | remove transcripts earlier versions saved |
 | `prompt.credentials({ options, env, optionString })` | function | `{ apiKey, oauthToken }` |
@@ -147,7 +148,7 @@ Its decoder reports these events:
 | `tool-use` | `id`, `name` | the model called a tool |
 | `tool-result` | `id`, `isError` | that call's result |
 | `fragment-start`, `fragment` | `json` | streamed pieces of the structured answer |
-| `result` | `isError`, `deterministic`, `structured`, `text`, `numTurns?`, `costUsd?`, `tokens?` | the run ended |
+| `result` | `isError`, `deterministic`, `authExpired?`, `structured`, `text`, `numTurns?`, `costUsd?`, `tokens?` | the run ended; `authExpired: true` on an error the engine reports as its sign-in being refused |
 
 A missing optional field never widens what a run may do:
 - no tool list means no renamed-tool detection;
@@ -332,6 +333,7 @@ The message is for people and may change. The code is stable:
 | `rate_limited` | 429 | too many requests; see `Retry-After` |
 | `write_unavailable` | 503 | no Home Assistant MCP configuration for writes |
 | `audit_unavailable` | 503 | the audit log cannot be written, so a write is not allowed to act; the errno is in `audit_error` |
+| `auth_expired` | 503 | the agent is no longer signed in; the write did not run, and nothing will until someone signs in again |
 | `busy` | 503 | the concurrent-run limit is reached |
 | `timeout` | 504 | the run passed its time limit |
 | `internal` | 500 | the run failed |
@@ -345,6 +347,21 @@ The message is for people and may change. The code is stable:
 add-on's own) and `request_fields`, the body fields `POST /api/prompt` accepts,
 taken from the same list the request is validated against. A client sends a
 field only when it is listed there.
+
+A `read` whose run fails is not an error answer: it is a `200` (or, streamed, a
+`done` line) with `degraded: true`, a short apology as `text`, and `reason`, the
+failed run's reason. `auth-expired` means the engine refused its sign-in. That
+run is never retried — nothing but signing in again changes the answer — and a
+`write` that meets it is refused with `auth_expired`.
+
+`GET /api/status` publishes `auth`, whether the agent is still signed in, without
+running it: `{ "state": "ok" | "expired" | "unknown", "since": "<ISO-8601>" | null }`.
+A run the engine refused for its sign-in makes it `expired`; the next run that
+answers makes it `ok`; any other failure leaves it as it was. When the adapter
+can tell from the local credential that it can no longer be used
+(`prompt.credentialsExpiry`), it is `expired` from that moment, unless a run
+answered after it. `since` is when the state became true. `unknown` means there
+is no evidence yet. The state survives a restart.
 
 It identifies the core with `core_version` and `core_commit`: the release and the
 commit the running archive was packed from, as `app/server/core-version.json`

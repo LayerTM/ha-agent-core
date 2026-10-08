@@ -54,6 +54,9 @@ const OPTIONAL = {
   // given exactly the schemas it always was.
   'descriptor.closedSchemasOnly': 'boolean',
   'prompt.secretPatterns': 'object',
+  // When the engine's local credential stops being usable without a sign-in,
+  // read from its timestamps alone: epoch millis, or null when it cannot tell.
+  'prompt.credentialsExpiry': 'function',
 };
 
 // The engine name is published on /api/status and stored by clients, so it is a

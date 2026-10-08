@@ -616,9 +616,11 @@ function shutdown() {
  *   { status: 'timeout', haTools }
  *   { status: 'error', reason, message, numTurns?, toolsUsed?, costUsd?, tokens?, haTools? }
  *     reason ∈ spawn-failed | aborted | stream-cap | no-result | model-error | max-turns
- *              | tool-name-mismatch
+ *              | auth-expired | tool-name-mismatch
  *     (no-result and model-error are transient — safe to retry a read;
  *      max-turns is deterministic — retrying only burns tokens, so it is not;
+ *      auth-expired is deterministic too: the engine no longer accepts its
+ *      sign-in, and nothing but a person signing in again changes that;
  *      tool-name-mismatch is transient AND self-correcting — the outcome carries
  *      the real `haTools`, so the retry is only worth anything if the caller
  *      feeds them back in. It is raised at init, BEFORE any tool has run, so
@@ -926,13 +928,19 @@ function run({
       }
       const tokens = Array.isArray(result.tokens) ? result.tokens : [];
       if (result.isError) {
-        // Distinguish a DETERMINISTIC exhaustion (turn limit — the identical
-        // prompt just fails again, so a retry only burns tokens) from a transient
-        // generation error (retryable). costUsd is surfaced even on error so the
-        // caller can bill every attempt against the daily cap.
+        // Distinguish the DETERMINISTIC failures — a sign-in the engine no longer
+        // accepts, a turn limit — from a transient generation error (retryable):
+        // the identical prompt just fails again, so a retry only burns tokens.
+        // Whether it was the sign-in is the adapter's reading of its engine's
+        // own report; this is the one place it becomes a reason. costUsd is
+        // surfaced even on error so the caller can bill every attempt against
+        // the daily cap.
+        let reason = 'model-error';
+        if (result.authExpired === true) reason = 'auth-expired';
+        else if (result.deterministic) reason = 'max-turns';
         finish({
           status: 'error',
-          reason: result.deterministic ? 'max-turns' : 'model-error',
+          reason,
           message: typeof result.text === 'string'
             ? result.text.slice(0, 300)
             : `${engine} reported an error`,
