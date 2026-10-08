@@ -6,6 +6,23 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Security
+
+- `proxy-addr` 2.0.8 (was 2.0.7), the Express dependency that resolves client
+  addresses behind proxies, fixes
+  [GHSA-jqcg-44mw-7w3h](https://github.com/advisories/GHSA-jqcg-44mw-7w3h)
+  (IP spoofing through an IPv4-mapped IPv6 trust subnet). The core was not
+  exposed: neither of its Express apps enables `trust proxy`, and nothing in it
+  reads `req.ip` or `req.ips`.
+- Every check that gates a release now runs `npm audit --omit=dev
+  --audit-level=high` against each lock in the archive, so a runtime
+  dependency with a known high or critical advisory is not released.
+
+### Changed
+
+- The dashboard screenshot helper uses `playwright-core` 1.64.0 (was 1.63.0;
+  [release notes](https://github.com/microsoft/playwright/releases/tag/v1.64.0)).
+
 ## [0.8.1] - 2026-10-01
 
 ### Fixed
