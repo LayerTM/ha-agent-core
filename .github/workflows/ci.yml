@@ -184,6 +184,28 @@ jobs:
           cmp core-archive-x64/core.lock.json core-archive-arm64/core.lock.json
           for f in core-archive-x64/*.tar; do cmp "$f" "core-archive-arm64/$(basename "$f")"; done
 
+  # Every lock in the repository ships in the archive, so a known high or
+  # critical advisory in any runtime dependency fails here, before it can be
+  # released. Development dependencies never ship and are left out.
+  audit:
+    name: Shipped dependencies audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "26"
+      - name: Audit the runtime dependencies of every lock
+        run: |
+          status=0
+          for lock in $(git ls-files -- '*package-lock.json'); do
+            dir=$(dirname "$lock")
+            echo "::group::$dir"
+            (cd "$dir" && npm audit --omit=dev --audit-level=high) || status=1
+            echo "::endgroup::"
+          done
+          exit "$status"
+
   secret-scan:
     runs-on: ubuntu-latest
     steps:
