@@ -6,6 +6,24 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Security
+
+- Express 5.3.0 (was 5.2.1;
+  [release notes](https://github.com/expressjs/express/releases/tag/v5.3.0))
+  brings `qs` 6.16.0, which fixes
+  [GHSA-w7fw-mjwx-w883](https://github.com/advisories/GHSA-w7fw-mjwx-w883),
+  [GHSA-4mjr-xmp4-gh2g](https://github.com/advisories/GHSA-4mjr-xmp4-gh2g) and
+  [GHSA-x5fp-wj9c-mxmx](https://github.com/advisories/GHSA-x5fp-wj9c-mxmx).
+  The core was not exposed: it parses query strings with Express's default
+  simple parser and accepts no URL-encoded bodies, so `qs` never reads a
+  request.
+
+### Changed
+
+- The dashboard screenshot helper uses `playwright-core` 1.64.1 (was 1.64.0;
+  [release notes](https://github.com/microsoft/playwright/releases/tag/v1.64.1)).
+- The secret and hygiene scanners run on Python 3.15 in CI (was 3.14).
+
 ## [0.9.0] - 2026-10-09
 
 ### Added

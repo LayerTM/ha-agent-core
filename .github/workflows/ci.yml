@@ -212,7 +212,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.14"
+          python-version: "3.15"
       - name: Self-test the scanner
         working-directory: .github/scripts
         run: python test_secret_scan.py
@@ -230,7 +230,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.14"
+          python-version: "3.15"
       - name: Self-test the scanner
         working-directory: .github/scripts
         run: python test_hygiene_scan.py
