@@ -6,6 +6,8 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-10-15
+
 ### Security
 
 - Express 5.3.0 (was 5.2.1;
