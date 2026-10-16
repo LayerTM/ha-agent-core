@@ -16,6 +16,10 @@ let core;
 let coreOrigin;
 let answer;        // the status the stub Core gives the next MCP request
 let seen;          // the MCP requests the stub Core received
+// When set, the stub holds its answer to the relay's own probe until
+// `held.release()`, then answers `held.status` — or drops the connection when
+// that is 'drop'. Runs are answered at once all the same.
+let held = null;
 
 before(async () => {
   core = http.createServer((req, res) => {
@@ -23,6 +27,16 @@ before(async () => {
     req.on('data', (c) => chunks.push(c));
     req.on('end', () => {
       seen.push({ method: req.method, url: req.url, headers: req.headers, body: Buffer.concat(chunks).toString('utf8') });
+      if (held && Buffer.concat(chunks).toString('utf8').includes('"auth-probe"')) {
+        const { status } = held;
+        held.arrived();
+        held.wait.then(() => {
+          if (status === 'drop') { req.socket.destroy(); return; }
+          res.writeHead(status, { 'content-type': 'text/plain' });
+          res.end('no');
+        });
+        return;
+      }
       if (answer !== 200) {
         res.writeHead(answer, { 'content-type': 'text/plain' });
         res.end('no');
@@ -119,13 +133,37 @@ test('the start probes at once and the timer probes again, so a change shows wit
     await until(() => relay.mcpAuth() === 'ok');
     answer = 403;
     await until(() => relay.mcpAuth() === 'unauthorized');
-    answer = 200;
-    await until(() => relay.mcpAuth() === 'ok');
     // A change is logged; a repeat of the same answer is not.
     const said = lines.filter((l) => l.startsWith('home assistant mcp token:'));
-    assert.deepEqual(said.map((l) => l.split(' ')[4]), ['ok', 'unauthorized', 'ok']);
+    assert.deepEqual(said.map((l) => l.split(' ')[4]), ['ok', 'unauthorized']);
   });
 });
+
+for (const status of [401, 403]) {
+  test(`after a ${status} the timer asks nothing more: Home Assistant counts each refusal as a failed login`, async () => {
+    answer = status;
+    await withRelay({ authProbeEveryMs: 20 }, async (relay) => {
+      await until(() => relay.mcpAuth() === 'unauthorized');
+      const asked = seen.length;
+      await new Promise((r) => setTimeout(r, 150));
+      assert.equal(seen.length, asked, 'no probe while the token is refused');
+
+      // A run someone asked for is still answered, and its accepted answer
+      // brings the timer back.
+      answer = 200;
+      const bearer = relay.issue('run-after-refusal', { basenames: ['GetLiveContext'] });
+      const res = await fetch(`${relay.url}/api/mcp`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json', accept: 'application/json' },
+        body: '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}',
+      });
+      assert.equal(res.status, 200);
+      assert.equal(relay.mcpAuth(), 'ok');
+      const afterRun = seen.length;
+      await until(() => seen.length > afterRun + 1);
+    });
+  });
+}
 
 test('closing the relay stops the timer', async () => {
   answer = 200;
@@ -179,4 +217,57 @@ test("a lookup's refused answer is evidence too", async () => {
     await assert.rejects(relay.lookup('run-3').live('kitchen'));
     assert.equal(relay.mcpAuth(), 'unauthorized');
   });
+});
+
+// A probe that gets no answer about the token must not overwrite an answer a run
+// got while the probe was in flight: that answer is newer, and it is real.
+for (const [runStatus, expected] of [[200, 'ok'], [401, 'unauthorized']]) {
+  for (const probeEnd of [503, 'drop']) {
+    test(`a probe ending in ${probeEnd} after a run's ${runStatus} leaves '${expected}'`, async () => {
+      answer = runStatus;
+      let release;
+      let arrived;
+      const wait = new Promise((r) => { release = r; });
+      const came = new Promise((r) => { arrived = r; });
+      held = { status: probeEnd, wait, arrived };
+      try {
+        await withRelay({}, async (relay) => {
+          const probe = relay.probeAuth();
+          await came;
+          const bearer = relay.issue('run-during-probe', { basenames: ['GetLiveContext'] });
+          const res = await fetch(`${relay.url}/api/mcp`, {
+            method: 'POST',
+            headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json', accept: 'application/json' },
+            body: '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}',
+          });
+          assert.equal(res.status, runStatus);
+          assert.equal(relay.mcpAuth(), expected);
+          release();
+          assert.equal(await probe, expected, 'the newer answer stands');
+          assert.equal(relay.mcpAuth(), expected);
+        });
+      } finally {
+        held = null;
+      }
+    });
+  }
+}
+
+test('a probe ending without an answer, with nothing newer, is unreachable', async () => {
+  answer = 200;
+  let release;
+  let arrived;
+  const wait = new Promise((r) => { release = r; });
+  const came = new Promise((r) => { arrived = r; });
+  held = { status: 'drop', wait, arrived };
+  try {
+    await withRelay({}, async (relay) => {
+      const probe = relay.probeAuth();
+      await came;
+      release();
+      assert.equal(await probe, 'unreachable');
+    });
+  } finally {
+    held = null;
+  }
 });

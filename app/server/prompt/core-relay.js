@@ -227,6 +227,10 @@ async function startCoreRelay({
   // is not.
   /** @type {null|'ok'|'unauthorized'|'unreachable'} */
   let mcpAuth = null;
+  // How many answers about the token have arrived. A probe that ends without
+  // one may say 'unreachable' only if none arrived while it was in flight:
+  // otherwise a late failure of the probe would overwrite a newer, real answer.
+  let tokenAnswers = 0;
   function noteMcpAuth(next, why) {
     if (next === mcpAuth) return;
     mcpAuth = next;
@@ -234,7 +238,9 @@ async function startCoreRelay({
   }
   function observeMcpAnswer(status, why) {
     const next = authFromStatus(status);
-    if (next !== null) noteMcpAuth(next, `${why} answered ${status}`);
+    if (next === null) return;
+    tokenAnswers += 1;
+    noteMcpAuth(next, `${why} answered ${status}`);
   }
   // What a bearer IS: the run it belongs to and what that run may do — the Home
   // Assistant tool basenames it may call and the camera entities it may read (a
@@ -545,15 +551,20 @@ async function startCoreRelay({
   // one is in flight gets that one's answer. An answer that says nothing about
   // the token (no answer, a redirect, a 404 because the Model Context Protocol
   // Server is not set up, a 5xx) is 'unreachable' — the token could not be
-  // checked, which is not the same as refused.
+  // checked, which is not the same as refused — unless an answer about the
+  // token arrived while the probe was in flight, which is newer and stands.
   let probing = null;
   function probeAuth() {
     if (probing) return probing;
+    const answersBefore = tokenAnswers;
+    const unanswered = (why) => {
+      if (tokenAnswers === answersBefore) noteMcpAuth('unreachable', why);
+    };
     probing = coreRequest('POST', MCP_PATH, AUTH_PROBE)
       .then(({ status }) => {
-        if (authFromStatus(status) === null) noteMcpAuth('unreachable', `initialize answered ${status}`);
+        if (authFromStatus(status) === null) unanswered(`initialize answered ${status}`);
       }, (err) => {
-        noteMcpAuth('unreachable', `initialize: ${err.message}`);
+        unanswered(`initialize: ${err.message}`);
       })
       .then(() => {
         probing = null;
@@ -564,10 +575,19 @@ async function startCoreRelay({
   // The start asks at once rather than waiting for the first chat, then asks
   // again on a timer, so a token that stops being accepted (its user demoted,
   // the server's administrator option turned on) shows without a chat.
+  //
+  // The timer does not ask while the token is refused. Home Assistant counts
+  // every 401 as a failed login: it writes a warning, raises a "Login attempt
+  // failed" notification, and with `login_attempts_threshold` set it bans the
+  // add-on's address — after which even a corrected token is refused. So a
+  // refused token is asked about again only by a run or a lookup, which someone
+  // asked for, or by the start that follows a change of the add-on's options.
   let probeTimer = null;
   if (authProbeEveryMs > 0) {
     probeAuth();
-    probeTimer = setInterval(probeAuth, authProbeEveryMs);
+    probeTimer = setInterval(() => {
+      if (mcpAuth !== 'unauthorized') probeAuth();
+    }, authProbeEveryMs);
     probeTimer.unref();
   }
 

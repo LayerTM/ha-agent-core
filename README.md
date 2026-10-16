@@ -372,8 +372,13 @@ that is not about authentication, such as a 404 when the Model Context Protocol
 Server is not set up), or `null` when no Home Assistant token is configured or
 nothing has answered yet. The relay checks with an MCP `initialize` at start and
 every five minutes, and every answer a run or a lookup gets on the MCP path
-updates it too, so it does not wait for a chat. A change is written to the
-add-on log; the token never is.
+updates it too, so it does not wait for a chat. While the token is refused the
+timer does not check: Home Assistant counts every refusal as a failed login (a
+warning, a "Login attempt failed" notification, and an IP ban once
+`login_attempts_threshold` is reached), so a refused token is asked about again
+only by a run, a lookup, or the next start. A check that gets no answer never
+overwrites an answer a run got while it was in flight. A change is written to
+the add-on log; the token never is.
 
 It identifies the core with `core_version` and `core_commit`: the release and the
 commit the running archive was packed from, as `app/server/core-version.json`
