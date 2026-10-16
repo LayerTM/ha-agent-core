@@ -6,6 +6,8 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-10-16
+
 ### Added
 
 - `/api/status` publishes `ha_mcp_auth` (`ok`, `unauthorized`, `unreachable` or
