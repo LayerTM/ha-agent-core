@@ -363,6 +363,18 @@ can tell from the local credential that it can no longer be used
 answered after it. `since` is when the state became true. `unknown` means there
 is no evidence yet. The state survives a restart.
 
+`GET /api/status` publishes `ha_mcp_auth`, whether Home Assistant accepts the
+add-on's token on its MCP endpoint: `"ok"`, `"unauthorized"` (Home Assistant
+answered 401 or 403 — a token it does not know, or a non-administrator's token
+while the Model Context Protocol Server requires an administrator), `"unreachable"`
+(the relay's check got no answer about the token: no answer at all, or a status
+that is not about authentication, such as a 404 when the Model Context Protocol
+Server is not set up), or `null` when no Home Assistant token is configured or
+nothing has answered yet. The relay checks with an MCP `initialize` at start and
+every five minutes, and every answer a run or a lookup gets on the MCP path
+updates it too, so it does not wait for a chat. A change is written to the
+add-on log; the token never is.
+
 It identifies the core with `core_version` and `core_commit`: the release and the
 commit the running archive was packed from, as `app/server/core-version.json`
 states them — the file the packer writes into the archive, since an add-on keeps

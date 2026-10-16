@@ -61,6 +61,34 @@ const DRY_RUN_TEXT = /"dry_run"\s*:\s*true/;
 const LIVE_CONTEXT = 'GetLiveContext';
 const LOOKUP_TIMEOUT_MS = 10000;
 
+// The relay's own question to Home Assistant about the token: an MCP
+// `initialize`, which every MCP server answers and which acts on nothing.
+const AUTH_PROBE = {
+  jsonrpc: '2.0',
+  id: 'auth-probe',
+  method: 'initialize',
+  params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'ha-agent-core', version: 'auth-probe' } },
+};
+
+// What one Home Assistant answer on the MCP path says about the token, or null
+// when it says nothing about it. 401 and 403 are both a refusal of THIS token:
+// Home Assistant answers 401 for a token it does not know, and for a valid
+// non-administrator token when its Model Context Protocol Server requires an
+// administrator (401 up to 2026.10.1, 403 after). Any 2xx means it was accepted.
+function authFromStatus(status) {
+  if (status >= 200 && status < 300) return 'ok';
+  if (status === 401 || status === 403) return 'unauthorized';
+  return null;
+}
+
+// What the person running the add-on can do about a refused token, said once
+// for every place that reports one.
+function refusedTokenHint(status) {
+  return `refused the add-on's Home Assistant token (${status}) — check the token in the add-on's `
+    + 'configuration, and that its user is an administrator if the Model Context Protocol Server '
+    + 'requires one';
+}
+
 function capBytes(text, limit) {
   const buf = Buffer.from(text, 'utf8');
   if (buf.length <= limit) return text;
@@ -167,9 +195,13 @@ function deny(res, status, message) {
  * @param {string} opts.haToken     The Home Assistant LLAT. Stays in this process.
  * @param {(msg: string) => void} [opts.log]
  * @param {(line: string) => void} [opts.record]  One audit line per tool call.
+ * @param {number} [opts.authProbeEveryMs]  Probe the token at start and then this
+ *   often; 0 (the default) probes only when asked.
  * @returns {Promise<{
  *   url: string, port: number, issue: (runId: string) => string,
  *   revoke: (token: string) => void, close: () => void,
+ *   mcpAuth: () => null|'ok'|'unauthorized'|'unreachable',
+ *   probeAuth: () => Promise<null|'ok'|'unauthorized'|'unreachable'>,
  *   lookup: (runId: string) => {
  *     live: (name: string) => Promise<{ok: boolean, text: string}>,
  *     liveDomain: (domain: string) => Promise<{ok: boolean, text: string}>,
@@ -183,7 +215,27 @@ function deny(res, status, message) {
  * is the only thing that can tell them apart without asking Home Assistant for
  * something Home Assistant never promised.
  */
-async function startCoreRelay({ coreOrigin, haToken, log = () => {}, record = () => {} }) {
+async function startCoreRelay({
+  coreOrigin, haToken, log = () => {}, record = () => {}, authProbeEveryMs = 0,
+}) {
+  // Whether Home Assistant accepts the add-on's token on the MCP path, from the
+  // latest answer that said so: 'ok', 'unauthorized', 'unreachable' (a probe got
+  // no answer about the token), or null before anything has answered. Every
+  // answer on the MCP path writes it — a run's, a lookup's and the relay's own
+  // probe — so health does not depend on a chat having happened, and a run that
+  // is refused is reported by the refusal itself. A change is logged; a repeat
+  // is not.
+  /** @type {null|'ok'|'unauthorized'|'unreachable'} */
+  let mcpAuth = null;
+  function noteMcpAuth(next, why) {
+    if (next === mcpAuth) return;
+    mcpAuth = next;
+    log(`home assistant mcp token: ${next} (${why})`);
+  }
+  function observeMcpAnswer(status, why) {
+    const next = authFromStatus(status);
+    if (next !== null) noteMcpAuth(next, `${why} answered ${status}`);
+  }
   // What a bearer IS: the run it belongs to and what that run may do — the Home
   // Assistant tool basenames it may call and the camera entities it may read (a
   // request names at most one). Both are given when the bearer is minted, so
@@ -338,6 +390,7 @@ async function startCoreRelay({ coreOrigin, haToken, log = () => {}, record = ()
         ...(secure ? { rejectUnauthorized: false } : {}),
       },
       (upRes) => {
+        if (pathname === MCP_PATH) observeMcpAnswer(upRes.statusCode, `${req.method} ${pathname}`);
         const redirected = upRes.statusCode >= 300 && upRes.statusCode < 400;
         if (CAMERA_PATH_RE.test(pathname)) {
           // A camera read is a Home Assistant action too, and it is not a tool
@@ -372,8 +425,8 @@ async function startCoreRelay({ coreOrigin, haToken, log = () => {}, record = ()
           // 401/403 are named as configuration, because that is what the person
           // running the add-on can fix. The token is never logged.
           if (!(upRes.statusCode >= 200 && upRes.statusCode < 300)) {
-            const what = upRes.statusCode === 401 || upRes.statusCode === 403
-              ? `refused the add-on's Home Assistant token (${upRes.statusCode}) — check the token in the add-on's configuration`
+            const what = authFromStatus(upRes.statusCode) === 'unauthorized'
+              ? refusedTokenHint(upRes.statusCode)
               : `answered ${upRes.statusCode}`;
             log(`relay upstream: Home Assistant ${what} for ${req.method} ${pathname}`);
           }
@@ -475,6 +528,7 @@ async function startCoreRelay({ coreOrigin, haToken, log = () => {}, record = ()
         timeout: LOOKUP_TIMEOUT_MS,
         ...(secure ? { rejectUnauthorized: false } : {}),
       }, (upRes) => {
+        if (pathname === MCP_PATH) observeMcpAnswer(upRes.statusCode, `${method} ${pathname}`);
         readBody(upRes, (raw) => {
           let json;
           try { json = raw === null ? null : JSON.parse(raw.toString('utf8')); } catch { json = null; }
@@ -485,6 +539,36 @@ async function startCoreRelay({ coreOrigin, haToken, log = () => {}, record = ()
       upstream.on('error', reject);
       upstream.end(body === null ? undefined : body);
     });
+  }
+
+  // The relay's own probe of the token. One at a time: a probe asked for while
+  // one is in flight gets that one's answer. An answer that says nothing about
+  // the token (no answer, a redirect, a 404 because the Model Context Protocol
+  // Server is not set up, a 5xx) is 'unreachable' — the token could not be
+  // checked, which is not the same as refused.
+  let probing = null;
+  function probeAuth() {
+    if (probing) return probing;
+    probing = coreRequest('POST', MCP_PATH, AUTH_PROBE)
+      .then(({ status }) => {
+        if (authFromStatus(status) === null) noteMcpAuth('unreachable', `initialize answered ${status}`);
+      }, (err) => {
+        noteMcpAuth('unreachable', `initialize: ${err.message}`);
+      })
+      .then(() => {
+        probing = null;
+        return mcpAuth;
+      });
+    return probing;
+  }
+  // The start asks at once rather than waiting for the first chat, then asks
+  // again on a timer, so a token that stops being accepted (its user demoted,
+  // the server's administrator option turned on) shows without a chat.
+  let probeTimer = null;
+  if (authProbeEveryMs > 0) {
+    probeAuth();
+    probeTimer = setInterval(probeAuth, authProbeEveryMs);
+    probeTimer.unref();
   }
 
   const { port } = /** @type {import('node:net').AddressInfo} */ (server.address());
@@ -570,7 +654,11 @@ async function startCoreRelay({ coreOrigin, haToken, log = () => {}, record = ()
         },
       };
     },
+    // Whether Home Assistant accepts the token on the MCP path (see mcpAuth).
+    mcpAuth: () => mcpAuth,
+    probeAuth,
     close() {
+      if (probeTimer) clearInterval(probeTimer);
       // Every run still open ends here, so its calls are settled before the
       // tokens go. The keys are copied because settling deletes as it goes.
       for (const runId of [...awaiting.keys()]) settleUnanswered(runId);
