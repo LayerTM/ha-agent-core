@@ -805,6 +805,8 @@ python .github/scripts/secret_scan.py .
 python .github/scripts/hygiene_scan.py .
 ```
 
+A change that alters behaviour adds an entry to `CHANGELOG.md`; one that alters the archive, lock or verifier contract also updates this README.
+
 ## License
 
 [MIT](LICENSE)

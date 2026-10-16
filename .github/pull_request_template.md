@@ -1,16 +1,11 @@
-## Summary
+## What changes for users
 
-<!-- What does this change and why? -->
+<!-- What someone running this will notice: the behaviour, option, message or fix. -->
 
-## Related issue
+## Why
 
-<!-- e.g. #123 -->
+<!-- The problem it solves for them: what went wrong before, or what they could not do. -->
 
-## Checklist
+## How a user can check it
 
-- [ ] `npm test` passes
-- [ ] `npm run lint` (eslint) and `npm run typecheck` (tsc --checkJs) pass
-- [ ] In `app/`: `npm test`, `npm run test:alerts`, `npm run test:config`, `npm run lint`, `npm run typecheck` pass
-- [ ] `python .github/scripts/secret_scan.py .` and `python .github/scripts/hygiene_scan.py .` are clean
-- [ ] `CHANGELOG.md` updated if behaviour changed
-- [ ] `README.md` updated if the archive, lock or verifier contract changed
+<!-- Steps a user can follow on their own install to see the change: what to open, set or run, and what they should see. -->
