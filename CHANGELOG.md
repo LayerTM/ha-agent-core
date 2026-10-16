@@ -6,6 +6,23 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `/api/status` publishes `ha_mcp_auth` (`ok`, `unauthorized`, `unreachable` or
+  `null`): whether Home Assistant accepts the add-on's token on its MCP
+  endpoint, checked at start, every five minutes and on every answer a run gets,
+  so a refused token shows before the first chat. While the token is refused
+  the timer does not check, because Home Assistant counts each refusal as a
+  failed login and can ban the add-on's address. Home Assistant 2026.10 can
+  require an administrator for its Model Context Protocol Server; a
+  non-administrator's token is then refused with 401 or 403, and both read as
+  `unauthorized`.
+
+### Changed
+
+- The add-on log line for a token Home Assistant refused also names the
+  Model Context Protocol Server's administrator requirement as a cause to check.
+
 ## [0.9.1] - 2026-10-15
 
 ### Security

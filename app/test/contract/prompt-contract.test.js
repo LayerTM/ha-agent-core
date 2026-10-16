@@ -257,6 +257,26 @@ test('whether Home Assistant is configured is a fact of its own, not the presenc
   }
 });
 
+test('status publishes whether Home Assistant accepts the token, and null without Home Assistant', async () => {
+  const states = ['ok', 'unauthorized', 'unreachable', null];
+  let now = null;
+  const server_ = await listen(makeApp({ haConfigured: true, haMcpAuth: () => now }));
+  const url = `http://127.0.0.1:${server_.address().port}`;
+  try {
+    for (const want of states) {
+      now = want;
+      // eslint-disable-next-line no-await-in-loop
+      const status = await (await fetch(`${url}/api/status`, { headers: { authorization: `Bearer ${TOKEN}` } })).json();
+      assert.equal(status.ha_mcp_auth, want, 'read at the moment of the request');
+    }
+  } finally {
+    server_.close();
+  }
+  const absent = await (await fetch(`${noMcpBase}/api/status`, { headers: { authorization: `Bearer ${TOKEN}` } })).json();
+  assert.ok('ha_mcp_auth' in absent, 'the field is always present');
+  assert.equal(absent.ha_mcp_auth, null);
+});
+
 test('a run gets its own bearer and configuration, and gives both back however it ends', async () => {
   const began = [];
   const ended = [];

@@ -601,6 +601,10 @@ function createPromptApp({
   // (the relay's `lookup`); null without Home Assistant, and then nothing named
   // can become a proposal.
   lookupFor = null,
+  // Whether Home Assistant accepts the add-on's token on the MCP path (the
+  // relay's `mcpAuth`): 'ok', 'unauthorized', 'unreachable', or null when
+  // nothing has answered yet.
+  haMcpAuth = () => null,
   model, voiceModel = '', writeModel = '', cameraModel = '',
   dailyBudgetUsd = 0,
   coreRelayUrl = '',
@@ -879,6 +883,10 @@ function createPromptApp({
       model: model || '',
       ha_mcp: haConfigured,
       ha_mcp_connected: haConfigured ? lastMcpConnected : false,
+      // Whether Home Assistant accepts the add-on's token on the MCP path, known
+      // from the start rather than from the first chat; null without Home
+      // Assistant or before the first answer.
+      ha_mcp_auth: haConfigured ? haMcpAuth() : null,
       // Is what a run does to the home still being recorded? Published rather
       // than inferred: while this is false a write is refused, and the errno
       // says whose problem it is (EROFS/EACCES a configuration, ENOSPC a disk).

@@ -33,6 +33,8 @@ const USAGE_BIN = process.env.CLAUDE_PROMPT_USAGE_BIN || '/usr/local/bin/ha-usag
 // Core address is derived (see core-target.js), never supplied.
 const HA_MCP_URL_OVERRIDE = process.env.CLAUDE_PROMPT_HA_MCP_URL || '';
 const DISCOVERY_SERVICE = 'claude_ha';
+// How often the relay asks Home Assistant whether it still accepts the token.
+const MCP_AUTH_PROBE_MS = 5 * 60 * 1000;
 // Where chat runs work. Stated once: the removal of the sessions earlier
 // versions saved derives Claude's transcript folder from it.
 const PROMPT_DIR = path.join(DATA_DIR, 'claude-prompt');
@@ -208,7 +210,9 @@ async function start() {
     // same format, as the audit hook writes for a console run — the relay is the
     // one place that sees the call, its arguments and Core's answer for EVERY
     // engine, with hooks or without.
-    relay = await startCoreRelay({ coreOrigin: coreTarget.origin, haToken, log, record: audit });
+    relay = await startCoreRelay({
+      coreOrigin: coreTarget.origin, haToken, log, record: audit, authProbeEveryMs: MCP_AUTH_PROBE_MS,
+    });
     log(`core relay on 127.0.0.1:${relay.port}`);
   }
 
@@ -271,6 +275,8 @@ async function start() {
     beginRun,
     endRun,
     lookupFor: relay ? (runId) => relay.lookup(runId) : null,
+    // Whether Home Assistant accepts the add-on's token on the MCP path.
+    haMcpAuth: relay ? () => relay.mcpAuth() : () => null,
     // Whether the audit log is still being written, asked at the moment a
     // request is about to act: an action that cannot be recorded is refused.
     auditState: () => auditSink.state(),
