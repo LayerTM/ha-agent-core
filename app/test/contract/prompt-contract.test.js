@@ -136,6 +136,27 @@ test('a malformed body is refused before anything runs, with a code a client can
     [{ body: { mode: 'write', intents: INTENT, image_entity: 'camera.door' } }, 400, { error: 'image_entity is only valid with mode "read"', code: 'mode_mismatch', field: 'image_entity' }],
     [{ body: { mode: 'write', intents: INTENT, confirmation: 'maybe' } }, 400, { error: 'confirmation must be "auto" or "confirmed"', code: 'invalid_field', field: 'confirmation' }],
     [{ body: { mode: 'write', intents: [] } }, 400, { error: 'intents must be an array of 1-5 entries', code: 'invalid_intents', field: 'intents' }],
+    [{ body: { mode: 'write', intents: INTENT, memory: [] } }, 400, { error: 'memory is only valid with mode "read"', code: 'mode_mismatch', field: 'memory' }],
+    ...[
+      { id: 'a' },
+      'a fact',
+      Array.from({ length: 101 }, (_, i) => ({ id: `f${i}`, text: 'x' })),
+    ].map((memory) => [{ body: { prompt: 'x', memory } }, 400, { error: 'memory must be an array of at most 100 facts', code: 'invalid_field', field: 'memory' }]),
+    ...[
+      ['a fact'],
+      [{ id: 'a', text: 'x', user: 'u' }],
+    ].map((memory) => [{ body: { prompt: 'x', memory } }, 400, { error: 'each memory fact must be {id, text}', code: 'invalid_field', field: 'memory' }]),
+    ...[
+      [{ id: '', text: 'x' }],
+      [{ id: 'a b', text: 'x' }],
+      [{ id: 'x'.repeat(33), text: 'x' }],
+      [{ id: 'a', text: 'x' }, { id: 'a', text: 'y' }],
+    ].map((memory) => [{ body: { prompt: 'x', memory } }, 400, { error: 'each memory id must be a unique 1-32 character [A-Za-z0-9_-] string', code: 'invalid_field', field: 'memory' }]),
+    ...[
+      [{ id: 'a', text: '   ' }],
+      [{ id: 'a', text: 'x'.repeat(201) }],
+      [{ id: 'a', text: 7 }],
+    ].map((memory) => [{ body: { prompt: 'x', memory } }, 400, { error: 'each memory text must be 1-200 characters', code: 'invalid_field', field: 'memory' }]),
   ];
   for (const [req, status, expected] of cases) {
     const res = await post(req.body, { raw: req.raw });
@@ -364,6 +385,86 @@ test('a streamed read sends deltas and ends with exactly one done line', async (
   assert.ok(lines.length >= 2);
   assert.ok(lines.every((line) => line.type === 'delta'));
   assert.equal(lines.map((line) => line.text).join(''), answer);
+});
+
+test('remembered facts reach the run normalized, a suggested change comes back, and no fact text is logged', async () => {
+  const memory = [{ id: 'a1', text: '  My room is\nthe office. ' }, { id: 'b2', text: 'é'.repeat(200) }];
+  const change = { remember: [`Sleep mode is ${SECRET}.`], forget: ['a1'] };
+  state.script.push(() => okOutcome({ text: 'Noted.', memoryChange: change }));
+  const res = await post({ prompt: 'remember sleep mode', memory });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.deepEqual(state.runs[0].memory, [{ id: 'a1', text: 'My room is the office.' }, { id: 'b2', text: 'é'.repeat(200) }]);
+  assert.equal(body.memory_change.remember[0].includes(SECRET), false, 'a new fact is redacted like the answer');
+  assert.deepEqual(body.memory_change.forget, ['a1']);
+  const line = auditLines.filter((l) => l.startsWith('prompt[read]'))[0];
+  assert.match(line, / memory=2 /);
+  assert.match(line, / memory_change=\+1-1/);
+  assert.ok(auditLines.every((l) => !/office|Sleep mode|é/.test(l)), 'no fact text in the audit log');
+
+  state.script.push(() => okOutcome({ text: 'Noted.', memoryChange: change }));
+  const lines = await ndjson(await post({ prompt: 'remember sleep mode', memory, stream: true }));
+  assert.deepEqual(lines.pop().memory_change, body.memory_change, 'the done line carries the same change');
+});
+
+test('the facts are held to one byte budget, published in status, and a list at the budget is accepted', async () => {
+  const res = await fetch(`${base}/api/status`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+  const limit = (await res.json()).memory_max_bytes;
+  assert.equal(limit, 16 * 1024);
+  // 81 full-length facts plus one that ends exactly at the budget; a multibyte script counts its bytes.
+  const atLimit = Array.from({ length: 81 }, (_, i) => ({ id: `f${i}`, text: 'ж'.repeat(100) }));
+  atLimit.push({ id: 'last', text: 'x'.repeat(limit - 81 * 200) });
+  const ok = await post({ prompt: 'x'.repeat(8 * 1024), memory: atLimit });
+  assert.equal(ok.status, 200, 'a full prompt with memory at the budget fits the body');
+  assert.equal(state.runs.length, 1);
+  const over = await post({ prompt: 'x', memory: [...atLimit.slice(0, -1), { id: 'last', text: 'x'.repeat(limit - 81 * 200 + 1) }] });
+  assert.equal(over.status, 400);
+  assert.deepEqual(await over.json(), {
+    error: 'memory too large (max 16 KB of fact text)', code: 'memory_too_large', field: 'memory', limit_bytes: limit,
+  });
+  assert.equal(state.runs.length, 1, 'refused before anything runs');
+});
+
+test('invisible format characters are removed from a fact before it is rendered or checked', async () => {
+  const memory = [{ id: 'a1', text: '\u202Eeciffo\u202C \u200Bis\u2066 my\uFEFF room\uD800' }];
+  assert.equal((await post({ prompt: 'x', memory })).status, 200);
+  assert.deepEqual(state.runs[0].memory, [{ id: 'a1', text: 'eciffo is my room' }]);
+  const onlyInvisible = await post({ prompt: 'x', memory: [{ id: 'a1', text: '\u200B\u202E\uFEFF' }] });
+  assert.equal(onlyInvisible.status, 400, 'nothing visible left is an empty fact');
+});
+
+test('a remembered fact that redaction lengthens past 200 characters is dropped', async () => {
+  // A redactor whose marker is longer than the secret it replaces.
+  const growing = await listen(makeApp({ redact: (t) => String(t).replace(/k3y/g, '[REDACTED-SECRET]') }));
+  try {
+    const url = `http://127.0.0.1:${growing.address().port}`;
+    const fits = `${'a'.repeat(170)} k3y`;
+    const grows = `${'a'.repeat(196)} k3y`;
+    state.script.push(() => okOutcome({ text: 'ok', memoryChange: { remember: [grows, fits], forget: [] } }));
+    const kept = await (await post({ prompt: 'x', memory: [] }, { url })).json();
+    assert.deepEqual(kept.memory_change, { remember: [`${'a'.repeat(170)} [REDACTED-SECRET]`], forget: [] });
+    state.script.push(() => okOutcome({ text: 'ok', memoryChange: { remember: [grows], forget: [] } }));
+    const none = await (await post({ prompt: 'x', memory: [] }, { url })).json();
+    assert.equal('memory_change' in none, false, 'its only fact grew past the bound after redaction');
+  } finally {
+    growing.closeAllConnections();
+    growing.close();
+  }
+});
+
+test('a read without memory never returns a memory change, and passes none to the run', async () => {
+  state.script.push(() => okOutcome({ text: 'ok', memoryChange: { remember: ['A fact.'], forget: [] } }));
+  const body = await (await post({ prompt: 'hello' })).json();
+  assert.equal(state.runs[0].memory, undefined);
+  assert.equal('memory_change' in body, false);
+  state.script.push(() => okOutcome({ text: 'ok', memoryChange: null }));
+  const empty = await (await post({ prompt: 'hello', memory: [] })).json();
+  assert.deepEqual(state.runs[1].memory, []);
+  assert.equal('memory_change' in empty, false, 'no change suggested: the key is absent, not null');
+  state.script.push(() => okOutcome({ text: 'ok', memoryChange: { remember: ['My room is the office.'], forget: [] } }));
+  const first = await (await post({ prompt: 'remember my room is the office', memory: [] })).json();
+  assert.deepEqual(first.memory_change, { remember: ['My room is the office.'], forget: [] },
+    'an empty list means the client keeps memory and has none yet');
 });
 
 test('no delta ends in the middle of a character', async () => {
