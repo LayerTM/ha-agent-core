@@ -248,12 +248,22 @@ function wholeCharEnd(text, end) {
 // the user's message in the run input.
 const MEMORY_MAX_ITEMS = 100;
 const MEMORY_TEXT_MAX = 200;
+// One stated budget for the facts a read carries: the UTF-8 bytes of their
+// texts. 100 full-length facts in a multibyte script would not fit the body
+// limit, so the list is held to this instead, and /api/status publishes it.
+const MEMORY_MAX_BYTES = 16 * 1024;
 const MEMORY_ID_RE = /^[A-Za-z0-9_-]{1,32}$/;
 const REMEMBER_MAX = 3;
 const FORGET_MAX = 20;
 
+// One line of visible text: control and format characters (zero-width, bidi
+// overrides, BOM) and lone surrogate halves are removed, whitespace collapses.
+// A bidi override cannot break a line, but it can show a fact in a different
+// order than the one stored.
+const FORMAT_OR_LONE_SURROGATE_RE = /\p{Cf}|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/gu;
+
 function oneLine(text) {
-  return sanitizePrompt(text).replace(/\s+/g, ' ').trim();
+  return sanitizePrompt(text).replace(FORMAT_OR_LONE_SURROGATE_RE, '').replace(/\s+/g, ' ').trim();
 }
 
 function factText(raw) {
@@ -263,8 +273,9 @@ function factText(raw) {
 }
 
 // Validate the request's `memory`. Returns {ok:true, memory} with a normalized
-// copy, or {ok:false, error}. Strict like every other field: anything outside
-// the shape is refused, never trimmed to fit.
+// copy, {ok:false, error}, or {ok:false, tooLarge:true} past MEMORY_MAX_BYTES.
+// Strict like every other field: anything outside the shape is refused, never
+// trimmed to fit.
 function validateMemory(raw) {
   if (!Array.isArray(raw) || raw.length > MEMORY_MAX_ITEMS) {
     return { ok: false, error: `memory must be an array of at most ${MEMORY_MAX_ITEMS} facts` };
@@ -284,6 +295,9 @@ function validateMemory(raw) {
     }
     ids.add(item.id);
     memory.push({ id: item.id, text });
+  }
+  if (memory.reduce((n, f) => n + Buffer.byteLength(f.text, 'utf8'), 0) > MEMORY_MAX_BYTES) {
+    return { ok: false, tooLarge: true };
   }
   return { ok: true, memory };
 }
@@ -315,7 +329,9 @@ module.exports = {
   validateAutomationDraft,
   validateMemory,
   validateMemoryChange,
+  factText,
   oneLine,
+  MEMORY_MAX_BYTES,
   buildRedactor,
   redactDeep,
   sha12,

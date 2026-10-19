@@ -329,6 +329,7 @@ The message is for people and may change. The code is stable:
 | `mode_mismatch` | 400 | `field` is not valid in the requested mode |
 | `invalid_intents` | 400 | the intents are not acceptable |
 | `prompt_too_large` | 413 | the prompt is larger than `limit_bytes` |
+| `memory_too_large` | 400 | the texts of `memory` together are larger than `limit_bytes` |
 | `confirmation_required` | 403 | an unconfirmed write touches `domains` |
 | `rate_limited` | 429 | too many requests; see `Retry-After` |
 | `write_unavailable` | 503 | no Home Assistant MCP configuration for writes |
@@ -340,7 +341,7 @@ The message is for people and may change. The code is stable:
 | `usage_unavailable`, `limits_unavailable` | 503 | `/api/usage`, `/api/account_limits` have nothing to report |
 | `not_found` | 404 | no such route |
 
-`GET /api/status` publishes `prompt_max_bytes` and `body_max_bytes`, the limits the request is checked against.
+`GET /api/status` publishes `prompt_max_bytes`, `memory_max_bytes` and `body_max_bytes`, the limits the request is checked against.
 
 `GET /api/status` identifies the engine with three fields: `engine`,
 `engine_version` (the parsed agent version, `""` when unknown; `version` is the
@@ -351,8 +352,10 @@ field only when it is listed there.
 A `read` may carry `memory`, facts the user chose to keep across
 conversations: up to 100 `{ "id", "text" }` objects, each `id` 1-32 characters of
 `[A-Za-z0-9_-]` and unique, each `text` 1-200 characters once whitespace is
-collapsed to single spaces. Anything else is refused with `invalid_field`, and a
-`write` carrying it with `mode_mismatch`. The facts go into the run's input
+collapsed to single spaces and invisible format characters (zero-width, bidi
+controls) are removed. Anything else is refused with `invalid_field`, texts
+that together take more than `memory_max_bytes` (16 KiB of UTF-8) with
+`memory_too_large`, and a `write` carrying it with `mode_mismatch`. The facts go into the run's input
 before the conversation history as data, one line each:
 
 ```

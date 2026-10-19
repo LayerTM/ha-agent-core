@@ -12,7 +12,9 @@ uses [Semantic Versioning](https://semver.org/).
   across conversations, rendered into the run's input as data before the conversation
   history. The answer carries `memory_change` (`remember`, `forget`) when the
   message in that turn asks to remember or forget something; forgetting is limited
-  to the ids the request sent. `memory` is listed in `request_fields`. The add-on
+  to the ids the request sent. `memory` is listed in `request_fields`; the
+  facts' texts are held to `memory_max_bytes` (16 KiB), published in
+  `/api/status`, and refused past it with `memory_too_large`. The add-on
   keeps no copy of the facts, and the audit log records only their number.
 
 ## [0.9.2] - 2026-10-16

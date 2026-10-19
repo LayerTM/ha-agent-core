@@ -12,7 +12,7 @@ const crypto = require('node:crypto');
 const express = require('express');
 const {
   ipAllowed, tokenMatches, sanitizePrompt, sanitizeId,
-  validateIntents, validateMemory, redactDeep, sha12, wholeCharEnd,
+  validateIntents, validateMemory, factText, MEMORY_MAX_BYTES, redactDeep, sha12, wholeCharEnd,
 } = require('./security');
 const { adapter, branding } = require('../adapter-contract');
 const { langOf, DEGRADE_TEXT, budgetNotice, targetNotice } = require('./notices');
@@ -42,6 +42,7 @@ const ERRORS = {
   mode_mismatch: [400, 'field not valid in this mode'],
   invalid_intents: [400, 'invalid intents'],
   prompt_too_large: [413, `prompt too large (max ${MAX_PROMPT_BYTES / 1024} KB)`],
+  memory_too_large: [400, `memory too large (max ${MEMORY_MAX_BYTES / 1024} KB of fact text)`],
   confirmation_required: [403, 'sensitive action requires explicit confirmation'],
   rate_limited: [429, 'rate limited'],
   write_unavailable: [503, 'write mode unavailable: no HA MCP configured (set an HA token in the add-on options)'],
@@ -879,6 +880,7 @@ function createPromptApp({
       request_fields: [...BODY_KEYS],
       // The size limits POST /api/prompt enforces, from the same constants.
       prompt_max_bytes: MAX_PROMPT_BYTES,
+      memory_max_bytes: MEMORY_MAX_BYTES,
       body_max_bytes: MAX_BODY_BYTES,
       model: model || '',
       ha_mcp: haConfigured,
@@ -1001,6 +1003,9 @@ function createPromptApp({
           return sendError(res, 'mode_mismatch', { message: 'memory is only valid with mode "read"', field: 'memory' });
         }
         const checked = validateMemory(body.memory);
+        if (checked.tooLarge) {
+          return sendError(res, 'memory_too_large', { field: 'memory', limit_bytes: MEMORY_MAX_BYTES });
+        }
         if (!checked.ok) {
           return sendError(res, 'invalid_field', { message: checked.error, field: 'memory' });
         }
@@ -1393,11 +1398,14 @@ function createPromptApp({
       // commits it; the integration re-validates + writes it in-process on confirm.
       const automation = resolved.automation ? redactDeep(resolved.automation, redact) : null;
       // A suggested memory change (read-side): new fact texts redacted like the
-      // answer, ids already bounded to the ones this request sent. Absent unless
-      // the request carried `memory` and the message asked to remember or forget.
-      const memoryChange = mode === 'read' && memory && outcome.memoryChange
-        ? { remember: outcome.memoryChange.remember.map((t) => redact(t)), forget: outcome.memoryChange.forget }
-        : null;
+      // answer and held to the fact bounds again AFTER redaction (a marker can
+      // lengthen a text); ids already bounded to the ones this request sent.
+      // Absent unless the request carried `memory` and the message asked to
+      // remember or forget, or when nothing is left.
+      const remember = mode === 'read' && memory && outcome.memoryChange
+        ? outcome.memoryChange.remember.map((t) => factText(redact(t))).filter(Boolean) : [];
+      const forget = mode === 'read' && memory && outcome.memoryChange ? outcome.memoryChange.forget : [];
+      const memoryChange = remember.length || forget.length ? { remember, forget } : null;
       const toolsUsed = outcome.toolsUsed.map((t) => redact(t));
 
       audit(
