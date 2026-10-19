@@ -416,6 +416,10 @@ test('a read without memory never returns a memory change, and passes none to th
   const empty = await (await post({ prompt: 'hello', memory: [] })).json();
   assert.deepEqual(state.runs[1].memory, []);
   assert.equal('memory_change' in empty, false, 'no change suggested: the key is absent, not null');
+  state.script.push(() => okOutcome({ text: 'ok', memoryChange: { remember: ['My room is the office.'], forget: [] } }));
+  const first = await (await post({ prompt: 'remember my room is the office', memory: [] })).json();
+  assert.deepEqual(first.memory_change, { remember: ['My room is the office.'], forget: [] },
+    'an empty list means the client keeps memory and has none yet');
 });
 
 test('no delta ends in the middle of a character', async () => {

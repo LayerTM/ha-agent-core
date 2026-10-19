@@ -188,6 +188,10 @@ test('a suggested memory change is kept only within its bounds', async () => {
   assert.equal(none.memoryChange, null, 'nothing left after the bounds → no change at all');
   const unasked = await runWith([result(answer('ok', { memory_change: { remember: ['A fact.'], forget: [] } }))]);
   assert.equal(unasked.memoryChange, null, 'a request without memory never gets a change back');
+  const first = await runWith([result(answer('ok', { memory_change: { remember: ['My room is the office.'], forget: ['a1'] } }))],
+    { memory: [] });
+  assert.deepEqual(first.memoryChange, { remember: ['My room is the office.'], forget: [] },
+    'an empty list keeps memory: the first fact can be suggested, and nothing can be forgotten');
 });
 
 // --- outcomes -----------------------------------------------------------------
