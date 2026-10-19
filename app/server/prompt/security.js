@@ -242,6 +242,65 @@ function wholeCharEnd(text, end) {
   return code >= 0xD800 && code <= 0xDBFF ? end - 1 : end;
 }
 
+// Facts the user chose to keep (read requests): the client stores them and
+// sends them; the core only renders them as data and never keeps them. A fact
+// is one line — a line break inside one could otherwise pose as the start of
+// the user's message in the run input.
+const MEMORY_MAX_ITEMS = 100;
+const MEMORY_TEXT_MAX = 200;
+const MEMORY_ID_RE = /^[A-Za-z0-9_-]{1,32}$/;
+const REMEMBER_MAX = 3;
+const FORGET_MAX = 20;
+
+function oneLine(text) {
+  return sanitizePrompt(text).replace(/\s+/g, ' ').trim();
+}
+
+function factText(raw) {
+  if (typeof raw !== 'string') return '';
+  const text = oneLine(raw);
+  return [...text].length <= MEMORY_TEXT_MAX ? text : '';
+}
+
+// Validate the request's `memory`. Returns {ok:true, memory} with a normalized
+// copy, or {ok:false, error}. Strict like every other field: anything outside
+// the shape is refused, never trimmed to fit.
+function validateMemory(raw) {
+  if (!Array.isArray(raw) || raw.length > MEMORY_MAX_ITEMS) {
+    return { ok: false, error: `memory must be an array of at most ${MEMORY_MAX_ITEMS} facts` };
+  }
+  const memory = [];
+  const ids = new Set();
+  for (const item of raw) {
+    if (!isPlainObject(item) || Object.keys(item).some((k) => k !== 'id' && k !== 'text')) {
+      return { ok: false, error: 'each memory fact must be {id, text}' };
+    }
+    if (typeof item.id !== 'string' || !MEMORY_ID_RE.test(item.id) || ids.has(item.id)) {
+      return { ok: false, error: 'each memory id must be a unique 1-32 character [A-Za-z0-9_-] string' };
+    }
+    const text = factText(item.text);
+    if (!text) {
+      return { ok: false, error: `each memory text must be 1-${MEMORY_TEXT_MAX} characters` };
+    }
+    ids.add(item.id);
+    memory.push({ id: item.id, text });
+  }
+  return { ok: true, memory };
+}
+
+// The model's suggested change to the memory, kept only within its bounds: at
+// most three new facts, each one line of 1-200 characters, and only ids that
+// were sent in this request may be forgotten. Nothing left → null.
+function validateMemoryChange(raw, sentIds) {
+  if (!isPlainObject(raw)) return null;
+  const remember = [...new Set((Array.isArray(raw.remember) ? raw.remember : []).map(factText).filter(Boolean))]
+    .slice(0, REMEMBER_MAX);
+  const known = new Set(sentIds);
+  const forget = [...new Set((Array.isArray(raw.forget) ? raw.forget : []).filter((id) => known.has(id)))]
+    .slice(0, FORGET_MAX);
+  return remember.length || forget.length ? { remember, forget } : null;
+}
+
 function sha12(text) {
   return crypto.createHash('sha256').update(text, 'utf8').digest('hex').slice(0, 12);
 }
@@ -254,6 +313,9 @@ module.exports = {
   validateIntents,
   validateProposal,
   validateAutomationDraft,
+  validateMemory,
+  validateMemoryChange,
+  oneLine,
   buildRedactor,
   redactDeep,
   sha12,

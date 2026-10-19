@@ -136,6 +136,27 @@ test('a malformed body is refused before anything runs, with a code a client can
     [{ body: { mode: 'write', intents: INTENT, image_entity: 'camera.door' } }, 400, { error: 'image_entity is only valid with mode "read"', code: 'mode_mismatch', field: 'image_entity' }],
     [{ body: { mode: 'write', intents: INTENT, confirmation: 'maybe' } }, 400, { error: 'confirmation must be "auto" or "confirmed"', code: 'invalid_field', field: 'confirmation' }],
     [{ body: { mode: 'write', intents: [] } }, 400, { error: 'intents must be an array of 1-5 entries', code: 'invalid_intents', field: 'intents' }],
+    [{ body: { mode: 'write', intents: INTENT, memory: [] } }, 400, { error: 'memory is only valid with mode "read"', code: 'mode_mismatch', field: 'memory' }],
+    ...[
+      { id: 'a' },
+      'a fact',
+      Array.from({ length: 101 }, (_, i) => ({ id: `f${i}`, text: 'x' })),
+    ].map((memory) => [{ body: { prompt: 'x', memory } }, 400, { error: 'memory must be an array of at most 100 facts', code: 'invalid_field', field: 'memory' }]),
+    ...[
+      ['a fact'],
+      [{ id: 'a', text: 'x', user: 'u' }],
+    ].map((memory) => [{ body: { prompt: 'x', memory } }, 400, { error: 'each memory fact must be {id, text}', code: 'invalid_field', field: 'memory' }]),
+    ...[
+      [{ id: '', text: 'x' }],
+      [{ id: 'a b', text: 'x' }],
+      [{ id: 'x'.repeat(33), text: 'x' }],
+      [{ id: 'a', text: 'x' }, { id: 'a', text: 'y' }],
+    ].map((memory) => [{ body: { prompt: 'x', memory } }, 400, { error: 'each memory id must be a unique 1-32 character [A-Za-z0-9_-] string', code: 'invalid_field', field: 'memory' }]),
+    ...[
+      [{ id: 'a', text: '   ' }],
+      [{ id: 'a', text: 'x'.repeat(201) }],
+      [{ id: 'a', text: 7 }],
+    ].map((memory) => [{ body: { prompt: 'x', memory } }, 400, { error: 'each memory text must be 1-200 characters', code: 'invalid_field', field: 'memory' }]),
   ];
   for (const [req, status, expected] of cases) {
     const res = await post(req.body, { raw: req.raw });
@@ -364,6 +385,37 @@ test('a streamed read sends deltas and ends with exactly one done line', async (
   assert.ok(lines.length >= 2);
   assert.ok(lines.every((line) => line.type === 'delta'));
   assert.equal(lines.map((line) => line.text).join(''), answer);
+});
+
+test('remembered facts reach the run normalized, a suggested change comes back, and no fact text is logged', async () => {
+  const memory = [{ id: 'a1', text: '  My room is\nthe office. ' }, { id: 'b2', text: 'é'.repeat(200) }];
+  const change = { remember: [`Sleep mode is ${SECRET}.`], forget: ['a1'] };
+  state.script.push(() => okOutcome({ text: 'Noted.', memoryChange: change }));
+  const res = await post({ prompt: 'remember sleep mode', memory });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.deepEqual(state.runs[0].memory, [{ id: 'a1', text: 'My room is the office.' }, { id: 'b2', text: 'é'.repeat(200) }]);
+  assert.equal(body.memory_change.remember[0].includes(SECRET), false, 'a new fact is redacted like the answer');
+  assert.deepEqual(body.memory_change.forget, ['a1']);
+  const line = auditLines.filter((l) => l.startsWith('prompt[read]'))[0];
+  assert.match(line, / memory=2 /);
+  assert.match(line, / memory_change=\+1-1/);
+  assert.ok(auditLines.every((l) => !/office|Sleep mode|é/.test(l)), 'no fact text in the audit log');
+
+  state.script.push(() => okOutcome({ text: 'Noted.', memoryChange: change }));
+  const lines = await ndjson(await post({ prompt: 'remember sleep mode', memory, stream: true }));
+  assert.deepEqual(lines.pop().memory_change, body.memory_change, 'the done line carries the same change');
+});
+
+test('a read without memory never returns a memory change, and passes none to the run', async () => {
+  state.script.push(() => okOutcome({ text: 'ok', memoryChange: { remember: ['A fact.'], forget: [] } }));
+  const body = await (await post({ prompt: 'hello' })).json();
+  assert.equal(state.runs[0].memory, undefined);
+  assert.equal('memory_change' in body, false);
+  state.script.push(() => okOutcome({ text: 'ok', memoryChange: null }));
+  const empty = await (await post({ prompt: 'hello', memory: [] })).json();
+  assert.deepEqual(state.runs[1].memory, []);
+  assert.equal('memory_change' in empty, false, 'no change suggested: the key is absent, not null');
 });
 
 test('no delta ends in the middle of a character', async () => {

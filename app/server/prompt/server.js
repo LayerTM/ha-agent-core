@@ -12,7 +12,7 @@ const crypto = require('node:crypto');
 const express = require('express');
 const {
   ipAllowed, tokenMatches, sanitizePrompt, sanitizeId,
-  validateIntents, redactDeep, sha12, wholeCharEnd,
+  validateIntents, validateMemory, redactDeep, sha12, wholeCharEnd,
 } = require('./security');
 const { adapter, branding } = require('../adapter-contract');
 const { langOf, DEGRADE_TEXT, budgetNotice, targetNotice } = require('./notices');
@@ -75,7 +75,7 @@ function sendError(res, code, { message, ...extra } = {}) {
 
 const BODY_KEYS = new Set([
   'prompt', 'mode', 'conversation_id', 'intents', 'confirmation', 'image_entity', 'stream', 'language',
-  'surface', 'edit_automation',
+  'surface', 'edit_automation', 'memory',
 ]);
 
 // A version published on /api/status is a plain token, whatever the agent printed.
@@ -992,6 +992,21 @@ function createPromptApp({
         return sendError(res, 'invalid_field', { message: 'edit_automation must be a JSON object', field: 'edit_automation' });
       }
 
+      // Facts the user chose to keep (read only): rendered into the run input
+      // as untrusted data and never stored or logged here. A write replays the
+      // confirmed intents and nothing else, so it never carries them.
+      let memory;
+      if (body.memory !== undefined) {
+        if (mode !== 'read') {
+          return sendError(res, 'mode_mismatch', { message: 'memory is only valid with mode "read"', field: 'memory' });
+        }
+        const checked = validateMemory(body.memory);
+        if (!checked.ok) {
+          return sendError(res, 'invalid_field', { message: checked.error, field: 'memory' });
+        }
+        ({ memory } = checked);
+      }
+
       // Camera vision: an optional camera entity to snapshot and let Claude SEE.
       // Read-only, strict entity format; the integration must only pass cameras
       // the user has exposed to Assist (that is the outer boundary).
@@ -1212,6 +1227,8 @@ function createPromptApp({
             // Existing automation config → the model MODIFIES it (read only): the
             // runner embeds it and returns the full updated config in `automation`.
             editAutomation: body.edit_automation,
+            // Remembered facts → rendered as data; the answer may suggest a change.
+            memory,
             // Live `ha` tool names, so a run allowlists what HA actually publishes.
             haTools: haToolCatalog,
             // First attempt gets the full ceiling; a retry gets only what's LEFT of
@@ -1267,7 +1284,7 @@ function createPromptApp({
         + `${imageEntity ? ` img=${imageEntity}${imagePath ? '' : '(fetch-failed)'}` : ''}`
         + ` lang=${language} langdir=${safeLangTag(body.language) || '-'}`
         + ` surface=${body.surface || '-'} model=${sanitizeId(resolvedModel, 64) || 'default'}`
-        + `${body.edit_automation !== undefined ? ' edit=1' : ''} ${detail}`;
+        + `${body.edit_automation !== undefined ? ' edit=1' : ''}${memory ? ` memory=${memory.length}` : ''} ${detail}`;
 
       // A streaming READ must NEVER terminate with `{type:"error"}` — the
       // integration's NDJSON reader treats that as fatal and the chat hard-fails,
@@ -1375,6 +1392,12 @@ function createPromptApp({
       // old integration that doesn't read it is unaffected. The add-on never
       // commits it; the integration re-validates + writes it in-process on confirm.
       const automation = resolved.automation ? redactDeep(resolved.automation, redact) : null;
+      // A suggested memory change (read-side): new fact texts redacted like the
+      // answer, ids already bounded to the ones this request sent. Absent unless
+      // the request carried `memory` and the message asked to remember or forget.
+      const memoryChange = mode === 'read' && memory && outcome.memoryChange
+        ? { remember: outcome.memoryChange.remember.map((t) => redact(t)), forget: outcome.memoryChange.forget }
+        : null;
       const toolsUsed = outcome.toolsUsed.map((t) => redact(t));
 
       audit(
@@ -1383,7 +1406,9 @@ function createPromptApp({
         + ` out=${Buffer.byteLength(text, 'utf8')}B${outcome.truncated ? ' truncated' : ''}`
         + `${attempts > 1 ? ` attempts=${attempts} recovered=${retriedFrom[retriedFrom.length - 1]}` : ''}`
         + `${outcome.mcpFailed ? ' mcp=FAILED' : ''}${proposal ? ' proposal=yes' : ''}`
-        + `${automation ? ' automation=draft' : ''}${spendFields(spentTokens, reportsCost() ? spent : null)}`,
+        + `${automation ? ' automation=draft' : ''}`
+        + `${memoryChange ? ` memory_change=+${memoryChange.remember.length}-${memoryChange.forget.length}` : ''}`
+        + `${spendFields(spentTokens, reportsCost() ? spent : null)}`,
       );
       if (outcome.mcpFailed) {
         console.error('[prompt] HA MCP server did not connect — check the add-on log for the resolved Core address, that the Model Context Protocol Server integration is installed, and the HA token');
@@ -1396,6 +1421,7 @@ function createPromptApp({
         // absent — not null — for ordinary turns; the integration keys on its
         // presence and old clients ignore it.
         ...(automation ? { automation } : {}),
+        ...(memoryChange ? { memory_change: memoryChange } : {}),
         tools_used: toolsUsed,
         truncated: outcome.truncated,
       };

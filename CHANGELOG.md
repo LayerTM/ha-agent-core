@@ -6,6 +6,15 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `POST /api/prompt` accepts `memory` on a read: facts the user chose to keep
+  across conversations, rendered into the run's input as data before the conversation
+  history. The answer carries `memory_change` (`remember`, `forget`) when the
+  message in that turn asks to remember or forget something; forgetting is limited
+  to the ids the request sent. `memory` is listed in `request_fields`. The add-on
+  keeps no copy of the facts, and the audit log records only their number.
+
 ## [0.9.2] - 2026-10-16
 
 ### Added
