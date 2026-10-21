@@ -1204,6 +1204,9 @@ function createPromptApp({
           'X-Accel-Buffering': 'no',
         });
         onText = (fullText) => {
+          // Once Home Assistant has refused this run's token, whatever the model
+          // goes on to write is a guess: nothing more of it ships.
+          if (tokenRefusal(runId) !== null) return;
           const redacted = redact(fullText);
           // The window is counted in UTF-16 code units, so its edge can fall
           // between the two halves of one character; the last half-character is
@@ -1341,6 +1344,9 @@ function createPromptApp({
       const degradedBody = (reason) => ({
         text: reason === 'ha-token-refused' ? tokenRefusedNotice(language, outcome.refusal) : DEGRADE_TEXT[language],
         proposal: null, tools_used: [], truncated: false, degraded: true, reason,
+        // Deltas already went out: they were an incomplete answer, and `text`
+        // is to be shown after them.
+        ...(emittedLen > 0 ? { partial: true } : {}),
       });
       if (outcome.status === 'ok') authState.record(true);
       else if (outcome.reason === 'auth-expired') authState.record(false);
@@ -1368,7 +1374,8 @@ function createPromptApp({
         // (recovered), NOT user-visible degradation. Only a turn where the user
         // gets the apology (no content streamed) counts as degraded. (The audit
         // below still records the raw `200-degraded reason=` either way.)
-        const delivered = streaming && emittedLen > 0;
+        // A refused token is never absorbed: the user was left with a guess.
+        const delivered = streaming && emittedLen > 0 && reason !== 'ha-token-refused';
         chatHealth.record(delivered, delivered ? null : reason, delivered);
         audit(`prompt[read] ${base} status=200-degraded ${diag} dur=${seconds}s`);
         if (streaming) { streamDone(degradedBody(reason)); return undefined; }

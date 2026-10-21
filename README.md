@@ -409,7 +409,12 @@ during that read — a revoked token, or a non-administrator's while the Model
 Context Protocol Server requires an administrator. Whatever the model wrote is
 not passed through: `text` names both causes and both fixes, in the request's
 language. That run is never retried either; a person has to fix the token. It
-is also `chat_health.last_reason`. Writes are unaffected: they run no model and
+is also `chat_health.last_reason`, and it counts as degraded there even when a
+stream had already sent text. A stream stops sending text once the token is
+refused. When text went out before the run ended degraded, the `done` line
+carries `partial: true`: that text was an incomplete answer, and `done.text`
+(the apology or the notice) is to be shown after it. `partial` is absent
+otherwise. Writes are unaffected: they run no model and
 report Home Assistant's own reason per action.
 
 `GET /api/status` publishes `auth`, whether the agent is still signed in, without

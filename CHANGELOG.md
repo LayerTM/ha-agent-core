@@ -28,7 +28,11 @@ uses [Semantic Versioning](https://semver.org/).
   ends as a degraded read with the reason `ha-token-refused` instead of the
   model's guess. The answer names both causes (a revoked token, or a
   non-administrator's while the Model Context Protocol Server requires an
-  administrator) and both fixes, and the read is not retried.
+  administrator) and both fixes, and the read is not retried. On a streamed
+  read the text stops at the refusal, the turn counts as degraded in
+  `chat_health` even when text had been sent, and the `done` line of any
+  degraded read that had sent text carries `partial: true` so a client shows
+  `text` after it.
 - A confirmed `write` no longer runs an agent. The core calls the Home Assistant
   tool of each intent once per target, with the entity id as its name, in
   order, attempting every one; each action's outcome is Home Assistant's own

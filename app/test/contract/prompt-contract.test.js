@@ -878,3 +878,80 @@ test('a read whose token Home Assistant refused says so and is not retried', asy
     srv.close();
   }
 });
+
+// A streamed read streams the model's words as it writes them. Once Home
+// Assistant has refused the token, what it goes on to write is a guess: no more
+// of it ships, the read ends degraded under its own reason, and `done` says the
+// deltas that did go out were an incomplete answer (`partial`) so a client shows
+// the notice after them.
+test('a streamed read whose token was refused stops its deltas and ends partial', async () => {
+  const refused = new Map();
+  let current = null;
+  const app = makeApp({
+    beginRun: async (runId) => { current = runId; return { token: 'relay-token', mcpConfigPath: null, dir: null }; },
+    tokenRefusal: (runId) => refused.get(runId) ?? null,
+  });
+  const srv = await listen(app);
+  const url = `http://127.0.0.1:${srv.address().port}`;
+  const health = async () => (await (await fetch(`${url}/api/status`, { headers: { Authorization: `Bearer ${TOKEN}` } })).json()).chat_health;
+  try {
+    const first = 'The light in the kitchen is '.repeat(8);
+    state.script.push((opts) => {
+      opts.onText(first);
+      refused.set(current, 401);
+      opts.onText(`${first}probably on, the token seems to be fine and the rest of this guess goes on and on`);
+      return okOutcome({ text: 'a guess' });
+    });
+    const lines = await ndjson(await post({ prompt: 'is the light on?', language: 'en', stream: true }, { url }));
+    const done = lines.pop();
+    const deltas = lines.map((l) => l.text).join('');
+    assert.ok(lines.length >= 1 && lines.every((l) => l.type === 'delta'));
+    assert.ok(first.startsWith(deltas), 'nothing was written after the refusal');
+    assert.doesNotMatch(deltas, /probably/);
+    assert.equal(done.type, 'done');
+    assert.equal(done.degraded, true);
+    assert.equal(done.reason, 'ha-token-refused');
+    assert.equal(done.partial, true);
+    assert.match(done.text, /refused the add-on's Home Assistant token \(401\)/);
+    let h = await health();
+    assert.equal(h.degraded, 1);
+    assert.equal(h.recovered, 0);
+    assert.equal(h.last_reason, 'ha-token-refused');
+
+    // Nothing streamed before the refusal: not partial.
+    state.script.push(() => { refused.set(current, 403); return okOutcome({ text: 'a guess' }); });
+    const bare = await ndjson(await post({ prompt: 'again', language: 'en', stream: true }, { url }));
+    assert.equal(bare.length, 1);
+    assert.equal(bare[0].reason, 'ha-token-refused');
+    assert.ok(!bare[0].partial);
+    h = await health();
+    assert.equal(h.degraded, 2);
+    assert.equal(h.recovered, 0);
+  } finally {
+    srv.closeAllConnections();
+    srv.close();
+  }
+});
+
+test('a streamed read that fails for another reason after deltas stays a recovered turn', async () => {
+  const app = makeApp();
+  const srv = await listen(app);
+  const url = `http://127.0.0.1:${srv.address().port}`;
+  try {
+    state.script.push((opts) => {
+      opts.onText('The light in the kitchen is '.repeat(8));
+      return errorOutcome('model-error');
+    });
+    const lines = await ndjson(await post({ prompt: 'is the light on?', language: 'en', stream: true }, { url }));
+    const done = lines.pop();
+    assert.equal(done.degraded, true);
+    assert.equal(done.reason, 'model-error');
+    assert.equal(done.partial, true);
+    const h = (await (await fetch(`${url}/api/status`, { headers: { Authorization: `Bearer ${TOKEN}` } })).json()).chat_health;
+    assert.equal(h.degraded, 0);
+    assert.equal(h.recovered, 1);
+  } finally {
+    srv.closeAllConnections();
+    srv.close();
+  }
+});
