@@ -18,8 +18,12 @@ updates:
       github-actions:
         patterns: ["*"]
 
+  # Root tooling, the add-on core's runtime dependencies (/app: console + prompt
+  # server) and the screenshot helper (/ha-tools, its own manifest and lockfile).
+  # group-by: dependency-name makes one bump of a dependency ONE pull request
+  # across all three manifests instead of one per directory.
   - package-ecosystem: npm
-    directory: "/"
+    directories: ["/", "/app", "/ha-tools"]
     schedule:
       interval: weekly
     commit-message:
@@ -28,18 +32,7 @@ updates:
     groups:
       npm:
         patterns: ["*"]
-
-  # The add-on core's runtime dependencies (console + prompt server).
-  - package-ecosystem: npm
-    directory: "/app"
-    schedule:
-      interval: weekly
-    commit-message:
-      prefix: "deps"
-    labels: ["dependencies"]
-    groups:
-      npm-app:
-        patterns: ["*"]
+        group-by: dependency-name
 
   # The add-on base image the start script is tested in.
   - package-ecosystem: docker
@@ -49,15 +42,3 @@ updates:
     commit-message:
       prefix: "deps"
     labels: ["dependencies"]
-
-  # The screenshot helper, a separate manifest and lockfile.
-  - package-ecosystem: npm
-    directory: "/ha-tools"
-    schedule:
-      interval: weekly
-    commit-message:
-      prefix: "deps"
-    labels: ["dependencies"]
-    groups:
-      npm-ha-tools:
-        patterns: ["*"]
