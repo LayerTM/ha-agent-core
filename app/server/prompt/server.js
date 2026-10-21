@@ -115,7 +115,9 @@ const CRITICAL_NEVER_AUTO = new Set([
 // runs no agent, so none of this applies to it.)
 // `tool-name-mismatch` is raised at init — BEFORE any tool has run — and the
 // outcome carries the tool names HA really publishes, so the retry runs with a
-// corrected allowlist rather than repeating the same doomed call.
+// corrected allowlist rather than repeating the same doomed call. For that same
+// reason a camera read is retried too — the snapshot is still on disk and the
+// model never saw it — while any other failure of a camera read is not repeated.
 const RETRYABLE_REASONS = new Set(['no-result', 'model-error', 'tool-name-mismatch']);
 // Total attempts per read (1 = no retry). Bounded to keep worst-case latency sane.
 const MAX_ATTEMPTS = Math.min(3, Math.max(1, Number(process.env.CLAUDE_PROMPT_MAX_ATTEMPTS) || 2));
@@ -1275,7 +1277,7 @@ function createPromptApp({
             haToolCatalog = outcome.haTools;
           }
           const retryable = outcome.status === 'error'
-            && !imagePath
+            && (!imagePath || outcome.reason === 'tool-name-mismatch')
             && !(streaming && emittedLen > 0)
             && RETRYABLE_REASONS.has(outcome.reason)
             && attempts < MAX_ATTEMPTS

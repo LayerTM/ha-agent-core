@@ -523,6 +523,45 @@ test('a read that fails transiently is retried within the remaining time, once',
   assert.equal(state.runs.length, 2, 'no more attempts than the configured maximum');
 });
 
+test('a camera read killed at init for its tool names is retried once; any other failure of it is not', async () => {
+  const http = require('node:http');
+  const relay = http.createServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'image/jpeg' });
+    res.end(Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
+  });
+  await new Promise((resolve) => relay.listen(0, '127.0.0.1', resolve));
+  const camServer = await listen(makeApp({
+    coreRelayUrl: `http://127.0.0.1:${relay.address().port}`,
+    beginRun: async () => ({ token: 'relay-token', mcpConfigPath: null, dir: null }),
+  }));
+  const url = `http://127.0.0.1:${camServer.address().port}`;
+  try {
+    state.script.push(
+      () => errorOutcome('tool-name-mismatch', { toolsUsed: [], haTools: ['ha_GetLiveContext'] }),
+      () => okOutcome({ text: 'a person at the door' }),
+    );
+    const res = await post({ prompt: 'who is at the door?', image_entity: 'camera.door' }, { url });
+    assert.equal(res.status, 200);
+    assert.equal((await res.json()).text, 'a person at the door');
+    assert.equal(state.runs.length, 2);
+    assert.ok(state.runs[0].imagePath && state.runs[1].imagePath, 'both attempts carry the snapshot');
+    assert.deepEqual(state.runs[1].haTools, ['ha_GetLiveContext'], 'the retry runs with the learned catalog');
+    assert.ok(auditLines.some((line) => line.includes('attempts=2 recovered=tool-name-mismatch')));
+
+    state.runs.length = 0;
+    state.script.push(() => errorOutcome('model-error'), () => okOutcome());
+    const failed = await post({ prompt: 'who is at the door?', image_entity: 'camera.door' }, { url });
+    assert.equal(failed.status, 200);
+    assert.equal((await failed.json()).degraded, true);
+    assert.equal(state.runs.length, 1, 'a camera read that failed after the model saw the image is not repeated');
+  } finally {
+    camServer.closeAllConnections();
+    camServer.close();
+    relay.closeAllConnections();
+    relay.close();
+  }
+});
+
 test('a read that still fails names how every earlier attempt ended', async () => {
   const lineOf = () => auditLines.filter((l) => l.startsWith('prompt[read]')).at(-1);
   auditLines.length = 0;
