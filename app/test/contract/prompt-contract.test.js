@@ -826,3 +826,55 @@ test('request_fields lists exactly the body fields POST /api/prompt accepts', as
   }
   assert.equal(state.runs.length, runs);
 });
+
+// A read during which Home Assistant refused THIS run's token ends as a degraded
+// read of its own reason, whatever the model wrote, and is not retried: only a
+// person can change the answer. Another run's refusal does not mark this one.
+test('a read whose token Home Assistant refused says so and is not retried', async () => {
+  const refused = new Map();
+  let current = null;
+  const app = makeApp({
+    beginRun: async (runId) => { current = runId; return { token: 'relay-token', mcpConfigPath: null, dir: null }; },
+    tokenRefusal: (runId) => refused.get(runId) ?? null,
+  });
+  const srv = await listen(app);
+  const url = `http://127.0.0.1:${srv.address().port}`;
+  try {
+    state.script.push(() => {
+      refused.set(current, 403);
+      return okOutcome({ text: 'The token is invalid or expired.' });
+    });
+    const res = await post({ prompt: 'is the light on?', language: 'en' }, { url });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.degraded, true);
+    assert.equal(body.reason, 'ha-token-refused');
+    assert.match(body.text, /refused the add-on's Home Assistant token \(403\)/);
+    assert.match(body.text, /administrator/);
+    assert.doesNotMatch(body.text, /invalid or expired/, 'the model text is not passed through');
+    assert.equal(state.runs.length, 1, 'not retried');
+    assert.match(auditLines.filter((l) => l.startsWith('prompt[read]')).at(-1),
+      / status=200-degraded reason=ha-token-refused attempts=1 /);
+
+    // The same refusal on a run that failed transiently is not retried either.
+    state.runs.length = 0;
+    state.script.push(() => { refused.set(current, 401); return errorOutcome('model-error'); });
+    const failed = await (await post({ prompt: 'again', language: 'uk' }, { url })).json();
+    assert.equal(failed.reason, 'ha-token-refused');
+    assert.match(failed.text, /\(401\)/);
+    assert.equal(state.runs.length, 1);
+
+    // A refusal that another run met leaves this read as it was.
+    state.runs.length = 0;
+    refused.set('some-other-run', 401);
+    state.script.push(() => okOutcome({ text: 'It is on.' }));
+    const fine = await (await post({ prompt: 'and now?' }, { url })).json();
+    assert.equal(fine.text, 'It is on.');
+    assert.equal(fine.degraded, undefined);
+    assert.equal((await (await fetch(`${url}/api/status`, { headers: { Authorization: `Bearer ${TOKEN}` } })).json())
+      .chat_health.last_reason, 'ha-token-refused');
+  } finally {
+    srv.closeAllConnections();
+    srv.close();
+  }
+});

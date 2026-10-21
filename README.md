@@ -404,6 +404,13 @@ A `read` whose run fails is not an error answer: it is a `200` (or, streamed, a
 `done` line) with `degraded: true`, a short apology as `text`, and `reason`, the
 failed run's reason. `auth-expired` means the engine refused its sign-in. That
 run is never retried — nothing but signing in again changes the answer.
+`ha-token-refused` means Home Assistant refused the add-on's token (401 or 403)
+during that read — a revoked token, or a non-administrator's while the Model
+Context Protocol Server requires an administrator. Whatever the model wrote is
+not passed through: `text` names both causes and both fixes, in the request's
+language. That run is never retried either; a person has to fix the token. It
+is also `chat_health.last_reason`. Writes are unaffected: they run no model and
+report Home Assistant's own reason per action.
 
 `GET /api/status` publishes `auth`, whether the agent is still signed in, without
 running it: `{ "state": "ok" | "expired" | "unknown", "since": "<ISO-8601>" | null }`.

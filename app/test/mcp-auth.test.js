@@ -271,3 +271,47 @@ test('a probe ending without an answer, with nothing newer, is unreachable', asy
     held = null;
   }
 });
+
+// A refusal belongs to the run whose bearer met it: the server asks the relay
+// about ITS run, and another run's refusal must not mark it. The mark goes with
+// the bearer.
+test('a refusal is attributed to the run whose bearer met it, and ends with that bearer', async () => {
+  answer = 401;
+  await withRelay({}, async (relay) => {
+    const refused = relay.issue('run-refused', { basenames: ['GetLiveContext'] });
+    const other = relay.issue('run-other', { basenames: ['GetLiveContext'] });
+    assert.equal(relay.tokenRefusal('run-refused'), null, 'nothing has been refused yet');
+    const res = await fetch(`${relay.url}/api/mcp`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${refused}`, 'content-type': 'application/json', accept: 'application/json' },
+      body: '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}',
+    });
+    assert.equal(res.status, 401);
+    assert.equal(relay.tokenRefusal('run-refused'), 401);
+    assert.equal(relay.tokenRefusal('run-other'), null, 'another run is not marked');
+    relay.revoke(other);
+    assert.equal(relay.tokenRefusal('run-refused'), 401, 'revoking another bearer leaves the mark');
+    relay.revoke(refused);
+    assert.equal(relay.tokenRefusal('run-refused'), null, 'the mark ends with its run');
+  });
+});
+
+test('an accepted answer marks no run, and a 403 is recorded as 403', async () => {
+  answer = 200;
+  await withRelay({}, async (relay) => {
+    const bearer = relay.issue('run-fine', { basenames: ['GetLiveContext'] });
+    const post = () => fetch(`${relay.url}/api/mcp`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json', accept: 'application/json' },
+      body: '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}',
+    });
+    assert.equal((await post()).status, 200);
+    assert.equal(relay.tokenRefusal('run-fine'), null);
+    answer = 403;
+    assert.equal((await post()).status, 403);
+    assert.equal(relay.tokenRefusal('run-fine'), 403);
+    answer = 503;
+    assert.equal((await post()).status, 503);
+    assert.equal(relay.tokenRefusal('run-fine'), 403, 'an unrelated error does not clear it');
+  });
+});

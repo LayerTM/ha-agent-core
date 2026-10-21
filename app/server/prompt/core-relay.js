@@ -242,6 +242,7 @@ function deny(res, status, message) {
  *   revoke: (token: string) => void, close: () => void,
  *   mcpAuth: () => null|'ok'|'unauthorized'|'unreachable',
  *   probeAuth: () => Promise<null|'ok'|'unauthorized'|'unreachable'>,
+ *   tokenRefusal: (runId: string) => null|number,
  *   lookup: (runId: string) => {
  *     live: (name: string) => Promise<{ok: boolean, text: string}>,
  *     liveDomain: (domain: string) => Promise<{ok: boolean, text: string}>,
@@ -272,6 +273,12 @@ async function startCoreRelay({
   // one may say 'unreachable' only if none arrived while it was in flight:
   // otherwise a late failure of the probe would overwrite a newer, real answer.
   let tokenAnswers = 0;
+  // The runs whose bearer Home Assistant refused, and with what status. Kept per
+  // run because the bearer is per run: the server asks about the run it is
+  // ending, and another run's refusal says nothing about it. The mark ends with
+  // the run (revoke) so it can never outlive the bearer it describes.
+  /** @type {Map<string, number>} */
+  const refusedRuns = new Map();
   function noteMcpAuth(next, why) {
     if (next === mcpAuth) return;
     mcpAuth = next;
@@ -438,6 +445,12 @@ async function startCoreRelay({
       },
       (upRes) => {
         if (pathname === MCP_PATH) observeMcpAnswer(upRes.statusCode, `${req.method} ${pathname}`);
+        // Only while the run is still live: an answer that lands after its bearer
+        // was revoked would leave a mark nothing ever clears.
+        if (authFromStatus(upRes.statusCode) === 'unauthorized'
+          && [...runs.values()].some((entry) => entry.runId === runId)) {
+          refusedRuns.set(runId, upRes.statusCode);
+        }
         const redirected = upRes.statusCode >= 300 && upRes.statusCode < 400;
         if (CAMERA_PATH_RE.test(pathname)) {
           // A camera read is a Home Assistant action too, and it is not a tool
@@ -694,6 +707,7 @@ async function startCoreRelay({
       const entry = runs.get(token);
       runs.delete(token);
       if (entry === undefined) return;
+      refusedRuns.delete(entry.runId);
       settleUnanswered(entry.runId);
     },
     // What the core asks Home Assistant to learn which entity a device the model
@@ -760,6 +774,10 @@ async function startCoreRelay({
     },
     // Whether Home Assistant accepts the token on the MCP path (see mcpAuth).
     mcpAuth: () => mcpAuth,
+    // The status (401 or 403) Home Assistant answered this run's own requests
+    // with, or null if it has not refused them: what a run is told when the
+    // token it rode on was the reason it could not read the house.
+    tokenRefusal: (runId) => refusedRuns.get(runId) ?? null,
     probeAuth,
     close() {
       if (probeTimer) clearInterval(probeTimer);
@@ -767,10 +785,11 @@ async function startCoreRelay({
       // tokens go. The keys are copied because settling deletes as it goes.
       for (const runId of [...awaiting.keys()]) settleUnanswered(runId);
       runs.clear();
+      refusedRuns.clear();
       server.close();
       server.closeAllConnections();
     },
   };
 }
 
-module.exports = { startCoreRelay, allowed, CAMERA_PATH_RE, MCP_PATH };
+module.exports = { startCoreRelay, refusedTokenHint, allowed, CAMERA_PATH_RE, MCP_PATH };

@@ -631,6 +631,8 @@ function shutdown() {
  *   { status: 'error', reason, message, numTurns?, toolsUsed?, costUsd?, tokens?, haTools? }
  *     reason ∈ spawn-failed | aborted | stream-cap | no-result | model-error | max-turns
  *              | auth-expired | tool-name-mismatch
+ *     (ha-token-refused is never the runner's: the server ends a read under it
+ *      when Home Assistant refused the run's token, whatever the run returned)
  *     (no-result and model-error are transient — safe to retry a read;
  *      max-turns is deterministic — retrying only burns tokens, so it is not;
  *      auth-expired is deterministic too: the engine no longer accepts its

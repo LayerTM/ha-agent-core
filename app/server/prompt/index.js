@@ -279,6 +279,8 @@ async function start() {
     actFor: relay ? (runId) => relay.act(runId) : null,
     // Whether Home Assistant accepts the add-on's token on the MCP path.
     haMcpAuth: relay ? () => relay.mcpAuth() : () => null,
+    // Whether Home Assistant refused a run's own token, and with what status.
+    tokenRefusal: relay ? (runId) => relay.tokenRefusal(runId) : () => null,
     // Whether the audit log is still being written, asked at the moment a
     // request is about to act: an action that cannot be recorded is refused.
     auditState: () => auditSink.state(),

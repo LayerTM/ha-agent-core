@@ -15,7 +15,9 @@ const {
   validateIntents, validateMemory, factText, MEMORY_MAX_BYTES, redactDeep, sha12, wholeCharEnd,
 } = require('./security');
 const { adapter, branding } = require('../adapter-contract');
-const { langOf, DEGRADE_TEXT, budgetNotice, targetNotice } = require('./notices');
+const {
+  langOf, DEGRADE_TEXT, budgetNotice, tokenRefusedNotice, targetNotice,
+} = require('./notices');
 const { resolveAnswer, entityIdsIn } = require('./targets');
 const { createHistoryStore } = require('./history');
 
@@ -612,6 +614,9 @@ function createPromptApp({
   // relay's `mcpAuth`): 'ok', 'unauthorized', 'unreachable', or null when
   // nothing has answered yet.
   haMcpAuth = () => null,
+  // The status Home Assistant refused a run's token with, or null (asked while
+  // the run's bearer is still live, i.e. before endRun).
+  tokenRefusal = (_runId) => null,
   model, voiceModel = '', cameraModel = '',
   dailyBudgetUsd = 0,
   coreRelayUrl = '',
@@ -1276,6 +1281,18 @@ function createPromptApp({
           if (Array.isArray(outcome.haTools) && outcome.haTools.length > 0) {
             haToolCatalog = outcome.haTools;
           }
+          // Home Assistant refused this run's token: whatever the model wrote about
+          // it is a guess, and only a person can change the answer — so the run
+          // ends here under its own reason, and is never retried. Its cost stays
+          // billed above.
+          const refusal = tokenRefusal(runId);
+          if (refusal !== null) {
+            outcome = {
+              status: 'error', reason: 'ha-token-refused', message: `Home Assistant refused the token (${refusal})`,
+              refusal, numTurns: outcome.numTurns, toolsUsed: outcome.toolsUsed,
+            };
+            break;
+          }
           const retryable = outcome.status === 'error'
             && (!imagePath || outcome.reason === 'tool-name-mismatch')
             && !(streaming && emittedLen > 0)
@@ -1322,7 +1339,8 @@ function createPromptApp({
       // `reason` is the failed run's reason token, the one chat_health records,
       // so a client can tell a sign-in to renew from a passing failure.
       const degradedBody = (reason) => ({
-        text: DEGRADE_TEXT[language], proposal: null, tools_used: [], truncated: false, degraded: true, reason,
+        text: reason === 'ha-token-refused' ? tokenRefusedNotice(language, outcome.refusal) : DEGRADE_TEXT[language],
+        proposal: null, tools_used: [], truncated: false, degraded: true, reason,
       });
       if (outcome.status === 'ok') authState.record(true);
       else if (outcome.reason === 'auth-expired') authState.record(false);
