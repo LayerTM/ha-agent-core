@@ -18,6 +18,31 @@ uses [Semantic Versioning](https://semver.org/).
   facts' texts are held to `memory_max_bytes` (16 KiB), published in
   `/api/status`, and refused past it with `memory_too_large`. The add-on
   keeps no copy of the facts, and the audit log records only their number.
+- A `write` answer lists every action as `actions`
+  (`{ intent, target, ok, error? }`), and the `prompt[write]` audit line lists
+  how each one ended.
+
+### Changed
+
+- A confirmed `write` no longer runs an agent. The core calls the Home Assistant
+  tool of each intent once per target, with the entity id as its name, in
+  order, attempting every one; each action's outcome is Home Assistant's own
+  answer to it. A write costs nothing and does not need the agent signed in.
+- A `write` in which Home Assistant did not carry out every action answers
+  `502` with the code `action_failed` and the same `actions`, instead of
+  `200`.
+
+### Fixed
+
+- A confirmed write whose action Home Assistant refused was reported as done.
+- A Home Assistant tool that answered with an error no longer marks the MCP
+  server unreachable in `ha_mcp_connected` when the session showed the server
+  connected: the server answered.
+
+### Removed
+
+- The model used for writes: the add-on option that chose one is no longer
+  read. The `auth_expired` error code, which only a write could answer.
 
 ## [0.9.2] - 2026-10-16
 

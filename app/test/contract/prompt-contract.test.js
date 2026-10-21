@@ -31,6 +31,15 @@ const TOKEN = 'contract-token-0123456789abcdef';
 const SECRET = 'neutral-secret-value-9f8e7d6c';
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'core-contract-'));
 const auditLines = [];
+// Every action the core carried out in Home Assistant, and how the next ones
+// answer: a queue of (basename, args) => answer, then {ok: true}.
+const acted = [];
+const actScript = [];
+const actFor = (runId) => async (basename, args) => {
+  acted.push({ runId, basename, args });
+  const next = actScript.shift();
+  return next ? next(basename, args) : { ok: true };
+};
 
 function makeApp(overrides = {}) {
   return createPromptApp({
@@ -45,6 +54,7 @@ function makeApp(overrides = {}) {
     redact: buildRedactor([SECRET]),
     audit: (line) => auditLines.push(line),
     runAgent: scriptedRun,
+    actFor,
     ...overrides,
   });
 }
@@ -79,6 +89,8 @@ beforeEach(() => {
   state.runs.length = 0;
   state.script.length = 0;
   auditLines.length = 0;
+  acted.length = 0;
+  actScript.length = 0;
 });
 
 // Each request comes from its own caller, so the per-caller rate limit (checked
@@ -194,6 +206,7 @@ test('a write whose intents are not acceptable is refused before anything runs',
   const noMcp = await post({ mode: 'write', intents: INTENT }, { url: noMcpBase });
   assert.equal(noMcp.status, 503);
   assert.equal(state.runs.length, 0);
+  assert.equal(acted.length, 0);
   assert.ok(auditLines.some((line) => line.includes('reason=auto-critical') && line.includes('domains=lock')));
   assert.ok(auditLines.some((line) => line.includes('reason=503-no-mcp')));
 });
@@ -217,7 +230,7 @@ test('a write is refused while the audit log cannot be written, and a read is no
       code: 'audit_unavailable',
       audit_error: 'EROFS',
     });
-    assert.equal(state.runs.length, 0, 'the write ran anyway');
+    assert.equal(acted.length, 0, 'the write acted anyway');
     assert.ok(auditLines.some((line) => line.includes('reason=503-no-audit') && line.includes('audit=EROFS')));
 
     // A read does not act on the home, so the home still answers.
@@ -225,11 +238,11 @@ test('a write is refused while the audit log cannot be written, and a read is no
     assert.equal(read.status, 200);
     assert.equal(state.runs.length, 1);
 
-    // The control: with the record kept, the very same write is dispatched.
+    // The control: with the record kept, the very same write acts.
     recording = true;
     const allowed = await post({ mode: 'write', intents: INTENT }, { url });
     assert.equal(allowed.status, 200);
-    assert.equal(state.runs.length, 2);
+    assert.equal(acted.length, 1);
   } finally {
     app.closeAllConnections();
     app.close();
@@ -353,9 +366,9 @@ test('a read dispatches one run with the request and answers with its redacted r
   });
   assert.equal(state.runs.length, 1);
   const run = state.runs[0];
-  assert.equal(run.mode, 'read');
   assert.equal(run.prompt, 'what is on?');
-  assert.deepEqual(run.intents, []);
+  assert.equal(run.mode, undefined, 'an agent is never told it may act');
+  assert.equal(run.intents, undefined);
   assert.equal(run.bin, path.join(TMP, 'no-such-agent'));
   assert.equal(run.settings, 'neutral-settings');
   assert.equal(run.cwd, TMP);
@@ -576,53 +589,60 @@ test('a run that reports a timeout answers 504', async () => {
 
 // --- write ------------------------------------------------------------------------
 
-test('a confirmed write hands exactly the validated intents to one run', async () => {
+test('a confirmed write carries out every action itself, in order, and runs no agent', async () => {
   const intents = [
     { intent: 'HassTurnOff', targets: ['switch.heater'], data: {} },
-    { intent: 'HassTurnOn', targets: ['light.kitchen', 'light.hall'], data: {} },
+    { intent: 'HassLightSet', targets: ['light.kitchen', 'light.hall'], data: { brightness: 40, name: 'not this' } },
   ];
-  state.script.push(() => okOutcome({ text: 'done', toolsUsed: ['ha'] }));
   const res = await post({ mode: 'write', intents, prompt: 'user words are audit-only' });
   assert.equal(res.status, 200);
-  assert.equal((await res.json()).text, 'done');
-  assert.equal(state.runs.length, 1);
-  assert.equal(state.runs[0].mode, 'write');
-  assert.deepEqual(state.runs[0].intents.map((i) => [i.intent, i.targets]), intents.map((i) => [i.intent, i.targets]));
-  assert.equal(state.runs[0].history, undefined);
-  assert.ok(auditLines.some((line) => line.startsWith('prompt[write] ')
-    && line.includes('intents=HassTurnOff(switch.heater),HassTurnOn(light.kitchen+light.hall)')));
+  const actions = [
+    { intent: 'HassTurnOff', target: 'switch.heater', ok: true },
+    { intent: 'HassLightSet', target: 'light.kitchen', ok: true },
+    { intent: 'HassLightSet', target: 'light.hall', ok: true },
+  ];
+  assert.deepEqual(await res.json(), {
+    text: '', proposal: null, tools_used: ['HassTurnOff', 'HassLightSet'], truncated: false, actions,
+  });
+  assert.equal(state.runs.length, 0, 'no agent runs for a write');
+  // Each call names exactly its entity: the target, never a name from the data.
+  assert.deepEqual(acted.map((a) => [a.basename, a.args]), [
+    ['HassTurnOff', { name: 'switch.heater' }],
+    ['HassLightSet', { brightness: 40, name: 'light.kitchen' }],
+    ['HassLightSet', { brightness: 40, name: 'light.hall' }],
+  ]);
+  assert.equal(new Set(acted.map((a) => a.runId)).size, 1, 'one run id names every call of one write');
+  const line = auditLines.find((l) => l.startsWith('prompt[write] '));
+  assert.ok(line, auditLines.join('\n'));
+  assert.ok(line.includes(`run=${acted[0].runId} `), line);
+  assert.ok(line.includes(' status=200 '), line);
+  assert.ok(line.endsWith(' actions=HassTurnOff(switch.heater):ok,HassLightSet(light.kitchen):ok,HassLightSet(light.hall):ok'), line);
+  assert.doesNotMatch(line, /cost=|tokens=/, 'a write spends nothing');
 });
 
-test('a failed write is reported as a failure and never repeated', async () => {
-  for (const reason of ['model-error', 'no-result', 'permission-denied']) {
-    state.runs.length = 0;
-    state.script.push(() => errorOutcome(reason, { toolsUsed: ['ha'] }), () => okOutcome());
-    const res = await post({ mode: 'write', intents: INTENT });
-    assert.equal(res.status, 500, reason);
-    assert.deepEqual(await res.json(), { error: 'internal error', code: 'internal' });
-    assert.equal(state.runs.length, 1, `${reason}: a write ran twice`);
-    state.script.length = 0;
-  }
-  state.runs.length = 0;
-  state.script.push(() => okOutcome({ status: 'timeout', text: '' }), () => okOutcome());
-  const timedOut = await post({ mode: 'write', intents: INTENT });
-  assert.equal(timedOut.status, 504);
-  assert.equal(state.runs.length, 1);
-});
-
-test('the only write retry is a tool-name mismatch before any tool ran', async () => {
-  state.script.push(() => errorOutcome('tool-name-mismatch', { toolsUsed: [], haTools: ['ha_turn_off'] }), () => okOutcome());
-  const res = await post({ mode: 'write', intents: INTENT });
-  assert.equal(res.status, 200);
-  assert.equal(state.runs.length, 2);
-  assert.deepEqual(state.runs[1].haTools, ['ha_turn_off'], 'the retry uses the names the first run reported');
-
-  state.runs.length = 0;
-  state.script.push(() => errorOutcome('tool-name-mismatch', { toolsUsed: ['ha_turn_off'] }), () => okOutcome());
-  const ran = await post({ mode: 'write', intents: INTENT });
-  assert.equal(ran.status, 500);
-  assert.equal(state.runs.length, 1);
-  state.script.length = 0;
+test('a write in which Home Assistant failed an action answers 502 action_failed, after attempting every one', async () => {
+  const intents = [{ intent: 'HassTurnOn', targets: ['light.a', 'light.b', 'light.c'], data: {} }];
+  actScript.push(
+    () => ({ ok: true }),
+    () => ({ ok: false, error: `No entity named light.b (${SECRET})` }),
+    () => { throw new Error('the relay went away'); },
+  );
+  const res = await post({ mode: 'write', intents });
+  assert.equal(res.status, 502);
+  assert.deepEqual(await res.json(), {
+    error: 'Home Assistant did not carry out every action',
+    code: 'action_failed',
+    actions: [
+      { intent: 'HassTurnOn', target: 'light.a', ok: true },
+      { intent: 'HassTurnOn', target: 'light.b', ok: false, error: 'No entity named light.b ([REDACTED])' },
+      { intent: 'HassTurnOn', target: 'light.c', ok: false, error: 'the relay went away' },
+    ],
+  });
+  assert.equal(acted.length, 3, 'every action is attempted, and none twice');
+  assert.equal(state.runs.length, 0);
+  const line = auditLines.find((l) => l.startsWith('prompt[write] '));
+  assert.ok(line.includes(' status=502 '), line);
+  assert.ok(line.endsWith(' actions=HassTurnOn(light.a):ok,HassTurnOn(light.b):failed,HassTurnOn(light.c):failed'), line);
 });
 
 // --- cancellation and concurrency ---------------------------------------------------

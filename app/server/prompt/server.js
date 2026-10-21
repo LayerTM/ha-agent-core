@@ -19,7 +19,8 @@ const { langOf, DEGRADE_TEXT, budgetNotice, targetNotice } = require('./notices'
 const { resolveAnswer, entityIdsIn } = require('./targets');
 const { createHistoryStore } = require('./history');
 
-const { run, TIMEOUT_MS, safeLangTag, wantedHaBasenames } = require('./run');
+const { run, TIMEOUT_MS, safeLangTag, READ_HA_BASENAMES } = require('./run');
+const { execute } = require('./execute');
 
 const MAX_PROMPT_BYTES = 8 * 1024;
 const MAX_BODY_BYTES = 64 * 1024;
@@ -52,9 +53,10 @@ const ERRORS = {
   // user's to fix, ENOSPC is a disk, and `write_unavailable`'s message would
   // have sent all three to the add-on options to look for an HA token.
   audit_unavailable: [503, 'write mode unavailable: the audit log cannot be written, so an action could not be recorded'],
-  // The engine no longer accepts its sign-in. Not `internal`: nothing about the
-  // request or the add-on failed, and only a person signing in again fixes it.
-  auth_expired: [503, 'the agent is no longer signed in: sign in again'],
+  // A confirmed write in which Home Assistant did not carry out every action.
+  // Not a success with a flag: a client that does not read `actions` must show
+  // an error, never "done". `actions` says which ones failed and why.
+  action_failed: [502, 'Home Assistant did not carry out every action'],
   busy: [503, 'busy'],
   usage_unavailable: [503, 'usage unavailable'],
   limits_unavailable: [503, 'account limits unavailable'],
@@ -109,8 +111,8 @@ const CRITICAL_NEVER_AUTO = new Set([
 // the single worst UX (the whole answer just vanishes). These reasons are
 // transient — the identical prompt commonly succeeds on a second run — so a read
 // is retried once before we give up, and even then it DEGRADES to a friendly 200
-// message instead of a bare 500 so the conversation never simply dies. Writes are
-// never retried or degraded: a state-changing action must fail honestly.
+// message instead of a bare 500 so the conversation never simply dies. (A write
+// runs no agent, so none of this applies to it.)
 // `tool-name-mismatch` is raised at init — BEFORE any tool has run — and the
 // outcome carries the tool names HA really publishes, so the retry runs with a
 // corrected allowlist rather than repeating the same doomed call.
@@ -554,16 +556,15 @@ async function fetchSnapshot(entity, relay, workDir, fetchImpl = fetch) {
   return resizeSnapshot(file, workDir);
 }
 
-// The model for one request. Every per-type option is optional and falls back to
+// The model for one read. Every per-type option is optional and falls back to
 // the chat model, so an install that sets none of them runs exactly as before.
 // A voice turn keeps the voice model first (it existed before the others and
-// voice latency is the reason it exists); then a confirmed action, then a camera
-// question; everything else uses the chat model.
-function resolveChatModel({ surface, mode, vision, models }) {
-  const { model = '', voiceModel = '', writeModel = '', cameraModel = '' } = models || {};
+// voice latency is the reason it exists); then a camera question; everything
+// else uses the chat model. A confirmed write runs no model at all.
+function resolveChatModel({ surface, vision, models }) {
+  const { model = '', voiceModel = '', cameraModel = '' } = models || {};
   if (surface === 'voice' && voiceModel) return voiceModel;
-  if (mode === 'write' && writeModel) return writeModel;
-  if (mode !== 'write' && vision && cameraModel) return cameraModel;
+  if (vision && cameraModel) return cameraModel;
   return model;
 }
 
@@ -602,11 +603,14 @@ function createPromptApp({
   // (the relay's `lookup`); null without Home Assistant, and then nothing named
   // can become a proposal.
   lookupFor = null,
+  // How the core carries out a confirmed action in Home Assistant, for one run
+  // (the relay's `act`); null without Home Assistant, and then nothing is written.
+  actFor = null,
   // Whether Home Assistant accepts the add-on's token on the MCP path (the
   // relay's `mcpAuth`): 'ok', 'unauthorized', 'unreachable', or null when
   // nothing has answered yet.
   haMcpAuth = () => null,
-  model, voiceModel = '', writeModel = '', cameraModel = '',
+  model, voiceModel = '', cameraModel = '',
   dailyBudgetUsd = 0,
   coreRelayUrl = '',
   // Credentials as the add-on already holds them, for /api/account_limits only:
@@ -1054,7 +1058,7 @@ function createPromptApp({
           return sendError(res, 'invalid_intents', { message: checked.error, field: 'intents' });
         }
         intents = checked.intents;
-        if (!haConfigured) {
+        if (!haConfigured || !actFor) {
           audit(`prompt[deny] reason=503-no-mcp caller=${caller}`);
           return sendError(res, 'write_unavailable');
         }
@@ -1128,15 +1132,39 @@ function createPromptApp({
       // camera read below — carries it, so a record of either names its run even
       // while another run is in flight.
       const runId = crypto.randomBytes(6).toString('hex');
+
+      // 6w. A confirmed write: the core carries out every action itself and
+      //     answers with what Home Assistant answered to each (execute.js). No
+      //     agent runs, so nothing re-types a target, a write costs nothing, and
+      //     no retry can repeat an action. 200 only when every action was carried
+      //     out; otherwise 502 `action_failed` with the same `actions`.
+      if (mode === 'write') {
+        let actions;
+        try {
+          actions = await execute(intents, actFor(runId), { deadline: started + TIMEOUT_MS });
+        } finally {
+          activeRuns -= 1;
+        }
+        actions = actions.map((a) => (a.ok ? a : { ...a, error: redact(a.error) }));
+        const allOk = actions.every((a) => a.ok);
+        audit(`prompt[write] run=${runId} caller=${caller}${conversationId ? ` conv=${conversationId}` : ''}`
+          + ` lang=${language} surface=${body.surface || '-'} status=${allOk ? 200 : ERRORS.action_failed[0]}`
+          + ` dur=${((Date.now() - started) / 1000).toFixed(1)}s actions=${actions.map((a) => (
+            `${a.intent}(${a.target}):${a.ok ? 'ok' : 'failed'}`)).join(',')}`);
+        if (!allOk) return sendError(res, 'action_failed', { actions });
+        return res.json({
+          text: '', proposal: null, tools_used: [...new Set(actions.map((a) => a.intent))], truncated: false, actions,
+        });
+      }
+
       let runHandle = null;
       let imagePath = null;
       try {
-        // What this request may do, from what it already had to decide: a read
-        // needs live context, a write needs exactly the confirmed intents (the
-        // same function the run itself uses, so the two cannot disagree), and the
-        // only camera it may read is the entity this request named, if any.
+        // What this read may do: live context (the same list the run itself
+        // allowlists, so the two cannot disagree), and the only camera it may
+        // read is the entity this request named, if any.
         runHandle = await beginRun(runId, {
-          basenames: wantedHaBasenames(mode, intents || []),
+          basenames: READ_HA_BASENAMES,
           cameras: imageEntity ? [imageEntity] : [],
         });
         // Fetch the requested camera snapshot (if any) before running Claude; a
@@ -1194,8 +1222,8 @@ function createPromptApp({
       // Resolved ONCE here so the run and the audit can't disagree about which
       // model actually served the turn (empty → Claude default).
       const resolvedModel = resolveChatModel({
-        surface: body.surface, mode, vision: Boolean(imagePath),
-        models: { model, voiceModel, writeModel, cameraModel },
+        surface: body.surface, vision: Boolean(imagePath),
+        models: { model, voiceModel, cameraModel },
       });
       try {
         // 6. Run the agent (stateless, scrubbed, deny-by-default). A read whose run
@@ -1210,16 +1238,14 @@ function createPromptApp({
             bin: claudeBin,
             settings: claudeSettings,
             prompt,
-            mode,
-            intents: intents || [],
             mcpConfigPath: runHandle.mcpConfigPath,
             // A voice turn uses the (optional) faster voice model — spoken replies
             // are short, so lower latency beats raw capability. Falls back to the
-            // normal model when unset. Applies to voice writes too (snappy confirms).
+            // normal model when unset.
             model: resolvedModel,
             cwd: workDir,
             signal: abort.signal,
-            history: (mode === 'read' && conversationId)
+            history: conversationId
               ? conversations.recent(conversationId) : undefined,
             imagePath,
             onText,
@@ -1248,15 +1274,7 @@ function createPromptApp({
           if (Array.isArray(outcome.haTools) && outcome.haTools.length > 0) {
             haToolCatalog = outcome.haTools;
           }
-          // A write normally never retries: a state change that may have already
-          // run must not be repeated. A tool-name mismatch is the one exception
-          // that is provably safe — it is raised at init and the guard below holds
-          // it to a run where NO tool ran at all, so nothing can be repeated.
-          const preExecutionMismatch = outcome.status === 'error'
-            && outcome.reason === 'tool-name-mismatch'
-            && (outcome.toolsUsed || []).length === 0;
           const retryable = outcome.status === 'error'
-            && (mode === 'read' || preExecutionMismatch)
             && !imagePath
             && !(streaming && emittedLen > 0)
             && RETRYABLE_REASONS.has(outcome.reason)
@@ -1281,10 +1299,8 @@ function createPromptApp({
       if (reportsCost()) budget.add(spent);
 
       const seconds = ((Date.now() - started) / 1000).toFixed(1);
-      // Audit the confirmed intents/targets for write, the prompt hash for read.
-      const detail = mode === 'write'
-        ? `intents=${intents.map((i) => `${i.intent}(${i.targets.join('+')})`).join(',')}`
-        : `len=${Buffer.byteLength(prompt, 'utf8')} sha=${sha12(prompt)}`;
+      // The prompt is audited by its length and hash, never its text.
+      const detail = `len=${Buffer.byteLength(prompt, 'utf8')} sha=${sha12(prompt)}`;
       const base = `run=${runId} caller=${caller}${conversationId ? ` conv=${conversationId}` : ''}`
         + `${imageEntity ? ` img=${imageEntity}${imagePath ? '' : '(fetch-failed)'}` : ''}`
         + ` lang=${language} langdir=${safeLangTag(body.language) || '-'}`
@@ -1301,10 +1317,6 @@ function createPromptApp({
         try { res.write(`${JSON.stringify({ type: 'done', ...payload })}\n`); } catch { /* client gone */ }
         try { res.end(); } catch { /* client gone */ }
       };
-      const failStream = (err) => {
-        try { res.write(`${JSON.stringify({ type: 'error', error: ERRORS[err][1], code: err })}\n`); } catch { /* gone */ }
-        try { res.end(); } catch { /* gone */ }
-      };
       // `reason` is the failed run's reason token, the one chat_health records,
       // so a client can tell a sign-in to renew from a passing failure.
       const degradedBody = (reason) => ({
@@ -1315,8 +1327,8 @@ function createPromptApp({
       // How the earlier attempts of a request that still failed ended.
       const retried = retriedFrom.length ? ` retried=${retriedFrom.join('+')}` : '';
       if (outcome.status === 'timeout') {
-        audit(`prompt[${mode}] ${base} status=504${retried} dur=${seconds}s${spendFields(spentTokens, reportsCost() ? spent : null)}`);
-        if (mode === 'read') chatHealth.record(false, 'timeout', false);
+        audit(`prompt[read] ${base} status=504${retried} dur=${seconds}s${spendFields(spentTokens, reportsCost() ? spent : null)}`);
+        chatHealth.record(false, 'timeout', false);
         if (streaming) { streamDone(degradedBody('timeout')); return undefined; }
         return sendError(res, 'timeout');
       }
@@ -1328,26 +1340,19 @@ function createPromptApp({
           + ` tools=${(outcome.toolsUsed || []).map((t) => sanitizeId(t, 64)).join('|') || '-'}`
           + spendFields(spentTokens, reportsCost() ? spent : null);
         console.error(`[prompt] run failed (${caller}): ${reason} — ${redact(outcome.message || 'unknown')}`);
-        // Read: never let the chat die — degrade to a friendly 200 (the run already
-        // retried where it could). Write: fail honestly with 500 — a state-changing
-        // action must NEVER report a fabricated success.
-        if (mode === 'read') {
-          // Health signal reflects the USER's experience, not the raw envelope.
-          // A streaming read that already shipped deltas hit a late/transient error
-          // but the user still received a real answer — an ABSORBED transient
-          // (recovered), NOT user-visible degradation. Only a turn where the user
-          // gets the apology (no content streamed) counts as degraded. (The audit
-          // below still records the raw `200-degraded reason=` either way.)
-          const delivered = streaming && emittedLen > 0;
-          chatHealth.record(delivered, delivered ? null : reason, delivered);
-          audit(`prompt[read] ${base} status=200-degraded ${diag} dur=${seconds}s`);
-          if (streaming) { streamDone(degradedBody(reason)); return undefined; }
-          return res.status(200).json(degradedBody(reason));
-        }
-        const failure = reason === 'auth-expired' ? 'auth_expired' : 'internal';
-        audit(`prompt[write] ${base} status=${ERRORS[failure][0]} ${diag} dur=${seconds}s`);
-        if (streaming) return failStream(failure);
-        return sendError(res, failure);
+        // Never let the chat die — degrade to a friendly 200 (the run already
+        // retried where it could).
+        // Health signal reflects the USER's experience, not the raw envelope.
+        // A streaming read that already shipped deltas hit a late/transient error
+        // but the user still received a real answer — an ABSORBED transient
+        // (recovered), NOT user-visible degradation. Only a turn where the user
+        // gets the apology (no content streamed) counts as degraded. (The audit
+        // below still records the raw `200-degraded reason=` either way.)
+        const delivered = streaming && emittedLen > 0;
+        chatHealth.record(delivered, delivered ? null : reason, delivered);
+        audit(`prompt[read] ${base} status=200-degraded ${diag} dur=${seconds}s`);
+        if (streaming) { streamDone(degradedBody(reason)); return undefined; }
+        return res.status(200).json(degradedBody(reason));
       }
 
       // (Cost was already billed for every attempt above, via budget.add(spent).)
@@ -1356,9 +1361,9 @@ function createPromptApp({
       // saw it connected at init); a read that never touched MCP leaves the last
       // known value — this stops a state-free turn right after a restart from
       // falsely flipping ha_mcp_connected and raising a bogus "MCP unreachable".
-      if (mode === 'read' && outcome.mcpConnected != null) lastMcpConnected = outcome.mcpConnected;
+      if (outcome.mcpConnected != null) lastMcpConnected = outcome.mcpConnected;
       // Health signal: a successful read (recovered=true if a retry rescued it).
-      if (mode === 'read') chatHealth.record(true, null, attempts > 1);
+      chatHealth.record(true, null, attempts > 1);
 
       // 7. Output: redact secrets from EVERY model-shaped field before it
       // leaves the add-on — text, the whole proposal (summary + each intent's
@@ -1368,7 +1373,7 @@ function createPromptApp({
       // answer says which name was not found or not one device.
       let answerText = outcome.text;
       let resolved = { proposal: null, automation: null };
-      if (mode === 'read' && (outcome.proposal || outcome.automation)) {
+      if (outcome.proposal || outcome.automation) {
         let problems;
         try {
           if (!lookupFor) throw new Error('no Home Assistant to look the devices up in');
@@ -1387,8 +1392,8 @@ function createPromptApp({
 
       const text = redact(answerText);
       // Remember this read turn (redacted text only) so the next turn in the same
-      // conversation has context. Write turns are intent-driven and not recorded.
-      if (mode === 'read' && conversationId) {
+      // conversation has context.
+      if (conversationId) {
         conversations.append(conversationId, prompt, text);
       }
       const proposal = resolved.proposal ? redactDeep(resolved.proposal, redact) : null;
@@ -1402,14 +1407,14 @@ function createPromptApp({
       // lengthen a text); ids already bounded to the ones this request sent.
       // Absent unless the request carried `memory` and the message asked to
       // remember or forget, or when nothing is left.
-      const remember = mode === 'read' && memory && outcome.memoryChange
+      const remember = memory && outcome.memoryChange
         ? outcome.memoryChange.remember.map((t) => factText(redact(t))).filter(Boolean) : [];
-      const forget = mode === 'read' && memory && outcome.memoryChange ? outcome.memoryChange.forget : [];
+      const forget = memory && outcome.memoryChange ? outcome.memoryChange.forget : [];
       const memoryChange = remember.length || forget.length ? { remember, forget } : null;
       const toolsUsed = outcome.toolsUsed.map((t) => redact(t));
 
       audit(
-        `prompt[${mode}] ${base} status=200 dur=${seconds}s turns=${outcome.numTurns ?? '?'}`
+        `prompt[read] ${base} status=200 dur=${seconds}s turns=${outcome.numTurns ?? '?'}`
         + ` tools=${outcome.toolsUsed.map((t) => sanitizeId(t, 64)).join('|') || '-'}`
         + ` out=${Buffer.byteLength(text, 'utf8')}B${outcome.truncated ? ' truncated' : ''}`
         + `${attempts > 1 ? ` attempts=${attempts} recovered=${retriedFrom[retriedFrom.length - 1]}` : ''}`

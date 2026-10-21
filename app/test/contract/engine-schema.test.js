@@ -29,7 +29,7 @@ useAdapter(adapter, branding);
 
 const core = require('../../server/prompt/run');
 
-const spec = (mode) => core.launchSpec({ mode, intents: [], haTools: [], stream: false });
+const spec = () => core.launchSpec({ haTools: [], stream: false });
 
 function withClosedSchemas(fn) {
   adapter.descriptor.closedSchemasOnly = true;
@@ -38,17 +38,16 @@ function withClosedSchemas(fn) {
 
 test('an engine that declares nothing is given exactly the schemas it gets today', () => {
   assert.equal(adapter.descriptor.closedSchemasOnly, undefined, 'the fixture declares nothing');
-  assert.equal(spec('read').schema, core.READ_SCHEMA);
-  assert.equal(spec('write').schema, core.WRITE_SCHEMA);
+  assert.equal(spec().schema, core.READ_SCHEMA);
 });
 
 test('an engine that can only take closed schemas is given the closed form of each answer', () => {
   withClosedSchemas(() => {
-    assert.equal(spec('read').schema, core.READ_CLOSED_SCHEMA);
-    assert.equal(spec('write').schema, core.WRITE_CLOSED_SCHEMA);
+    assert.equal(spec().schema, core.READ_CLOSED_SCHEMA);
   });
   assert.equal(core.hasOpenObject(JSON.parse(core.READ_CLOSED_SCHEMA)), false, 'no open object is left');
-  assert.equal(core.WRITE_CLOSED_SCHEMA, core.WRITE_SCHEMA, 'an answer with no open object is unchanged');
+  const closedAnswer = { type: 'object', properties: { text: { type: 'string' } } };
+  assert.deepEqual(core.closedOf(closedAnswer), closedAnswer, 'an answer with no open object is unchanged');
   assert.equal(core.hasOpenObject(core.closedOf(core.READ_ANSWER)), false);
 });
 
@@ -66,13 +65,12 @@ test('the closed form renames exactly the open fields and keeps whether they may
 });
 
 test('declaring it changes nothing else about the run spec but one sentence of the read prompt', () => {
-  const plain = { read: spec('read'), write: spec('write') };
+  const plain = spec();
   withClosedSchemas(() => {
-    const closed = spec('read');
-    assert.deepEqual({ ...closed, schema: null, systemPrompt: null }, { ...plain.read, schema: null, systemPrompt: null });
-    assert.ok(closed.systemPrompt.startsWith(plain.read.systemPrompt));
-    assert.match(closed.systemPrompt.slice(plain.read.systemPrompt.length), /X_json/);
-    assert.equal(spec('write').systemPrompt, plain.write.systemPrompt);
+    const closed = spec();
+    assert.deepEqual({ ...closed, schema: null, systemPrompt: null }, { ...plain, schema: null, systemPrompt: null });
+    assert.ok(closed.systemPrompt.startsWith(plain.systemPrompt));
+    assert.match(closed.systemPrompt.slice(plain.systemPrompt.length), /X_json/);
   });
 });
 
@@ -83,7 +81,7 @@ after(() => fs.rmSync(TMP, { recursive: true, force: true }));
 
 function runWith(structured) {
   state.tapes.push([{ emit: { type: 'result', structured } }]);
-  return core.run({ bin: process.execPath, mode: 'read', prompt: 'hello', intents: [], cwd: TMP });
+  return core.run({ bin: process.execPath, prompt: 'hello', cwd: TMP });
 }
 
 const OPEN = {
