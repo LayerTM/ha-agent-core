@@ -477,7 +477,18 @@ strings and the hooks file defines every variable and function below.
 | `ENGINE_BIN_DIR` | the directory put first on `PATH` |
 | `ENGINE_PROMPT_BIN` | the agent executable of the prompt API (`CLAUDE_PROMPT_BIN`) |
 | `ENGINE_INSTRUCTIONS_SOURCE` | the bundled instructions file |
-| `ENGINE_INSTRUCTIONS_FILE` | its name in `/data/workdir` and, when absent there, `/homeassistant` |
+| `ENGINE_INSTRUCTIONS_FILE` | its name in a working directory: an earlier version's copy in `/homeassistant` is set aside under this name |
+| `ENGINE_USER_INSTRUCTIONS` | the instructions file the engine reads in every working directory, whatever its working directory: its user-level file under `HOME` |
+
+The instructions are written to `ENGINE_USER_INSTRUCTIONS` on every start: the
+bundled file, then a `# User Custom Instructions` block when
+`custom_instructions` is not empty. The file's first line marks it as the
+add-on's; a file there without that line is the user's, is kept byte for byte,
+and the start logs that the add-on's instructions are not delivered while it is
+there. A file the user keeps in `/homeassistant` is never written. One that an
+earlier version copied there (it begins with the bundled file's first line) is
+renamed to `<name>.previous`, unless that name is taken, and the start logs
+what it did.
 
 The functions are called in this order; each may log and export variables.
 

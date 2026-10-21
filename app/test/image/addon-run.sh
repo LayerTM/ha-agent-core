@@ -43,7 +43,7 @@ printf '#!/bin/bash\ncat\n' > /usr/local/bin/agent-ask
 printf '#!/bin/bash\nexit 3\n' > /usr/local/bin/agent-usage
 chmod +x /usr/local/bin/node /usr/local/bin/provision-extras /usr/local/bin/agent-ask /usr/local/bin/agent-usage
 mkdir -p /usr/share/neutral
-printf 'Neutral instructions.\n' > /usr/share/neutral/AGENTS.md
+printf '# Neutral Environment\n\nNeutral instructions.\n' > /usr/share/neutral/AGENTS.md
 
 # engine_hooks [what to leave out]: an ENGINE_* variable, a hook, a branding key,
 # emptyConsoleName, numberConsoleName, or branding.json
@@ -52,6 +52,7 @@ engine_hooks() {
     {
         for kv in 'ENGINE_BIN_DIR=/data/home/.neutral/bin' 'ENGINE_PROMPT_BIN=/data/home/.neutral/bin/neutral' \
             'ENGINE_INSTRUCTIONS_SOURCE=/usr/share/neutral/AGENTS.md' 'ENGINE_INSTRUCTIONS_FILE=AGENTS.md' \
+            'ENGINE_USER_INSTRUCTIONS=/data/home/.neutral/AGENTS.md' \
             'ENGINE_STATE_DIR=/data/home/.neutral' 'ENGINE_SKILLS_DIR=/data/home/.neutral/skills'; do
             [ "${kv%%=*}" = "${omit}" ] || printf "%s='%s'\n" "${kv%%=*}" "${kv#*=}"
         done
@@ -87,6 +88,16 @@ options() {
     printf '%s' "$1" > /tmp/.bashio/addons.self.options.config.cache
     printf '%s' '7.7.7' > /tmp/.bashio/addons.self.version.cache
 }
+
+# reconfigure <json>: new options for the next start; /data and /homeassistant are kept.
+reconfigure() {
+    printf '%s' "$1" > /data/options.json
+    printf '%s' "$1" > /tmp/.bashio/addons.self.options.config.cache
+}
+
+# The file the console reads in every directory, and its first line.
+USER_FILE=/data/home/.neutral/AGENTS.md
+MANAGED='<!-- Written by the add-on at every start from its bundled instructions and the custom_instructions option; edits here are replaced. -->'
 
 run_service() {
     env -i PATH="${BASE_PATH}" HOME=/root NEUTRAL_SETTINGS_VALUE="${SETTINGS_VALUE-}" NEUTRAL_RETENTION_BY="${RETENTION_BY-core}" \
@@ -133,9 +144,10 @@ eq "a user variable keeps everything after the first =" "$(env_of FOO)" bar=baz
 eq "hook exports reach the console" "$(env_of NEUTRAL_env)$(env_of NEUTRAL_auth)$(env_of NEUTRAL_console_env)" 111
 eq "ports and data paths" "$(for k in CLAUDE_CONSOLE_PORT CLAUDE_PROMPT_PORT CLAUDE_PROMPT_DEV CLAUDE_PROMPT_DATA CLAUDE_PROMPT_OPTIONS CLAUDE_PROMPT_USAGE_BIN UPLOAD_DIR UPLOAD_RETENTION_DAYS ADDON_VERSION HA_URL; do env_of "$k"; done | paste -sd' ')" \
     "8099 8126 0 /data /data/options.json /usr/local/bin/ha-usage /data/uploads 3 7.7.7 http://homeassistant:8123"
-eq "the instructions are the bundled file plus the user's block" "$(cat /data/workdir/AGENTS.md)" \
-    "$(printf 'Neutral instructions.\n\n\n---\n\n# User Custom Instructions\n\nBe brief.')"
-eq "they are copied to /homeassistant when absent" "$(cat /homeassistant/AGENTS.md)" "$(cat /data/workdir/AGENTS.md)"
+eq "the console's instructions are the bundled file plus the user's block, marked as the add-on's" "$(cat "${USER_FILE}")" \
+    "$(printf '%s\n# Neutral Environment\n\nNeutral instructions.\n\n\n---\n\n# User Custom Instructions\n\nBe brief.' "${MANAGED}")"
+[ -e /homeassistant/AGENTS.md ] && bad "nothing is written to /homeassistant" || ok "nothing is written to /homeassistant"
+[ -e /data/workdir/AGENTS.md ] && bad "nothing is written to /data/workdir" || ok "nothing is written to /data/workdir"
 [ -f /pins/init-ran ] && ok "init commands run, also after one failed" || bad "init commands run, also after one failed"
 contains "a failed init command is reported by its first word" "${P}/run.out" "Init command failed: false"
 contains "only the first word of an init command is logged" "${P}/run.out" "Running init command: true ..."
@@ -154,6 +166,19 @@ contains "and the core deletes nothing" "${P}/upkeep.out" "sweep_days=0"
 contains "and the log says so once" "${P}/run.out" "Transcripts are kept: this add-on has no transcript_retention_days option"
 lacks "and no sweep period is logged" "${P}/run.out" "Transcripts kept 30 days"
 
+echo "1b. changed custom_instructions reach the console on the next start"
+reconfigure '{"custom_instructions":"Be thorough."}'
+run_service
+eq "a second start: exits 0" "${STATUS}" 0
+contains "the new block is there" "${USER_FILE}" "# User Custom Instructions
+
+Be thorough."
+lacks "the old one is gone" "${USER_FILE}" "Be brief."
+reconfigure '{"custom_instructions":""}'
+run_service
+eq "an emptied option leaves only the bundled file" "$(cat "${USER_FILE}")" \
+    "$(printf '%s\n# Neutral Environment\n\nNeutral instructions.' "${MANAGED}")"
+
 echo "2. auto_update off, an empty prompt setting, existing /homeassistant instructions"
 SETTINGS_VALUE=''
 RETENTION_BY=native
@@ -169,11 +194,41 @@ lacks "engine_update is not" "${P}/hooks.log" "engine_update "
 settings="$(env_of CLAUDE_PROMPT_SETTINGS)"
 eq "an empty prompt setting is passed on as set and empty" "$?:${settings}" "0:"
 eq "the user's /homeassistant file is kept" "$(cat /homeassistant/AGENTS.md)" mine
-eq "no custom block without custom_instructions" "$(cat /data/workdir/AGENTS.md)" "Neutral instructions."
+[ -e /homeassistant/AGENTS.md.previous ] && bad "and not moved" || ok "and not moved"
+eq "no custom block without custom_instructions" "$(cat "${USER_FILE}")" \
+    "$(printf '%s\n# Neutral Environment\n\nNeutral instructions.' "${MANAGED}")"
 contains "an engine that sweeps itself: the upkeep deletes nothing" "${P}/upkeep.out" "sweep_days=0"
 [ -e /data/alerts-state.json ] && bad "alerts off drops the alerts state" || ok "alerts off drops the alerts state"
 
 RETENTION_BY=core
+
+echo "2a. the copies earlier versions left, and a user's own file where the console reads"
+engine_hooks
+options '{"custom_instructions":""}'
+mkdir -p /homeassistant /data/workdir /data/home/.neutral
+printf '# Neutral Environment\n\nOld instructions.\n\n\n---\n\n# User Custom Instructions\n\nOld.\n' > /homeassistant/AGENTS.md
+cp /homeassistant/AGENTS.md /tmp/old-copy
+cp /homeassistant/AGENTS.md /data/workdir/AGENTS.md
+printf '# My own\n\nKeep me.\n' > "${USER_FILE}"
+cp "${USER_FILE}" /tmp/own-file
+run_service
+eq "exits 0" "${STATUS}" 0
+[ -e /homeassistant/AGENTS.md ] && bad "the add-on's old copy in /homeassistant is no longer read" || ok "the add-on's old copy in /homeassistant is no longer read"
+cmp -s /tmp/old-copy /homeassistant/AGENTS.md.previous && ok "it is kept, unchanged, as AGENTS.md.previous" || bad "it is kept, unchanged, as AGENTS.md.previous"
+contains "and the log says where it went" "${P}/run.out" "Moved the add-on's earlier copy of its instructions to /homeassistant/AGENTS.md.previous"
+[ -e /data/workdir/AGENTS.md ] && bad "the copy in /data/workdir is removed" || ok "the copy in /data/workdir is removed"
+cmp -s /tmp/own-file "${USER_FILE}" && ok "a file of the user's own where the console reads is kept byte for byte" || bad "a file of the user's own where the console reads is kept byte for byte"
+contains "and the log says the add-on's instructions are not there" "${P}/run.out" "${USER_FILE} is not the add-on's; it is kept, and the add-on's instructions are not delivered"
+# A second old copy, with the first one still kept: nothing is moved over it.
+printf 'kept before\n' > /homeassistant/AGENTS.md.previous
+cp /tmp/old-copy /homeassistant/AGENTS.md
+rm "${USER_FILE}"
+run_service
+eq "with AGENTS.md.previous taken: exits 0" "${STATUS}" 0
+cmp -s /tmp/old-copy /homeassistant/AGENTS.md && ok "the old copy stays where it is" || bad "the old copy stays where it is"
+eq "and AGENTS.md.previous is not overwritten" "$(cat /homeassistant/AGENTS.md.previous)" "kept before"
+contains "and the log says so" "${P}/run.out" "/homeassistant/AGENTS.md.previous already exists"
+contains "the add-on's file is written again once the user's is gone" "${USER_FILE}" "${MANAGED}"
 
 echo "2b. the retention option and the hook's answer"
 engine_hooks
@@ -201,7 +256,7 @@ contains "and says what it printed" "${P}/run.out" "engine_transcript_retention 
 RETENTION_BY=core
 
 echo "3. an incomplete engine-hooks.sh is refused before anything starts"
-for omit in engine_provision engine_prompt_settings engine_transcript_retention ENGINE_PROMPT_BIN ENGINE_INSTRUCTIONS_FILE productName consoleName emptyConsoleName numberConsoleName branding.json; do
+for omit in engine_provision engine_prompt_settings engine_transcript_retention ENGINE_PROMPT_BIN ENGINE_INSTRUCTIONS_FILE ENGINE_USER_INSTRUCTIONS productName consoleName emptyConsoleName numberConsoleName branding.json; do
     engine_hooks "${omit}"
     options '{}'
     run_service

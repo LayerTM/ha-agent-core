@@ -36,9 +36,18 @@ uses [Semantic Versioning](https://semver.org/).
 - A `write` in which Home Assistant did not carry out every action answers
   `502` with the code `action_failed` and the same `actions`, instead of
   `200`.
+- The engine declares `ENGINE_USER_INSTRUCTIONS`, the instructions file its CLI
+  reads in every working directory; the start script refuses an engine that
+  does not. The instructions are written there on every start instead of into
+  `/data/workdir` and, once, `/homeassistant`. A file of the user's own there
+  is kept and the start says so. A copy an earlier version left in
+  `/homeassistant` is renamed to `<name>.previous`.
 
 ### Fixed
 
+- A changed `custom_instructions` option, and the instructions of a newer
+  add-on, never reached the console after the first start: it read the copy
+  made in `/homeassistant` that first time.
 - A confirmed write whose action Home Assistant refused was reported as done.
 - A Home Assistant tool that answered with an error no longer marks the MCP
   server unreachable in `ha_mcp_connected` when the session showed the server
