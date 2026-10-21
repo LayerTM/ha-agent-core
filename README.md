@@ -478,17 +478,23 @@ strings and the hooks file defines every variable and function below.
 | `ENGINE_PROMPT_BIN` | the agent executable of the prompt API (`CLAUDE_PROMPT_BIN`) |
 | `ENGINE_INSTRUCTIONS_SOURCE` | the bundled instructions file |
 | `ENGINE_INSTRUCTIONS_FILE` | its name in a working directory: an earlier version's copy in `/homeassistant` is set aside under this name |
-| `ENGINE_USER_INSTRUCTIONS` | the instructions file the engine reads in every working directory, whatever its working directory: its user-level file under `HOME` |
+| `ENGINE_USER_INSTRUCTIONS` | the instructions file the engine reads in every working directory: its user-level file under `HOME` |
 
-The instructions are written to `ENGINE_USER_INSTRUCTIONS` on every start: the
-bundled file, then a `# User Custom Instructions` block when
-`custom_instructions` is not empty. The file's first line marks it as the
-add-on's; a file there without that line is the user's, is kept byte for byte,
-and the start logs that the add-on's instructions are not delivered while it is
-there. A file the user keeps in `/homeassistant` is never written. One that an
-earlier version copied there (it begins with the bundled file's first line) is
-renamed to `<name>.previous`, unless that name is taken, and the start logs
-what it did.
+The add-on owns one block of `ENGINE_USER_INSTRUCTIONS`, written on every start:
+the bundled file, then a `# User Custom Instructions` section when
+`custom_instructions` is not empty, between the lines
+`<!-- BEGIN add-on instructions: rewritten at every start; edit custom_instructions instead -->`
+and `<!-- END add-on instructions -->`. The engine's own console writes to the
+same file (its memory commands), so every byte outside the block is the user's
+and is kept: a file without a block gets the block on top, followed by a blank
+line and the user's text unchanged, and the start logs that it did so once; a
+file with a block has exactly the lines from begin to end replaced. A file that
+has a begin line without its end line, an end line without its begin line, or
+either line twice is left untouched and the start logs a warning, since the
+extent of the block cannot be known. A file a user keeps in `/homeassistant` is
+never written. One that an earlier version copied there (it begins with the
+bundled file's first line) is renamed to `<name>.previous`, unless that name is
+taken, and the start logs what it did.
 
 The functions are called in this order; each may log and export variables.
 

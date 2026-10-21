@@ -97,7 +97,9 @@ reconfigure() {
 
 # The file the console reads in every directory, and its first line.
 USER_FILE=/data/home/.neutral/AGENTS.md
-MANAGED='<!-- Written by the add-on at every start from its bundled instructions and the custom_instructions option; edits here are replaced. -->'
+BEGIN='<!-- BEGIN add-on instructions: rewritten at every start; edit custom_instructions instead -->'
+END='<!-- END add-on instructions -->'
+LEGACY='<!-- Written by the add-on at every start from its bundled instructions and the custom_instructions option; edits here are replaced. -->'
 
 run_service() {
     env -i PATH="${BASE_PATH}" HOME=/root NEUTRAL_SETTINGS_VALUE="${SETTINGS_VALUE-}" NEUTRAL_RETENTION_BY="${RETENTION_BY-core}" \
@@ -144,8 +146,8 @@ eq "a user variable keeps everything after the first =" "$(env_of FOO)" bar=baz
 eq "hook exports reach the console" "$(env_of NEUTRAL_env)$(env_of NEUTRAL_auth)$(env_of NEUTRAL_console_env)" 111
 eq "ports and data paths" "$(for k in CLAUDE_CONSOLE_PORT CLAUDE_PROMPT_PORT CLAUDE_PROMPT_DEV CLAUDE_PROMPT_DATA CLAUDE_PROMPT_OPTIONS CLAUDE_PROMPT_USAGE_BIN UPLOAD_DIR UPLOAD_RETENTION_DAYS ADDON_VERSION HA_URL; do env_of "$k"; done | paste -sd' ')" \
     "8099 8126 0 /data /data/options.json /usr/local/bin/ha-usage /data/uploads 3 7.7.7 http://homeassistant:8123"
-eq "the console's instructions are the bundled file plus the user's block, marked as the add-on's" "$(cat "${USER_FILE}")" \
-    "$(printf '%s\n# Neutral Environment\n\nNeutral instructions.\n\n\n---\n\n# User Custom Instructions\n\nBe brief.' "${MANAGED}")"
+eq "the console's instructions are the bundled file plus the user's block, between the add-on's markers" "$(cat "${USER_FILE}")" \
+    "$(printf '%s\n# Neutral Environment\n\nNeutral instructions.\n\n\n---\n\n# User Custom Instructions\n\nBe brief.\n\n%s' "${BEGIN}" "${END}")"
 [ -e /homeassistant/AGENTS.md ] && bad "nothing is written to /homeassistant" || ok "nothing is written to /homeassistant"
 [ -e /data/workdir/AGENTS.md ] && bad "nothing is written to /data/workdir" || ok "nothing is written to /data/workdir"
 [ -f /pins/init-ran ] && ok "init commands run, also after one failed" || bad "init commands run, also after one failed"
@@ -177,7 +179,7 @@ lacks "the old one is gone" "${USER_FILE}" "Be brief."
 reconfigure '{"custom_instructions":""}'
 run_service
 eq "an emptied option leaves only the bundled file" "$(cat "${USER_FILE}")" \
-    "$(printf '%s\n# Neutral Environment\n\nNeutral instructions.' "${MANAGED}")"
+    "$(printf '%s\n# Neutral Environment\n\nNeutral instructions.\n\n%s' "${BEGIN}" "${END}")"
 
 echo "2. auto_update off, an empty prompt setting, existing /homeassistant instructions"
 SETTINGS_VALUE=''
@@ -196,39 +198,86 @@ eq "an empty prompt setting is passed on as set and empty" "$?:${settings}" "0:"
 eq "the user's /homeassistant file is kept" "$(cat /homeassistant/AGENTS.md)" mine
 [ -e /homeassistant/AGENTS.md.previous ] && bad "and not moved" || ok "and not moved"
 eq "no custom block without custom_instructions" "$(cat "${USER_FILE}")" \
-    "$(printf '%s\n# Neutral Environment\n\nNeutral instructions.' "${MANAGED}")"
+    "$(printf '%s\n# Neutral Environment\n\nNeutral instructions.\n\n%s' "${BEGIN}" "${END}")"
 contains "an engine that sweeps itself: the upkeep deletes nothing" "${P}/upkeep.out" "sweep_days=0"
 [ -e /data/alerts-state.json ] && bad "alerts off drops the alerts state" || ok "alerts off drops the alerts state"
 
 RETENTION_BY=core
 
-echo "2a. the copies earlier versions left, and a user's own file where the console reads"
+echo "2a. the copies earlier versions left"
 engine_hooks
 options '{"custom_instructions":""}'
 mkdir -p /homeassistant /data/workdir /data/home/.neutral
+rm -f "${USER_FILE}"
 printf '# Neutral Environment\n\nOld instructions.\n\n\n---\n\n# User Custom Instructions\n\nOld.\n' > /homeassistant/AGENTS.md
 cp /homeassistant/AGENTS.md /tmp/old-copy
 cp /homeassistant/AGENTS.md /data/workdir/AGENTS.md
-printf '# My own\n\nKeep me.\n' > "${USER_FILE}"
-cp "${USER_FILE}" /tmp/own-file
 run_service
 eq "exits 0" "${STATUS}" 0
 [ -e /homeassistant/AGENTS.md ] && bad "the add-on's old copy in /homeassistant is no longer read" || ok "the add-on's old copy in /homeassistant is no longer read"
 cmp -s /tmp/old-copy /homeassistant/AGENTS.md.previous && ok "it is kept, unchanged, as AGENTS.md.previous" || bad "it is kept, unchanged, as AGENTS.md.previous"
 contains "and the log says where it went" "${P}/run.out" "Moved the add-on's earlier copy of its instructions to /homeassistant/AGENTS.md.previous"
 [ -e /data/workdir/AGENTS.md ] && bad "the copy in /data/workdir is removed" || ok "the copy in /data/workdir is removed"
-cmp -s /tmp/own-file "${USER_FILE}" && ok "a file of the user's own where the console reads is kept byte for byte" || bad "a file of the user's own where the console reads is kept byte for byte"
-contains "and the log says the add-on's instructions are not there" "${P}/run.out" "${USER_FILE} is not the add-on's; it is kept, and the add-on's instructions are not delivered"
 # A second old copy, with the first one still kept: nothing is moved over it.
 printf 'kept before\n' > /homeassistant/AGENTS.md.previous
 cp /tmp/old-copy /homeassistant/AGENTS.md
-rm "${USER_FILE}"
 run_service
 eq "with AGENTS.md.previous taken: exits 0" "${STATUS}" 0
 cmp -s /tmp/old-copy /homeassistant/AGENTS.md && ok "the old copy stays where it is" || bad "the old copy stays where it is"
 eq "and AGENTS.md.previous is not overwritten" "$(cat /homeassistant/AGENTS.md.previous)" "kept before"
 contains "and the log says so" "${P}/run.out" "/homeassistant/AGENTS.md.previous already exists"
-contains "the add-on's file is written again once the user's is gone" "${USER_FILE}" "${MANAGED}"
+rm -f /homeassistant/AGENTS.md /homeassistant/AGENTS.md.previous
+
+echo "2c. the instructions are a block in the file the console also writes to"
+options '{"custom_instructions":"First."}'
+# A file of the user's own, without a block: the block goes on top, the text is kept byte for byte.
+mkdir -p "$(dirname "${USER_FILE}")"
+printf '# My own\n\nKeep me.\nno newline at the end' > "${USER_FILE}"
+printf '# My own\n\nKeep me.\nno newline at the end' > /tmp/own-file
+run_service
+eq "a user's file without a block: exits 0" "${STATUS}" 0
+eq "the block is on top" "$(head -n1 "${USER_FILE}")" "${BEGIN}"
+contains "with the bundled text and the option" "${USER_FILE}" "# User Custom Instructions
+
+First."
+eq "the user's text follows it byte for byte" "$(tail -c "$(wc -c < /tmp/own-file)" "${USER_FILE}" | od -An -c | tr -d ' \n')" "$(od -An -c /tmp/own-file | tr -d ' \n')"
+contains "and the start says the block was added" "${P}/run.out" "Added the add-on's instructions block at the top of ${USER_FILE}"
+# The console's /memory appends after the block, the user also writes above it.
+printf '\n- remembered with /memory\n' >> "${USER_FILE}"
+{ printf 'written above\n'; cat "${USER_FILE}"; } > "${USER_FILE}.tmp" && mv "${USER_FILE}.tmp" "${USER_FILE}"
+reconfigure '{"custom_instructions":"Second."}'
+run_service
+contains "a changed option replaces the block's text" "${USER_FILE}" "Second."
+lacks "and nothing of the old one stays" "${USER_FILE}" "First."
+contains "text above the block survives" "${USER_FILE}" "written above"
+contains "a line appended after the block survives" "${USER_FILE}" "- remembered with /memory"
+contains "so does the file's first text" "${USER_FILE}" "Keep me.
+no newline at the end"
+eq "there is still one block" "$(grep -Fxc -- "${BEGIN}" "${USER_FILE}")$(grep -Fxc -- "${END}" "${USER_FILE}")" 11
+reconfigure '{"custom_instructions":"Third."}'
+run_service
+contains "a second start rewrites it again" "${USER_FILE}" "Third."
+contains "and still keeps the line after it" "${USER_FILE}" "- remembered with /memory"
+contains "and the text above" "${USER_FILE}" "written above"
+lacks "no notice once the block exists" "${P}/run.out" "Added the add-on's instructions block"
+# The whole-file form of an unreleased version is wholly the add-on's.
+printf '%s\nold whole file\n' "${LEGACY}" > "${USER_FILE}"
+run_service
+eq "a file with the earlier marker line becomes the block alone" "$(head -n1 "${USER_FILE}")" "${BEGIN}"
+lacks "and its text is gone" "${USER_FILE}" "old whole file"
+# A damaged block is never guessed at.
+for damaged in "${BEGIN}" "${END}" "${BEGIN}
+${BEGIN}
+${END}" "${END}
+${BEGIN}"; do
+    printf 'mine\n%s\nmine too\n' "${damaged}" > "${USER_FILE}"
+    cp "${USER_FILE}" /tmp/damaged
+    run_service
+    eq "a damaged block: exits 0" "${STATUS}" 0
+    cmp -s /tmp/damaged "${USER_FILE}" && ok "and the file is not touched" || bad "and the file is not touched"
+    contains "and the start warns" "${P}/run.out" "the add-on's instructions are not delivered until the extra or missing line is fixed"
+done
+rm -f "${USER_FILE}"
 
 echo "2b. the retention option and the hook's answer"
 engine_hooks

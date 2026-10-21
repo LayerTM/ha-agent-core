@@ -38,10 +38,13 @@ uses [Semantic Versioning](https://semver.org/).
   `200`.
 - The engine declares `ENGINE_USER_INSTRUCTIONS`, the instructions file its CLI
   reads in every working directory; the start script refuses an engine that
-  does not. The instructions are written there on every start instead of into
-  `/data/workdir` and, once, `/homeassistant`. A file of the user's own there
-  is kept and the start says so. A copy an earlier version left in
-  `/homeassistant` is renamed to `<name>.previous`.
+  does not. The instructions are written there on every start, as a block
+  between begin and end marker lines, instead of into `/data/workdir` and, once,
+  `/homeassistant`. Everything outside the block, including what the console
+  saves to the file itself, is kept. A file without a block gets one on top;
+  a damaged block (a missing or repeated marker line) leaves the file as it is
+  and the start says so. A copy an earlier version left in `/homeassistant` is
+  renamed to `<name>.previous`.
 
 ### Fixed
 
