@@ -40,6 +40,7 @@ function makeApp(stateDir) {
     audit: () => {},
     stateDir,
     runAgent: run,
+    actFor: () => async () => ({ ok: true }),
   });
 }
 
@@ -104,12 +105,13 @@ test('every degraded read names its reason, a passing one too', async () => {
   assert.equal(state.runs.length, 2, 'a transient failure is still retried');
 });
 
-test('a write refused for its sign-in answers 503 auth_expired, not internal', async () => {
-  state.script.push(() => errorOutcome('auth-expired'), () => okOutcome());
+test('a confirmed write does not need the agent signed in: no agent runs for it', async () => {
+  state.script.push(() => errorOutcome('auth-expired'));
   const res = await post(base, { mode: 'write', intents: INTENT });
-  assert.equal(res.status, 503);
-  assert.deepEqual(await res.json(), { error: 'the agent is no longer signed in: sign in again', code: 'auth_expired' });
-  assert.equal(state.runs.length, 1);
+  assert.equal(res.status, 200);
+  assert.deepEqual((await res.json()).actions, [{ intent: 'HassTurnOff', target: 'switch.heater', ok: true }]);
+  assert.equal(state.runs.length, 0);
+  state.script.length = 0;
 });
 
 test('status follows the runs: expired after a refusal, ok after the next answer, durable across a restart', async () => {

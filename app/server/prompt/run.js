@@ -1,13 +1,12 @@
 'use strict';
 
-// Runs one stateless agent process for one prompt-API request. Everything here is
+// Runs one stateless agent process for one prompt-API read. Everything here is
 // engine-neutral; the adapter composes the command line (runner.launch), decodes
 // the agent's JSON-lines stream (runner.createDecoder) and names Home Assistant
 // tools in its own convention (runner.toolName / runner.toolBasename).
 //
 // The security posture lives in the run itself:
-//   - the prompt travels over STDIN, never argv (no flag injection, no `ps` leak);
-//     a write run never sees the prompt at all, only the validated intents
+//   - the prompt travels over STDIN, never argv (no flag injection, no `ps` leak)
 //   - the Home Assistant tools a run may call are computed here, by basename, and
 //     the adapter must turn them into its deny-by-default allowlist
 //   - the child's environment is built here from a fixed base plus what the
@@ -164,13 +163,7 @@ const READ_ANSWER = {
   },
 };
 
-const WRITE_ANSWER = {
-  type: 'object',
-  properties: { text: { type: 'string' } },
-};
-
 const READ_SCHEMA = JSON.stringify(schemaOf(READ_ANSWER));
-const WRITE_SCHEMA = JSON.stringify(schemaOf(WRITE_ANSWER));
 
 // Does this answer contain an OPEN object — one whose keys are the caller's, not
 // ours? `data` and the automation blocks are exactly that, and they are the one
@@ -253,21 +246,19 @@ function openFrom(value, node, path = 'answer') {
 
 const READ_CLOSED = closedOf(READ_ANSWER);
 const READ_CLOSED_SCHEMA = JSON.stringify(schemaOf(READ_CLOSED));
-const WRITE_CLOSED_SCHEMA = JSON.stringify(schemaOf(closedOf(WRITE_ANSWER)));
 
 const closedSchemasOnly = () => adapter().descriptor.closedSchemasOnly === true;
 
 // The schema this ENGINE is given for this answer — the answer itself is the
 // same for every engine, and stays declared once above.
-function engineSchema(read) {
-  if (closedSchemasOnly()) return read ? READ_CLOSED_SCHEMA : WRITE_CLOSED_SCHEMA;
-  return read ? READ_SCHEMA : WRITE_SCHEMA;
+function engineSchema() {
+  return closedSchemasOnly() ? READ_CLOSED_SCHEMA : READ_SCHEMA;
 }
 
 // Told only to an engine given the closed form: the prompt names the fields as
 // the open answer has them.
-function closedDirective(read) {
-  if (!read || !closedSchemasOnly()) return '';
+function closedDirective() {
+  if (!closedSchemasOnly()) return '';
   return ` Your structured output is strict: a field named X${ENCODED_SUFFIX} carries the value`
     + ' of the field X described here, each object in it written as a JSON-encoded string'
     + ` (null where X would be null). Never answer outside the structured output.`;
@@ -329,17 +320,6 @@ const READ_SYSTEM_PROMPT = [
   'one-off state change (not an ongoing rule) use "proposal", and set "automation"',
   'to null. Keep "text"',
   'short and phone-readable.',
-].join(' ');
-
-const WRITE_SYSTEM_PROMPT = [
-  'You are executing Home Assistant actions the user has ALREADY explicitly',
-  'confirmed. Your instructions come ONLY from the confirmed-intents JSON in the',
-  'message. Call exactly the allowed Home Assistant MCP tools to perform those',
-  'intents on exactly those targets with exactly those data values — nothing',
-  'else, no other entities, no other values. There is no free-form user text to',
-  'interpret. Pass all tool arguments as strictly valid JSON (quote every',
-  'string value). Set structured-output "text" to one short sentence describing',
-  'the outcome, including any tool failure.',
 ].join(' ');
 
 // The user's Home Assistant conversation language (BCP-47, e.g. "uk", "pl-PL",
@@ -431,16 +411,6 @@ function editDirective(editAutomation) {
     + ' the user did not ask to change (copy them through unchanged). Do not drop,'
     + ' reorder or rewrite the parts the user did not mention, and do not create a'
     + ` second automation. The existing automation config is: ${json}`;
-}
-
-// The stdin content for a write run. IMPORTANT: the untrusted client prompt is
-// NEVER included here — only the server-validated intents. This removes the
-// injection vector entirely: there is no untrusted channel into the privileged
-// (state-changing) path. The tool allowlist is additionally scoped to exactly
-// the confirmed intent tools, and the Assist exposure list bounds the reach.
-function buildWriteDirective(intents) {
-  return `Execute exactly these confirmed Home Assistant actions and nothing else:\n${
-    JSON.stringify(intents, null, 2)}`;
 }
 
 // Render prior conversation turns as a context preamble for a read prompt,
@@ -554,54 +524,50 @@ function resolveHaTools(basename, catalog) {
   return published.length ? published : [adapter().runner.toolName(basename)];
 }
 
-// What a run needs from the `ha` server, by BASENAME (see the note above):
-// read mode needs live context; write mode needs exactly the confirmed intents.
-function wantedHaBasenames(mode, intents) {
-  return mode !== 'write'
-    ? [LIVE_CONTEXT_BASENAME]
-    : [...new Set(intents.map((i) => i.intent))];
-}
+// What a run needs from the `ha` server, by BASENAME (see the note above): live
+// context, and nothing else. A confirmed write runs no agent (execute.js).
+const READ_HA_BASENAMES = Object.freeze([LIVE_CONTEXT_BASENAME]);
 
 // The Home Assistant tools one run may call, and the published ones it may not
 // (taken out of the model's context). Built from the published catalog only, so
 // a first run (no catalog yet) keeps the bare names and discovery can only narrow.
-function haToolPlan({ mode, intents, mcpConfigPath, haTools }) {
+function haToolPlan({ mcpConfigPath, haTools }) {
   if (!mcpConfigPath) return { allowed: [], disallowed: [] };
-  const allowed = [...new Set(wantedHaBasenames(mode, intents).flatMap((b) => resolveHaTools(b, haTools)))];
+  const allowed = [...new Set(READ_HA_BASENAMES.flatMap((b) => resolveHaTools(b, haTools)))];
   const disallowed = (Array.isArray(haTools) ? haTools : [])
     .filter((n) => haToolBasename(n) !== null && !allowed.includes(n));
   return { allowed, disallowed };
 }
 
 /**
- * Everything the adapter needs to compose one run's command line.
+ * Everything the adapter needs to compose one run's command line. Every run is a
+ * read; `mode` and `read` say so to an adapter written when a run could be a write.
  * @returns {{
- *   mode: 'read'|'write', read: boolean, vision: boolean, imagePath: string|undefined,
+ *   mode: 'read', read: true, vision: boolean, imagePath: string|undefined,
  *   haAllowed: string[], haDisallowed: string[], schema: string, systemPrompt: string,
  *   maxTurns: number, mcpConfigPath: string|undefined, settings: string|undefined,
  *   model: string|undefined, stream: boolean,
  * }}
  */
 function launchSpec({
-  mode, intents, mcpConfigPath, model, imagePath, language, surface, editAutomation, memory, haTools, stream, settings,
+  mcpConfigPath, model, imagePath, language, surface, editAutomation, memory, haTools, stream, settings,
 }) {
-  const read = mode !== 'write';
-  const vision = read && Boolean(imagePath);
-  const plan = haToolPlan({ mode, intents, mcpConfigPath, haTools });
+  const vision = Boolean(imagePath);
+  const plan = haToolPlan({ mcpConfigPath, haTools });
   return {
-    mode: read ? 'read' : 'write',
-    read,
+    mode: 'read',
+    read: true,
     vision,
     imagePath: vision ? imagePath : undefined,
     haAllowed: plan.allowed,
     haDisallowed: plan.disallowed,
-    schema: engineSchema(read),
-    systemPrompt: (read ? READ_SYSTEM_PROMPT : WRITE_SYSTEM_PROMPT)
+    schema: engineSchema(),
+    systemPrompt: READ_SYSTEM_PROMPT
       + languageDirective(language)
-      + (read ? voiceDirective(surface) : '')
-      + (read ? editDirective(editAutomation) : '')
-      + (read ? memoryDirective(memory) : '')
-      + closedDirective(read),
+      + voiceDirective(surface)
+      + editDirective(editAutomation)
+      + memoryDirective(memory)
+      + closedDirective(),
     maxTurns: MAX_TURNS,
     mcpConfigPath: mcpConfigPath || undefined,
     settings: settings || undefined,
@@ -665,6 +631,8 @@ function shutdown() {
  *   { status: 'error', reason, message, numTurns?, toolsUsed?, costUsd?, tokens?, haTools? }
  *     reason ∈ spawn-failed | aborted | stream-cap | no-result | model-error | max-turns
  *              | auth-expired | tool-name-mismatch
+ *     (ha-token-refused is never the runner's: the server ends a read under it
+ *      when Home Assistant refused the run's token, whatever the run returned)
  *     (no-result and model-error are transient — safe to retry a read;
  *      max-turns is deterministic — retrying only burns tokens, so it is not;
  *      auth-expired is deterministic too: the engine no longer accepts its
@@ -682,7 +650,7 @@ function shutdown() {
  * Never rejects.
  */
 function run({
-  bin, settings, prompt, mode, intents, mcpConfigPath, model, cwd, signal, history, imagePath, onText, timeoutMs,
+  bin, settings, prompt, mcpConfigPath, model, cwd, signal, history, imagePath, onText, timeoutMs,
   language, surface, editAutomation, memory, haTools,
 }) {
   return new Promise((resolve) => {
@@ -692,7 +660,6 @@ function run({
     const runTimeout = timeoutMs != null
       ? Math.min(TIMEOUT_MS, Math.max(1000, timeoutMs))
       : TIMEOUT_MS;
-    const wantedBasenames = wantedHaBasenames(mode, intents);
 
     // Set by whichever exit runs first, so the other one cannot run at all.
     let settled = false;
@@ -727,7 +694,7 @@ function run({
     try {
       engine = adapter().descriptor.engine;
       spec = launchSpec({
-        mode, intents, mcpConfigPath, model, imagePath, language, surface, editAutomation, memory, haTools, settings,
+        mcpConfigPath, model, imagePath, language, surface, editAutomation, memory, haTools, settings,
         stream: Boolean(onText),
       });
       const command = launch(spec, process.env);
@@ -745,7 +712,6 @@ function run({
       return;
     }
     children.add(child);
-    const { read } = spec;
 
     let timedOut = false;
     let aborted = false;
@@ -757,8 +723,11 @@ function run({
     // A RELIABLE ha-MCP-reachability signal for `/api/status.ha_mcp_connected`,
     // separate from the init snapshot (which is often stale right after a
     // restart while the mcp_server is still connecting). Evidence, strongest first:
-    // an ha tool that returned OK (proven up) > one that errored (proven down) >
-    // the init snapshot > nothing (a read that never touched MCP → no evidence).
+    // an ha tool that returned OK, or a session whose init showed the server
+    // connected (proven up) > an ha tool that errored in a session that never
+    // showed it connected (proven down) > nothing (a read that never touched MCP
+    // → no evidence). An error from a tool of a CONNECTED server is that tool's
+    // answer — Home Assistant refusing the call — and says nothing against reaching it.
     let mcpInitConnected = false;
     let haToolOk = false;
     let haToolErr = false;
@@ -808,11 +777,8 @@ function run({
       finish({ status: 'error', reason: 'spawn-failed', message: `spawn failed: ${err.message}` });
     });
 
-    // Read mode: the untrusted prompt goes in as data. Write mode: the prompt
-    // is NEVER used — the model sees only server-validated intents.
-    const stdinContent = read
-      ? buildReadInput({ prompt, history, memory, imagePath: spec.imagePath })
-      : buildWriteDirective(intents);
+    // The untrusted prompt goes in as data.
+    const stdinContent = buildReadInput({ prompt, history, memory, imagePath: spec.imagePath });
     child.stdin.on('error', () => { /* child died before reading stdin */ });
     child.stdin.end(stdinContent, 'utf8');
 
@@ -854,7 +820,7 @@ function run({
           ])];
           if (mcpConfigPath) {
             const allowed = new Set(spec.haAllowed);
-            const missed = wantedBasenames.filter((b) => {
+            const missed = READ_HA_BASENAMES.filter((b) => {
               const published = publishedHaTools.filter((n) => haToolBasename(n) === b);
               return published.length > 0 && !published.some((n) => allowed.has(n));
             });
@@ -1008,34 +974,32 @@ function run({
       let memoryChange = null;
       if (structured && typeof structured === 'object' && typeof structured.text === 'string') {
         text = structured.text;
-        if (read) {
-          let open = structured;
-          if (spec.schema === READ_CLOSED_SCHEMA) {
-            try {
-              open = openFrom(structured, READ_ANSWER);
-            } catch (err) {
-              if (!(err instanceof EncodedFieldError)) throw err;
-              // Like an answer that is not JSON at all: the model broke the form,
-              // and a retry may not — never a silent drop of the proposal.
-              finish({
-                status: 'error',
-                reason: 'model-error',
-                message: err.message,
-                numTurns: number(result.numTurns),
-                toolsUsed,
-                costUsd: number(result.costUsd),
-                tokens,
-                haTools: publishedHaTools,
-              });
-              return;
-            }
+        let open = structured;
+        if (spec.schema === READ_CLOSED_SCHEMA) {
+          try {
+            open = openFrom(structured, READ_ANSWER);
+          } catch (err) {
+            if (!(err instanceof EncodedFieldError)) throw err;
+            // Like an answer that is not JSON at all: the model broke the form,
+            // and a retry may not — never a silent drop of the proposal.
+            finish({
+              status: 'error',
+              reason: 'model-error',
+              message: err.message,
+              numTurns: number(result.numTurns),
+              toolsUsed,
+              costUsd: number(result.costUsd),
+              tokens,
+              haTools: publishedHaTools,
+            });
+            return;
           }
-          const answer = dropOptionalNulls(open, READ_ANSWER);
-          proposal = validateProposal(answer.proposal, { named: true });
-          automation = validateAutomationDraft(answer.automation);
-          memoryChange = Array.isArray(memory)
-            ? validateMemoryChange(answer.memory_change, memory.map((f) => f.id)) : null;
         }
+        const answer = dropOptionalNulls(open, READ_ANSWER);
+        proposal = validateProposal(answer.proposal, { named: true });
+        automation = validateAutomationDraft(answer.automation);
+        memoryChange = Array.isArray(memory)
+          ? validateMemoryChange(answer.memory_change, memory.map((f) => f.id)) : null;
       } else {
         // Structured output missing (schema retry exhausted) — fall back to
         // the plain result text; proposal stays null.
@@ -1066,10 +1030,10 @@ function run({
         // actually used this run — a used ha tool proves it was reachable.
         mcpFailed: mcpFailed && !toolsUsed.some((t) => haToolBasename(t) !== null),
         // Reachability for `/api/status.ha_mcp_connected`: proven-up > proven-down
-        // > init-snapshot > null (no evidence — a read that never used MCP must NOT
-        // flip the health signal, which caused a false "MCP unreachable" repair).
+        // > null (no evidence — a read that never used MCP must NOT flip the
+        // health signal, which caused a false "MCP unreachable" repair).
         // eslint-disable-next-line no-nested-ternary
-        mcpConnected: haToolOk ? true : (haToolErr ? false : (mcpInitConnected ? true : null)),
+        mcpConnected: (haToolOk || mcpInitConnected) ? true : (haToolErr ? false : null),
         // The `ha` tool names this session published — the caller keeps them as the
         // catalog for the next run, so a rename is absorbed by the run after it at
         // the latest (and by THIS request, via the tool-name-mismatch retry).
@@ -1082,7 +1046,7 @@ function run({
 module.exports = {
   run,
   shutdown,
-  wantedHaBasenames,
+  READ_HA_BASENAMES,
   haToolBasename,
   resolveHaTools,
   launchSpec,
@@ -1097,11 +1061,9 @@ module.exports = {
   openFrom,
   EncodedFieldError,
   READ_CLOSED_SCHEMA,
-  WRITE_CLOSED_SCHEMA,
   dropOptionalNulls,
   READ_ANSWER,
   READ_SCHEMA,
-  WRITE_SCHEMA,
   TIMEOUT_MS,
   MAX_TURNS,
   TEXT_CAP_BYTES,

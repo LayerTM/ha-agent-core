@@ -118,11 +118,10 @@ The icons come from `app/adapter/icons/`, served as `icons/<name>`:
 
 ### Prompt runs
 
-The core runs every prompt-API request itself (`app/server/prompt/run.js`). It
+The core runs every prompt-API read itself (`app/server/prompt/run.js`). It
 decides:
 - the answer schema, the system prompt and its directives;
-- what goes to the agent's stdin: a write run gets the confirmed intents, never
-  the prompt;
+- what goes to the agent's stdin: the prompt, as data;
 - which Home Assistant tools the run may call, by basename, resolved against the
   names the agent last published;
 - the wall-clock limit, the output caps and process-group termination;
@@ -130,8 +129,10 @@ decides:
   adds, never a Supervisor or Home Assistant credential;
 - the validation of the answer.
 
+A confirmed `write` runs no agent; see [Confirmed writes](#confirmed-writes).
+
 The adapter turns the run spec into a command line. Its `launch(spec, { env })`
-receives `mode`, `read`, `vision`, `imagePath`, `haAllowed` and
+receives `mode` (always `"read"`), `read` (always `true`), `vision`, `imagePath`, `haAllowed` and
 `haDisallowed` (the tools the run may and may not call), `schema`,
 `systemPrompt`, `maxTurns`, `mcpConfigPath`, `settings`, `model` and `stream`.
 It must deny every tool call outside `haAllowed` (plus reading `imagePath` for a
@@ -180,8 +181,8 @@ loopback relay (`app/server/prompt/core-relay.js`):
 - the agent gets a relay token of its own run instead, issued when the run starts
   and revoked when it ends, so every request names the run that made it;
 - **that token is what the run may do.** It is minted carrying the Home Assistant
-  tool basenames this request implies — live context for a read, exactly the
-  confirmed intents for a write — and the camera entity the request named, if any.
+  tool basenames a read may call — live context — and the camera entity the
+  request named, if any.
   A token given nothing may call no tool and read no camera: an unset allowlist
   refuses, rather than standing for "no gate". It is not narrowed further than
   that: `tools/list`, `initialize` and `ping` still reach Home Assistant on such a
@@ -308,12 +309,38 @@ attempted and refused, and the log's silence reads as "nothing was done". Which
 events a hook is registered for is the consuming add-on's to write, not the
 core's; the marker is here, the registration is there.
 
+### Confirmed writes
+
+A `write` carries out its confirmed `intents` without an agent
+(`app/server/prompt/execute.js`). Every target of every intent is one call of the
+Home Assistant tool named by the intent, with the entity id as `name` and the
+intent's `data` beside it, made by the relay itself with its own token. The calls
+run in order and every one is attempted, whatever the one before it answered; an
+action not started within the prompt time limit is not started at all. Each call
+is recorded like any other (see the record above), and the `prompt[write]` line
+lists every action and how it ended:
+`actions=HassTurnOn(light.desk):ok,HassTurnOff(switch.fan):failed`.
+
+An action failed when Home Assistant did not answer it, answered with an error,
+or answered with an intent response that is an error or names the target under
+`data.failed`. The answer lists every action as
+`{ "intent", "target", "ok", "error"? }`, in the order they ran, `error` being
+Home Assistant's reason in one line of at most 300 characters:
+- every action carried out: `200` with `actions`, `text` empty,
+  `proposal: null`, `tools_used` (the intents) and `truncated: false`;
+- any action not carried out: `502` with the code `action_failed` and the same
+  `actions`.
+
+A write runs no model, so it costs nothing, needs no agent sign-in and does not
+count against the daily budget.
+
 ### Error answers
 
 Every error answer of the prompt API is `{ "error": "<message>", "code": "<code>" }`, plus:
 - `field`: the request field at fault;
 - `limit_bytes`: the size limit that was exceeded;
-- `domains`: the domains that need a confirmation.
+- `domains`: the domains that need a confirmation;
+- `actions`: every action of a write, with how it ended.
 
 The message is for people and may change. The code is stable:
 
@@ -334,7 +361,7 @@ The message is for people and may change. The code is stable:
 | `rate_limited` | 429 | too many requests; see `Retry-After` |
 | `write_unavailable` | 503 | no Home Assistant MCP configuration for writes |
 | `audit_unavailable` | 503 | the audit log cannot be written, so a write is not allowed to act; the errno is in `audit_error` |
-| `auth_expired` | 503 | the agent is no longer signed in; the write did not run, and nothing will until someone signs in again |
+| `action_failed` | 502 | Home Assistant did not carry out every action of a write; see `actions` |
 | `busy` | 503 | the concurrent-run limit is reached |
 | `timeout` | 504 | the run passed its time limit |
 | `internal` | 500 | the run failed |
@@ -376,8 +403,19 @@ list when it has none yet) so that the first fact can be suggested.
 A `read` whose run fails is not an error answer: it is a `200` (or, streamed, a
 `done` line) with `degraded: true`, a short apology as `text`, and `reason`, the
 failed run's reason. `auth-expired` means the engine refused its sign-in. That
-run is never retried — nothing but signing in again changes the answer — and a
-`write` that meets it is refused with `auth_expired`.
+run is never retried — nothing but signing in again changes the answer.
+`ha-token-refused` means Home Assistant refused the add-on's token (401 or 403)
+during that read — a revoked token, or a non-administrator's while the Model
+Context Protocol Server requires an administrator. Whatever the model wrote is
+not passed through: `text` names both causes and both fixes, in the request's
+language. That run is never retried either; a person has to fix the token. It
+is also `chat_health.last_reason`, and it counts as degraded there even when a
+stream had already sent text. A stream stops sending text once the token is
+refused. When text went out before the run ended degraded, the `done` line
+carries `partial: true`: that text was an incomplete answer, and `done.text`
+(the apology or the notice) is to be shown after it. `partial` is absent
+otherwise. Writes are unaffected: they run no model and
+report Home Assistant's own reason per action.
 
 `GET /api/status` publishes `auth`, whether the agent is still signed in, without
 running it: `{ "state": "ok" | "expired" | "unknown", "since": "<ISO-8601>" | null }`.
@@ -444,7 +482,24 @@ strings and the hooks file defines every variable and function below.
 | `ENGINE_BIN_DIR` | the directory put first on `PATH` |
 | `ENGINE_PROMPT_BIN` | the agent executable of the prompt API (`CLAUDE_PROMPT_BIN`) |
 | `ENGINE_INSTRUCTIONS_SOURCE` | the bundled instructions file |
-| `ENGINE_INSTRUCTIONS_FILE` | its name in `/data/workdir` and, when absent there, `/homeassistant` |
+| `ENGINE_INSTRUCTIONS_FILE` | its name in a working directory: an earlier version's copy in `/homeassistant` is set aside under this name |
+| `ENGINE_USER_INSTRUCTIONS` | the instructions file the engine reads in every working directory: its user-level file under `HOME` |
+
+The add-on owns one block of `ENGINE_USER_INSTRUCTIONS`, written on every start:
+the bundled file, then a `# User Custom Instructions` section when
+`custom_instructions` is not empty, between the lines
+`<!-- BEGIN add-on instructions: rewritten at every start; edit custom_instructions instead -->`
+and `<!-- END add-on instructions -->`. The engine's own console writes to the
+same file (its memory commands), so every byte outside the block is the user's
+and is kept: a file without a block gets the block on top, followed by a blank
+line and the user's text unchanged, and the start logs that it did so once; a
+file with a block has exactly the lines from begin to end replaced. A file that
+has a begin line without its end line, an end line without its begin line, or
+either line twice is left untouched and the start logs a warning, since the
+extent of the block cannot be known. A file a user keeps in `/homeassistant` is
+never written. One that an earlier version copied there (it begins with the
+bundled file's first line) is renamed to `<name>.previous`, unless that name is
+taken, and the start logs what it did.
 
 The functions are called in this order; each may log and export variables.
 

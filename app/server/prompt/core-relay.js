@@ -123,6 +123,46 @@ function describeCall(call, mark) {
   return capBytes(line.replace(CONTROL, ' '), LINE_CAP);
 }
 
+// The text a tool answer carries, its content parts joined.
+function toolText(result) {
+  return Array.isArray(result && result.content)
+    ? result.content.map((c) => (c && typeof c.text === 'string' ? c.text : '')).join('')
+    : '';
+}
+
+// Why Home Assistant's answer to one action is a failure, or null when it is
+// not. An intent tool answers with the intent's response as JSON text. An
+// intent that raised is marked isError and carries the reason, as text or as
+// {error}; one that ran but could not act on a target names it in
+// `data.failed`; one that could not run at all is `response_type: "error"`.
+function actionError({ status, json }) {
+  if (status !== 200 || !json || typeof json !== 'object') return `Home Assistant answered ${status}`;
+  if (json.error) {
+    return json.error && typeof json.error.message === 'string'
+      ? json.error.message : 'Home Assistant answered with an error';
+  }
+  const { result } = json;
+  if (!result || typeof result !== 'object') return 'Home Assistant answered without a result';
+  const text = toolText(result);
+  let answer;
+  try { answer = JSON.parse(text); } catch { answer = null; }
+  if (result.isError === true) {
+    if (answer && typeof answer === 'object' && typeof answer.error === 'string') return answer.error;
+    return text || 'Home Assistant answered with an error';
+  }
+  if (!answer || typeof answer !== 'object') return null;
+  if (answer.response_type === 'error') {
+    const speech = answer.speech && answer.speech.plain && answer.speech.plain.speech;
+    return typeof speech === 'string' && speech ? speech : 'Home Assistant could not carry out the intent';
+  }
+  const failed = answer.data && Array.isArray(answer.data.failed) ? answer.data.failed : [];
+  if (failed.length > 0) {
+    const names = failed.map((t) => (t && typeof t.name === 'string' ? t.name : '')).filter(Boolean);
+    return `Home Assistant could not act on ${names.length > 0 ? names.join(', ') : 'the target'}`;
+  }
+  return null;
+}
+
 // Headers copied client -> Core. `authorization` is deliberately absent: it is
 // replaced, never forwarded. Neither are `content-length` and
 // `transfer-encoding`: the relay sets the length of the one body it sends. The
@@ -202,11 +242,13 @@ function deny(res, status, message) {
  *   revoke: (token: string) => void, close: () => void,
  *   mcpAuth: () => null|'ok'|'unauthorized'|'unreachable',
  *   probeAuth: () => Promise<null|'ok'|'unauthorized'|'unreachable'>,
+ *   tokenRefusal: (runId: string) => null|number,
  *   lookup: (runId: string) => {
  *     live: (name: string) => Promise<{ok: boolean, text: string}>,
  *     liveDomain: (domain: string) => Promise<{ok: boolean, text: string}>,
  *     states: () => Promise<Array<{entity_id: string, attributes?: object}>>,
  *   },
+ *   act: (runId: string) => (basename: string, args: object) => Promise<{ok: boolean, error?: string}>,
  * }>}
  *
  * The bearer is per RUN, not per boot: `issue(runId)` mints one and `revoke`
@@ -231,6 +273,12 @@ async function startCoreRelay({
   // one may say 'unreachable' only if none arrived while it was in flight:
   // otherwise a late failure of the probe would overwrite a newer, real answer.
   let tokenAnswers = 0;
+  // The runs whose bearer Home Assistant refused, and with what status. Kept per
+  // run because the bearer is per run: the server asks about the run it is
+  // ending, and another run's refusal says nothing about it. The mark ends with
+  // the run (revoke) so it can never outlive the bearer it describes.
+  /** @type {Map<string, number>} */
+  const refusedRuns = new Map();
   function noteMcpAuth(next, why) {
     if (next === mcpAuth) return;
     mcpAuth = next;
@@ -397,6 +445,12 @@ async function startCoreRelay({
       },
       (upRes) => {
         if (pathname === MCP_PATH) observeMcpAnswer(upRes.statusCode, `${req.method} ${pathname}`);
+        // Only while the run is still live: an answer that lands after its bearer
+        // was revoked would leave a mark nothing ever clears.
+        if (authFromStatus(upRes.statusCode) === 'unauthorized'
+          && [...runs.values()].some((entry) => entry.runId === runId)) {
+          refusedRuns.set(runId, upRes.statusCode);
+        }
         const redirected = upRes.statusCode >= 300 && upRes.statusCode < 400;
         if (CAMERA_PATH_RE.test(pathname)) {
           // A camera read is a Home Assistant action too, and it is not a tool
@@ -547,6 +601,40 @@ async function startCoreRelay({
     });
   }
 
+  // The core's own MCP conversation with Home Assistant, for one lookup or one
+  // write: the tool list is asked for once, and a basename resolves to the name
+  // Home Assistant publishes it under (it renames and namespaces them).
+  // `request` resolves to the raw {status, json}; `callTool` to the result of an
+  // answer that is one, and rejects otherwise.
+  function coreTools() {
+    let rpcId = 0;
+    let tools = null;
+    function request(method, params) {
+      rpcId += 1;
+      return coreRequest('POST', MCP_PATH, { jsonrpc: '2.0', id: rpcId, method, params });
+    }
+    async function rpc(method, params) {
+      const { status, json } = await request(method, params);
+      if (status !== 200 || !json || json.error || !json.result) {
+        throw new Error(`Home Assistant answered ${method} with ${status}`);
+      }
+      return json.result;
+    }
+    return {
+      request,
+      async publishedName(basename) {
+        if (tools === null) {
+          const listed = await rpc('tools/list', {});
+          tools = Array.isArray(listed.tools) ? listed.tools : [];
+        }
+        const published = tools.filter((t) => t && haBasename(t.name) === basename);
+        if (published.length === 0) throw new Error(`Home Assistant publishes no ${basename} tool`);
+        return published[0].name;
+      },
+      callTool: (name, args) => rpc('tools/call', { name, arguments: args }),
+    };
+  }
+
   // The relay's own probe of the token. One at a time: a probe asked for while
   // one is in flight gets that one's answer. An answer that says nothing about
   // the token (no answer, a redirect, a 404 because the Model Context Protocol
@@ -619,41 +707,24 @@ async function startCoreRelay({
       const entry = runs.get(token);
       runs.delete(token);
       if (entry === undefined) return;
+      refusedRuns.delete(entry.runId);
       settleUnanswered(entry.runId);
     },
     // What the core asks Home Assistant to learn which entity a device the model
     // named is (targets.js): the live-context tool by name, and the states list.
     // Each tool call is recorded against the run, marked as a lookup.
     lookup(runId) {
-      let toolName = null;
-      let rpcId = 0;
-      async function rpc(method, params) {
-        rpcId += 1;
-        const { status, json } = await coreRequest('POST', MCP_PATH, { jsonrpc: '2.0', id: rpcId, method, params });
-        if (status !== 200 || !json || json.error || !json.result) {
-          throw new Error(`Home Assistant answered ${method} with ${status}`);
-        }
-        return json.result;
-      }
+      const ha = coreTools();
       async function callLive(args) {
-        if (toolName === null) {
-          const listed = await rpc('tools/list', {});
-          const tools = Array.isArray(listed.tools) ? listed.tools : [];
-          const published = tools.filter((t) => t && haBasename(t.name) === LIVE_CONTEXT);
-          if (published.length === 0) throw new Error(`Home Assistant publishes no ${LIVE_CONTEXT} tool`);
-          toolName = published[0].name;
-        }
-        const call = { name: toolName, args, runId };
+        const call = { name: await ha.publishedName(LIVE_CONTEXT), args, runId };
         let result;
         try {
-          result = await rpc('tools/call', { name: toolName, arguments: args });
+          result = await ha.callTool(call.name, args);
         } catch (err) {
           record(describeCall(call, ' (lookup, failed)'));
           throw err;
         }
-        const text = Array.isArray(result.content)
-          ? result.content.map((c) => (c && typeof c.text === 'string' ? c.text : '')).join('')
-          : '';
+        const text = toolText(result);
         let answer;
         try { answer = JSON.parse(text); } catch { answer = null; }
         // Home Assistant before 2026.10 answered {success: true, result}; from
@@ -674,8 +745,39 @@ async function startCoreRelay({
         },
       };
     },
+    // How the core carries out one confirmed action itself (execute.js): the
+    // published tool for `basename`, called with `args`, and Home Assistant's own
+    // answer read once — {ok: true}, or {ok: false, error} saying why. Each call
+    // is recorded against the run like any other: `(failed)` when Home Assistant
+    // answered with a failure, `(no answer)` when it did not answer at all.
+    act(runId) {
+      const ha = coreTools();
+      return async function call(basename, args) {
+        let name;
+        try {
+          name = await ha.publishedName(basename);
+        } catch (err) {
+          return { ok: false, error: err.message };
+        }
+        const recorded = { name, args, runId };
+        let answered;
+        try {
+          answered = await ha.request('tools/call', { name, arguments: args });
+        } catch (err) {
+          record(describeCall(recorded, ' (no answer)'));
+          return { ok: false, error: `Home Assistant did not answer: ${err.message}` };
+        }
+        const error = actionError(answered);
+        record(describeCall(recorded, error === null ? '' : ' (failed)'));
+        return error === null ? { ok: true } : { ok: false, error };
+      };
+    },
     // Whether Home Assistant accepts the token on the MCP path (see mcpAuth).
     mcpAuth: () => mcpAuth,
+    // The status (401 or 403) Home Assistant answered this run's own requests
+    // with, or null if it has not refused them: what a run is told when the
+    // token it rode on was the reason it could not read the house.
+    tokenRefusal: (runId) => refusedRuns.get(runId) ?? null,
     probeAuth,
     close() {
       if (probeTimer) clearInterval(probeTimer);
@@ -683,10 +785,11 @@ async function startCoreRelay({
       // tokens go. The keys are copied because settling deletes as it goes.
       for (const runId of [...awaiting.keys()]) settleUnanswered(runId);
       runs.clear();
+      refusedRuns.clear();
       server.close();
       server.closeAllConnections();
     },
   };
 }
 
-module.exports = { startCoreRelay, allowed, CAMERA_PATH_RE, MCP_PATH };
+module.exports = { startCoreRelay, refusedTokenHint, allowed, CAMERA_PATH_RE, MCP_PATH };

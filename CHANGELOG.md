@@ -6,6 +6,8 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-22
+
 ### Added
 
 - `POST /api/prompt` accepts `memory` on a read: facts the user chose to keep
@@ -16,6 +18,52 @@ uses [Semantic Versioning](https://semver.org/).
   facts' texts are held to `memory_max_bytes` (16 KiB), published in
   `/api/status`, and refused past it with `memory_too_large`. The add-on
   keeps no copy of the facts, and the audit log records only their number.
+- A `write` answer lists every action as `actions`
+  (`{ intent, target, ok, error? }`), and the `prompt[write]` audit line lists
+  how each one ended.
+
+### Changed
+
+- A read during which Home Assistant refuses the add-on's token (401 or 403)
+  ends as a degraded read with the reason `ha-token-refused` instead of the
+  model's guess. The answer names both causes (a revoked token, or a
+  non-administrator's while the Model Context Protocol Server requires an
+  administrator) and both fixes, and the read is not retried. On a streamed
+  read the text stops at the refusal, the turn counts as degraded in
+  `chat_health` even when text had been sent, and the `done` line of any
+  degraded read that had sent text carries `partial: true` so a client shows
+  `text` after it.
+- A confirmed `write` no longer runs an agent. The core calls the Home Assistant
+  tool of each intent once per target, with the entity id as its name, in
+  order, attempting every one; each action's outcome is Home Assistant's own
+  answer to it. A write costs nothing and does not need the agent signed in.
+- A `write` in which Home Assistant did not carry out every action answers
+  `502` with the code `action_failed` and the same `actions`, instead of
+  `200`.
+- The engine declares `ENGINE_USER_INSTRUCTIONS`, the instructions file its CLI
+  reads in every working directory; the start script refuses an engine that
+  does not. The instructions are written there on every start, as a block
+  between begin and end marker lines, instead of into `/data/workdir` and, once,
+  `/homeassistant`. Everything outside the block, including what the console
+  saves to the file itself, is kept. A file without a block gets one on top;
+  a damaged block (a missing or repeated marker line) leaves the file as it is
+  and the start says so. A copy an earlier version left in `/homeassistant` is
+  renamed to `<name>.previous`.
+
+### Fixed
+
+- A changed `custom_instructions` option, and the instructions of a newer
+  add-on, never reached the console after the first start: it read the copy
+  made in `/homeassistant` that first time.
+- A confirmed write whose action Home Assistant refused was reported as done.
+- A Home Assistant tool that answered with an error no longer marks the MCP
+  server unreachable in `ha_mcp_connected` when the session showed the server
+  connected: the server answered.
+
+### Removed
+
+- The model used for writes: the add-on option that chose one is no longer
+  read. The `auth_expired` error code, which only a write could answer.
 
 ## [0.9.2] - 2026-10-16
 

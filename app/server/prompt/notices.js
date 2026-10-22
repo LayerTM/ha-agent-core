@@ -1,5 +1,7 @@
 'use strict';
 
+const { refusedTokenHint } = require('./core-relay');
+
 // The few user-facing strings the SERVER authors (the model otherwise answers in
 // the user's own language). Localized to the request `language` — the integration
 // forwards the HA conversation language, e.g. "uk" / "en" / "pl-PL". An absent or
@@ -34,6 +36,21 @@ const budgetNotice = (lang, limit, agentName) => ({
   pt: `Atingi o orçamento de uso do ${agentName} de hoje ($${limit}), por isso estou pausado até amanhã. Podes aumentar "Chat daily budget (USD)" nas opções do add-on.`,
   nl: `Ik heb het ${agentName}-gebruiksbudget van vandaag ($${limit}) bereikt en pauzeer tot morgen. Je kunt "Chat daily budget (USD)" in de add-on-opties verhogen.`,
 }[lang]);
+
+// What a read says when Home Assistant refused the add-on's token during it. The
+// English is core-relay's own wording (the line the log carries), so the log and
+// the chat name the same two causes and the same two fixes.
+const tokenRefusedNotice = (lang, status) => ({
+  en: `Home Assistant ${refusedTokenHint(status)}.`,
+  uk: `Home Assistant відхилив токен додатка (${status}) — перевір токен у конфігурації додатка і чи його користувач є адміністратором, якщо сервер Model Context Protocol цього вимагає.`,
+  pl: `Home Assistant odrzucił token dodatku (${status}) — sprawdź token w konfiguracji dodatku oraz czy jego użytkownik jest administratorem, jeśli Model Context Protocol Server tego wymaga.`,
+  de: `Home Assistant hat das Token des Add-ons abgelehnt (${status}) — prüfe das Token in der Add-on-Konfiguration und ob sein Benutzer Administrator ist, falls der Model Context Protocol Server das verlangt.`,
+  fr: `Home Assistant a refusé le jeton du module (${status}) — vérifie le jeton dans la configuration du module, et que son utilisateur est administrateur si le serveur Model Context Protocol l'exige.`,
+  es: `Home Assistant rechazó el token del add-on (${status}) — revisa el token en la configuración del add-on y que su usuario sea administrador si el servidor Model Context Protocol lo exige.`,
+  it: `Home Assistant ha rifiutato il token dell'add-on (${status}) — controlla il token nella configurazione dell'add-on e che il suo utente sia amministratore se il server Model Context Protocol lo richiede.`,
+  pt: `O Home Assistant recusou o token do add-on (${status}) — verifica o token na configuração do add-on e se o seu utilizador é administrador, caso o servidor Model Context Protocol o exija.`,
+  nl: `Home Assistant heeft het token van de add-on geweigerd (${status}) — controleer het token in de add-on-configuratie en of de gebruiker beheerder is, als de Model Context Protocol Server dat vereist.`,
+}[lang] || tokenRefusedNotice('en', status));
 
 // Why a device the model named did not become a proposal (targets.js), one
 // sentence per name. Quoted names are the model's own words for the device.
@@ -100,4 +117,4 @@ const targetNotice = (lang, problems) => {
   )).join(' ');
 };
 
-module.exports = { DEGRADE_TEXT, SUPPORTED_LANGS, langOf, budgetNotice, targetNotice, TARGET_TEXT };
+module.exports = { DEGRADE_TEXT, SUPPORTED_LANGS, langOf, budgetNotice, tokenRefusedNotice, targetNotice, TARGET_TEXT };

@@ -31,6 +31,15 @@ const TOKEN = 'contract-token-0123456789abcdef';
 const SECRET = 'neutral-secret-value-9f8e7d6c';
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'core-contract-'));
 const auditLines = [];
+// Every action the core carried out in Home Assistant, and how the next ones
+// answer: a queue of (basename, args) => answer, then {ok: true}.
+const acted = [];
+const actScript = [];
+const actFor = (runId) => async (basename, args) => {
+  acted.push({ runId, basename, args });
+  const next = actScript.shift();
+  return next ? next(basename, args) : { ok: true };
+};
 
 function makeApp(overrides = {}) {
   return createPromptApp({
@@ -45,6 +54,7 @@ function makeApp(overrides = {}) {
     redact: buildRedactor([SECRET]),
     audit: (line) => auditLines.push(line),
     runAgent: scriptedRun,
+    actFor,
     ...overrides,
   });
 }
@@ -79,6 +89,8 @@ beforeEach(() => {
   state.runs.length = 0;
   state.script.length = 0;
   auditLines.length = 0;
+  acted.length = 0;
+  actScript.length = 0;
 });
 
 // Each request comes from its own caller, so the per-caller rate limit (checked
@@ -194,6 +206,7 @@ test('a write whose intents are not acceptable is refused before anything runs',
   const noMcp = await post({ mode: 'write', intents: INTENT }, { url: noMcpBase });
   assert.equal(noMcp.status, 503);
   assert.equal(state.runs.length, 0);
+  assert.equal(acted.length, 0);
   assert.ok(auditLines.some((line) => line.includes('reason=auto-critical') && line.includes('domains=lock')));
   assert.ok(auditLines.some((line) => line.includes('reason=503-no-mcp')));
 });
@@ -217,7 +230,7 @@ test('a write is refused while the audit log cannot be written, and a read is no
       code: 'audit_unavailable',
       audit_error: 'EROFS',
     });
-    assert.equal(state.runs.length, 0, 'the write ran anyway');
+    assert.equal(acted.length, 0, 'the write acted anyway');
     assert.ok(auditLines.some((line) => line.includes('reason=503-no-audit') && line.includes('audit=EROFS')));
 
     // A read does not act on the home, so the home still answers.
@@ -225,11 +238,11 @@ test('a write is refused while the audit log cannot be written, and a read is no
     assert.equal(read.status, 200);
     assert.equal(state.runs.length, 1);
 
-    // The control: with the record kept, the very same write is dispatched.
+    // The control: with the record kept, the very same write acts.
     recording = true;
     const allowed = await post({ mode: 'write', intents: INTENT }, { url });
     assert.equal(allowed.status, 200);
-    assert.equal(state.runs.length, 2);
+    assert.equal(acted.length, 1);
   } finally {
     app.closeAllConnections();
     app.close();
@@ -353,9 +366,9 @@ test('a read dispatches one run with the request and answers with its redacted r
   });
   assert.equal(state.runs.length, 1);
   const run = state.runs[0];
-  assert.equal(run.mode, 'read');
   assert.equal(run.prompt, 'what is on?');
-  assert.deepEqual(run.intents, []);
+  assert.equal(run.mode, undefined, 'an agent is never told it may act');
+  assert.equal(run.intents, undefined);
   assert.equal(run.bin, path.join(TMP, 'no-such-agent'));
   assert.equal(run.settings, 'neutral-settings');
   assert.equal(run.cwd, TMP);
@@ -510,6 +523,45 @@ test('a read that fails transiently is retried within the remaining time, once',
   assert.equal(state.runs.length, 2, 'no more attempts than the configured maximum');
 });
 
+test('a camera read killed at init for its tool names is retried once; any other failure of it is not', async () => {
+  const http = require('node:http');
+  const relay = http.createServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'image/jpeg' });
+    res.end(Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
+  });
+  await new Promise((resolve) => relay.listen(0, '127.0.0.1', resolve));
+  const camServer = await listen(makeApp({
+    coreRelayUrl: `http://127.0.0.1:${relay.address().port}`,
+    beginRun: async () => ({ token: 'relay-token', mcpConfigPath: null, dir: null }),
+  }));
+  const url = `http://127.0.0.1:${camServer.address().port}`;
+  try {
+    state.script.push(
+      () => errorOutcome('tool-name-mismatch', { toolsUsed: [], haTools: ['ha_GetLiveContext'] }),
+      () => okOutcome({ text: 'a person at the door' }),
+    );
+    const res = await post({ prompt: 'who is at the door?', image_entity: 'camera.door' }, { url });
+    assert.equal(res.status, 200);
+    assert.equal((await res.json()).text, 'a person at the door');
+    assert.equal(state.runs.length, 2);
+    assert.ok(state.runs[0].imagePath && state.runs[1].imagePath, 'both attempts carry the snapshot');
+    assert.deepEqual(state.runs[1].haTools, ['ha_GetLiveContext'], 'the retry runs with the learned catalog');
+    assert.ok(auditLines.some((line) => line.includes('attempts=2 recovered=tool-name-mismatch')));
+
+    state.runs.length = 0;
+    state.script.push(() => errorOutcome('model-error'), () => okOutcome());
+    const failed = await post({ prompt: 'who is at the door?', image_entity: 'camera.door' }, { url });
+    assert.equal(failed.status, 200);
+    assert.equal((await failed.json()).degraded, true);
+    assert.equal(state.runs.length, 1, 'a camera read that failed after the model saw the image is not repeated');
+  } finally {
+    camServer.closeAllConnections();
+    camServer.close();
+    relay.closeAllConnections();
+    relay.close();
+  }
+});
+
 test('a read that still fails names how every earlier attempt ended', async () => {
   const lineOf = () => auditLines.filter((l) => l.startsWith('prompt[read]')).at(-1);
   auditLines.length = 0;
@@ -576,53 +628,60 @@ test('a run that reports a timeout answers 504', async () => {
 
 // --- write ------------------------------------------------------------------------
 
-test('a confirmed write hands exactly the validated intents to one run', async () => {
+test('a confirmed write carries out every action itself, in order, and runs no agent', async () => {
   const intents = [
     { intent: 'HassTurnOff', targets: ['switch.heater'], data: {} },
-    { intent: 'HassTurnOn', targets: ['light.kitchen', 'light.hall'], data: {} },
+    { intent: 'HassLightSet', targets: ['light.kitchen', 'light.hall'], data: { brightness: 40, name: 'not this' } },
   ];
-  state.script.push(() => okOutcome({ text: 'done', toolsUsed: ['ha'] }));
   const res = await post({ mode: 'write', intents, prompt: 'user words are audit-only' });
   assert.equal(res.status, 200);
-  assert.equal((await res.json()).text, 'done');
-  assert.equal(state.runs.length, 1);
-  assert.equal(state.runs[0].mode, 'write');
-  assert.deepEqual(state.runs[0].intents.map((i) => [i.intent, i.targets]), intents.map((i) => [i.intent, i.targets]));
-  assert.equal(state.runs[0].history, undefined);
-  assert.ok(auditLines.some((line) => line.startsWith('prompt[write] ')
-    && line.includes('intents=HassTurnOff(switch.heater),HassTurnOn(light.kitchen+light.hall)')));
+  const actions = [
+    { intent: 'HassTurnOff', target: 'switch.heater', ok: true },
+    { intent: 'HassLightSet', target: 'light.kitchen', ok: true },
+    { intent: 'HassLightSet', target: 'light.hall', ok: true },
+  ];
+  assert.deepEqual(await res.json(), {
+    text: '', proposal: null, tools_used: ['HassTurnOff', 'HassLightSet'], truncated: false, actions,
+  });
+  assert.equal(state.runs.length, 0, 'no agent runs for a write');
+  // Each call names exactly its entity: the target, never a name from the data.
+  assert.deepEqual(acted.map((a) => [a.basename, a.args]), [
+    ['HassTurnOff', { name: 'switch.heater' }],
+    ['HassLightSet', { brightness: 40, name: 'light.kitchen' }],
+    ['HassLightSet', { brightness: 40, name: 'light.hall' }],
+  ]);
+  assert.equal(new Set(acted.map((a) => a.runId)).size, 1, 'one run id names every call of one write');
+  const line = auditLines.find((l) => l.startsWith('prompt[write] '));
+  assert.ok(line, auditLines.join('\n'));
+  assert.ok(line.includes(`run=${acted[0].runId} `), line);
+  assert.ok(line.includes(' status=200 '), line);
+  assert.ok(line.endsWith(' actions=HassTurnOff(switch.heater):ok,HassLightSet(light.kitchen):ok,HassLightSet(light.hall):ok'), line);
+  assert.doesNotMatch(line, /cost=|tokens=/, 'a write spends nothing');
 });
 
-test('a failed write is reported as a failure and never repeated', async () => {
-  for (const reason of ['model-error', 'no-result', 'permission-denied']) {
-    state.runs.length = 0;
-    state.script.push(() => errorOutcome(reason, { toolsUsed: ['ha'] }), () => okOutcome());
-    const res = await post({ mode: 'write', intents: INTENT });
-    assert.equal(res.status, 500, reason);
-    assert.deepEqual(await res.json(), { error: 'internal error', code: 'internal' });
-    assert.equal(state.runs.length, 1, `${reason}: a write ran twice`);
-    state.script.length = 0;
-  }
-  state.runs.length = 0;
-  state.script.push(() => okOutcome({ status: 'timeout', text: '' }), () => okOutcome());
-  const timedOut = await post({ mode: 'write', intents: INTENT });
-  assert.equal(timedOut.status, 504);
-  assert.equal(state.runs.length, 1);
-});
-
-test('the only write retry is a tool-name mismatch before any tool ran', async () => {
-  state.script.push(() => errorOutcome('tool-name-mismatch', { toolsUsed: [], haTools: ['ha_turn_off'] }), () => okOutcome());
-  const res = await post({ mode: 'write', intents: INTENT });
-  assert.equal(res.status, 200);
-  assert.equal(state.runs.length, 2);
-  assert.deepEqual(state.runs[1].haTools, ['ha_turn_off'], 'the retry uses the names the first run reported');
-
-  state.runs.length = 0;
-  state.script.push(() => errorOutcome('tool-name-mismatch', { toolsUsed: ['ha_turn_off'] }), () => okOutcome());
-  const ran = await post({ mode: 'write', intents: INTENT });
-  assert.equal(ran.status, 500);
-  assert.equal(state.runs.length, 1);
-  state.script.length = 0;
+test('a write in which Home Assistant failed an action answers 502 action_failed, after attempting every one', async () => {
+  const intents = [{ intent: 'HassTurnOn', targets: ['light.a', 'light.b', 'light.c'], data: {} }];
+  actScript.push(
+    () => ({ ok: true }),
+    () => ({ ok: false, error: `No entity named light.b (${SECRET})` }),
+    () => { throw new Error('the relay went away'); },
+  );
+  const res = await post({ mode: 'write', intents });
+  assert.equal(res.status, 502);
+  assert.deepEqual(await res.json(), {
+    error: 'Home Assistant did not carry out every action',
+    code: 'action_failed',
+    actions: [
+      { intent: 'HassTurnOn', target: 'light.a', ok: true },
+      { intent: 'HassTurnOn', target: 'light.b', ok: false, error: 'No entity named light.b ([REDACTED])' },
+      { intent: 'HassTurnOn', target: 'light.c', ok: false, error: 'the relay went away' },
+    ],
+  });
+  assert.equal(acted.length, 3, 'every action is attempted, and none twice');
+  assert.equal(state.runs.length, 0);
+  const line = auditLines.find((l) => l.startsWith('prompt[write] '));
+  assert.ok(line.includes(' status=502 '), line);
+  assert.ok(line.endsWith(' actions=HassTurnOn(light.a):ok,HassTurnOn(light.b):failed,HassTurnOn(light.c):failed'), line);
 });
 
 // --- cancellation and concurrency ---------------------------------------------------
@@ -766,4 +825,133 @@ test('request_fields lists exactly the body fields POST /api/prompt accepts', as
     assert.match((await res.json()).error, /unknown field/, field);
   }
   assert.equal(state.runs.length, runs);
+});
+
+// A read during which Home Assistant refused THIS run's token ends as a degraded
+// read of its own reason, whatever the model wrote, and is not retried: only a
+// person can change the answer. Another run's refusal does not mark this one.
+test('a read whose token Home Assistant refused says so and is not retried', async () => {
+  const refused = new Map();
+  let current = null;
+  const app = makeApp({
+    beginRun: async (runId) => { current = runId; return { token: 'relay-token', mcpConfigPath: null, dir: null }; },
+    tokenRefusal: (runId) => refused.get(runId) ?? null,
+  });
+  const srv = await listen(app);
+  const url = `http://127.0.0.1:${srv.address().port}`;
+  try {
+    state.script.push(() => {
+      refused.set(current, 403);
+      return okOutcome({ text: 'The token is invalid or expired.' });
+    });
+    const res = await post({ prompt: 'is the light on?', language: 'en' }, { url });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.degraded, true);
+    assert.equal(body.reason, 'ha-token-refused');
+    assert.match(body.text, /refused the add-on's Home Assistant token \(403\)/);
+    assert.match(body.text, /administrator/);
+    assert.doesNotMatch(body.text, /invalid or expired/, 'the model text is not passed through');
+    assert.equal(state.runs.length, 1, 'not retried');
+    assert.match(auditLines.filter((l) => l.startsWith('prompt[read]')).at(-1),
+      / status=200-degraded reason=ha-token-refused attempts=1 /);
+
+    // The same refusal on a run that failed transiently is not retried either.
+    state.runs.length = 0;
+    state.script.push(() => { refused.set(current, 401); return errorOutcome('model-error'); });
+    const failed = await (await post({ prompt: 'again', language: 'uk' }, { url })).json();
+    assert.equal(failed.reason, 'ha-token-refused');
+    assert.match(failed.text, /\(401\)/);
+    assert.equal(state.runs.length, 1);
+
+    // A refusal that another run met leaves this read as it was.
+    state.runs.length = 0;
+    refused.set('some-other-run', 401);
+    state.script.push(() => okOutcome({ text: 'It is on.' }));
+    const fine = await (await post({ prompt: 'and now?' }, { url })).json();
+    assert.equal(fine.text, 'It is on.');
+    assert.equal(fine.degraded, undefined);
+    assert.equal((await (await fetch(`${url}/api/status`, { headers: { Authorization: `Bearer ${TOKEN}` } })).json())
+      .chat_health.last_reason, 'ha-token-refused');
+  } finally {
+    srv.closeAllConnections();
+    srv.close();
+  }
+});
+
+// A streamed read streams the model's words as it writes them. Once Home
+// Assistant has refused the token, what it goes on to write is a guess: no more
+// of it ships, the read ends degraded under its own reason, and `done` says the
+// deltas that did go out were an incomplete answer (`partial`) so a client shows
+// the notice after them.
+test('a streamed read whose token was refused stops its deltas and ends partial', async () => {
+  const refused = new Map();
+  let current = null;
+  const app = makeApp({
+    beginRun: async (runId) => { current = runId; return { token: 'relay-token', mcpConfigPath: null, dir: null }; },
+    tokenRefusal: (runId) => refused.get(runId) ?? null,
+  });
+  const srv = await listen(app);
+  const url = `http://127.0.0.1:${srv.address().port}`;
+  const health = async () => (await (await fetch(`${url}/api/status`, { headers: { Authorization: `Bearer ${TOKEN}` } })).json()).chat_health;
+  try {
+    const first = 'The light in the kitchen is '.repeat(8);
+    state.script.push((opts) => {
+      opts.onText(first);
+      refused.set(current, 401);
+      opts.onText(`${first}probably on, the token seems to be fine and the rest of this guess goes on and on`);
+      return okOutcome({ text: 'a guess' });
+    });
+    const lines = await ndjson(await post({ prompt: 'is the light on?', language: 'en', stream: true }, { url }));
+    const done = lines.pop();
+    const deltas = lines.map((l) => l.text).join('');
+    assert.ok(lines.length >= 1 && lines.every((l) => l.type === 'delta'));
+    assert.ok(first.startsWith(deltas), 'nothing was written after the refusal');
+    assert.doesNotMatch(deltas, /probably/);
+    assert.equal(done.type, 'done');
+    assert.equal(done.degraded, true);
+    assert.equal(done.reason, 'ha-token-refused');
+    assert.equal(done.partial, true);
+    assert.match(done.text, /refused the add-on's Home Assistant token \(401\)/);
+    let h = await health();
+    assert.equal(h.degraded, 1);
+    assert.equal(h.recovered, 0);
+    assert.equal(h.last_reason, 'ha-token-refused');
+
+    // Nothing streamed before the refusal: not partial.
+    state.script.push(() => { refused.set(current, 403); return okOutcome({ text: 'a guess' }); });
+    const bare = await ndjson(await post({ prompt: 'again', language: 'en', stream: true }, { url }));
+    assert.equal(bare.length, 1);
+    assert.equal(bare[0].reason, 'ha-token-refused');
+    assert.ok(!bare[0].partial);
+    h = await health();
+    assert.equal(h.degraded, 2);
+    assert.equal(h.recovered, 0);
+  } finally {
+    srv.closeAllConnections();
+    srv.close();
+  }
+});
+
+test('a streamed read that fails for another reason after deltas stays a recovered turn', async () => {
+  const app = makeApp();
+  const srv = await listen(app);
+  const url = `http://127.0.0.1:${srv.address().port}`;
+  try {
+    state.script.push((opts) => {
+      opts.onText('The light in the kitchen is '.repeat(8));
+      return errorOutcome('model-error');
+    });
+    const lines = await ndjson(await post({ prompt: 'is the light on?', language: 'en', stream: true }, { url }));
+    const done = lines.pop();
+    assert.equal(done.degraded, true);
+    assert.equal(done.reason, 'model-error');
+    assert.equal(done.partial, true);
+    const h = (await (await fetch(`${url}/api/status`, { headers: { Authorization: `Bearer ${TOKEN}` } })).json()).chat_health;
+    assert.equal(h.degraded, 0);
+    assert.equal(h.recovered, 1);
+  } finally {
+    srv.closeAllConnections();
+    srv.close();
+  }
 });

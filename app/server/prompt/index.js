@@ -275,8 +275,12 @@ async function start() {
     beginRun,
     endRun,
     lookupFor: relay ? (runId) => relay.lookup(runId) : null,
+    // How a confirmed action is carried out: by the relay itself, no agent.
+    actFor: relay ? (runId) => relay.act(runId) : null,
     // Whether Home Assistant accepts the add-on's token on the MCP path.
     haMcpAuth: relay ? () => relay.mcpAuth() : () => null,
+    // Whether Home Assistant refused a run's own token, and with what status.
+    tokenRefusal: relay ? (runId) => relay.tokenRefusal(runId) : () => null,
     // Whether the audit log is still being written, asked at the moment a
     // request is about to act: an action that cannot be recorded is refused.
     auditState: () => auditSink.state(),
@@ -287,8 +291,9 @@ async function start() {
     // there, so latency matters more than raw capability. Empty → voice uses the
     // same `model` as text (no change).
     voiceModel: optionString(options, 'chat_model_voice'),
-    // Optional models per request type; empty → the chat model above (no change).
-    writeModel: optionString(options, 'chat_model_write'),
+    // Optional model for camera questions; empty → the chat model above (no
+    // change). A confirmed write runs no model, so `chat_model_write`, which an
+    // add-on may still carry in its options, is not read.
     cameraModel: optionString(options, 'chat_model_camera'),
     dailyBudgetUsd,
     // Camera snapshots (vision) go through the same relay, so the HA token and

@@ -6,7 +6,9 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
-const { DEGRADE_TEXT, SUPPORTED_LANGS, langOf, budgetNotice } = require('../../server/prompt/notices');
+const {
+  DEGRADE_TEXT, SUPPORTED_LANGS, langOf, budgetNotice, tokenRefusedNotice,
+} = require('../../server/prompt/notices');
 
 // Recorded before the names became branding data, with a limit of 7.5.
 const CLAUDE_BUDGET_NOTICE = {
@@ -42,4 +44,14 @@ test('the degrade texts name no engine, and an unknown language falls back to En
   assert.equal(langOf('pl-PL'), 'pl');
   assert.equal(langOf('xx'), 'en');
   assert.equal(langOf(undefined), 'en');
+});
+
+test('a refused Home Assistant token is explained in every supported language, with both fixes', () => {
+  for (const lang of SUPPORTED_LANGS) {
+    const text = tokenRefusedNotice(lang, 403);
+    assert.ok(text.includes('403'), lang);
+    assert.ok(/administra|адміністратор|amministrat|beheerder/i.test(text), lang);
+    assert.ok(!/claude/i.test(text), lang);
+  }
+  assert.equal(tokenRefusedNotice('xx', 401), tokenRefusedNotice('en', 401));
 });

@@ -23,7 +23,8 @@ ENGINE_VARIABLES=(
     ENGINE_BIN_DIR              # put first on PATH
     ENGINE_PROMPT_BIN           # the agent executable of the prompt API
     ENGINE_INSTRUCTIONS_SOURCE  # the bundled instructions file
-    ENGINE_INSTRUCTIONS_FILE    # its name in /data/workdir and /homeassistant
+    ENGINE_INSTRUCTIONS_FILE    # its name in a working directory (/homeassistant)
+    ENGINE_USER_INSTRUCTIONS    # the instructions file the engine reads in every directory
 )
 # Executables the engine installs, which the core's scripts run.
 ENGINE_COMMANDS=(
@@ -233,17 +234,71 @@ done < <(config_list environment_vars)
 mkdir -p /data/workdir /data/uploads
 run_hook engine_provision
 
-instructions="/data/workdir/${ENGINE_INSTRUCTIONS_FILE}"
-cp "${ENGINE_INSTRUCTIONS_SOURCE}" "${instructions}"
-
-custom=$(bashio::config 'custom_instructions')
-if bashio::var.has_value "${custom}"; then
-    printf "\n\n---\n\n# User Custom Instructions\n\n%s\n" "${custom}" \
-        >> "${instructions}"
+# The console reads the instructions from the engine's own file, which applies
+# in every working directory. The add-on owns one delimited block of it, written
+# again on every start so a changed custom_instructions option or a newer add-on
+# reaches the next session; the console writes to the same file itself (/memory,
+# the # shortcut), so every byte outside the block is the user's and is kept.
+begin_line='<!-- BEGIN add-on instructions: rewritten at every start; edit custom_instructions instead -->'
+end_line='<!-- END add-on instructions -->'
+# The first line of the whole-file form an unreleased version wrote.
+legacy_line='<!-- Written by the add-on at every start from its bundled instructions and the custom_instructions option; edits here are replaced. -->'
+instructions="${ENGINE_USER_INSTRUCTIONS}"
+mkdir -p "$(dirname "${instructions}")"
+{
+    printf '%s\n' "${begin_line}"
+    cat "${ENGINE_INSTRUCTIONS_SOURCE}"
+    custom=$(bashio::config 'custom_instructions')
+    if bashio::var.has_value "${custom}"; then
+        printf "\n\n---\n\n# User Custom Instructions\n\n%s\n" "${custom}"
+    fi
+    printf '\n%s\n' "${end_line}"
+} > "${instructions}.block"
+if [ ! -e "${instructions}" ] || [ "$(head -n1 "${instructions}")" = "${legacy_line}" ]; then
+    cp "${instructions}.block" "${instructions}.new"
+else
+    begins=$(grep -Fxc -- "${begin_line}" "${instructions}" || true)
+    ends=$(grep -Fxc -- "${end_line}" "${instructions}" || true)
+    if [ "${begins}" = 0 ] && [ "${ends}" = 0 ]; then
+        { cat "${instructions}.block"; printf '\n'; cat "${instructions}"; } > "${instructions}.new"
+        bashio::log.notice "Added the add-on's instructions block at the top of ${instructions}; the rest of the file is unchanged"
+    elif [ "${begins}" = 1 ] && [ "${ends}" = 1 ] \
+        && [ "$(grep -Fnx -- "${begin_line}" "${instructions}" | head -n1 | cut -d: -f1)" -lt "$(grep -Fnx -- "${end_line}" "${instructions}" | head -n1 | cut -d: -f1)" ]; then
+        first=$(grep -Fnx -- "${begin_line}" "${instructions}" | head -n1 | cut -d: -f1)
+        last=$(grep -Fnx -- "${end_line}" "${instructions}" | head -n1 | cut -d: -f1)
+        {
+            head -n "$((first - 1))" "${instructions}"
+            cat "${instructions}.block"
+            tail -n "+$((last + 1))" "${instructions}"
+        } > "${instructions}.new"
+    else
+        rm -f "${instructions}.new"
+        bashio::log.warning "${instructions} has ${begins} begin and ${ends} end lines of the add-on's instructions block (one of each, begin first, is expected); the file is left as it is and the add-on's instructions are not delivered until the extra or missing line is fixed"
+    fi
 fi
+if [ -e "${instructions}.new" ]; then
+    if cmp -s "${instructions}.new" "${instructions}"; then
+        rm -f "${instructions}.new"
+    else
+        mv -f "${instructions}.new" "${instructions}"
+    fi
+fi
+rm -f "${instructions}.block"
 
-if [ -d /homeassistant ] && [ -w /homeassistant ] && [ ! -f "/homeassistant/${ENGINE_INSTRUCTIONS_FILE}" ]; then
-    cp "${instructions}" "/homeassistant/${ENGINE_INSTRUCTIONS_FILE}"
+# Earlier versions copied the instructions into the working directories, where
+# they were never updated again. The copy in /data/workdir was rewritten on every
+# start, so it is the add-on's and goes. One in /homeassistant is the add-on's
+# when it begins with the bundled file's first line; it is set aside, not
+# deleted, since it may have been edited. Any other file there is the user's.
+rm -f "/data/workdir/${ENGINE_INSTRUCTIONS_FILE}"
+old_copy="/homeassistant/${ENGINE_INSTRUCTIONS_FILE}"
+if [ -f "${old_copy}" ] && [ "$(head -n1 "${old_copy}")" = "$(head -n1 "${ENGINE_INSTRUCTIONS_SOURCE}")" ]; then
+    if [ -e "${old_copy}.previous" ]; then
+        bashio::log.warning "${old_copy} is an earlier copy of the add-on's instructions, but ${old_copy}.previous already exists; it is left where it is and the console reads both"
+    else
+        mv "${old_copy}" "${old_copy}.previous"
+        bashio::log.notice "Moved the add-on's earlier copy of its instructions to ${old_copy}.previous; they are now kept up to date in ${instructions}"
+    fi
 fi
 
 # --- Init commands ---
