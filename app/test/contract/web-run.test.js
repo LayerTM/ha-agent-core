@@ -273,6 +273,15 @@ function runWith(tape, opts = {}) {
 const lastSpec = () => state.launches[state.launches.length - 1];
 const GRANT = Object.freeze({ search: true, fetch: true, domains: Object.freeze(['example.org']) });
 
+test('the web directive leaves search unrestricted and limits only opening pages', async () => {
+  await runWith([{ echo: 'stdin' }], { web: GRANT });
+  assert.match(lastSpec().systemPrompt, /search the web without any restriction\. Only opening web pages is limited: you can open pages only on these sites: example\.org\./);
+  await runWith([{ echo: 'stdin' }], { web: { search: true, fetch: false, domains: [] } });
+  const searchOnly = lastSpec().systemPrompt;
+  assert.match(searchOnly, /search the web without any restriction\. You cannot open web pages\./);
+  assert.doesNotMatch(searchOnly, /only on these sites/);
+});
+
 test('a web run\'s spec has no Home Assistant tool, a text-only schema, and its input is the prompt alone', async () => {
   const outcome = await runWith([{ echo: 'stdin' }], {
     web: GRANT,

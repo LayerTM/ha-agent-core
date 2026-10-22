@@ -350,8 +350,9 @@ const WEB_SYSTEM_PROMPT = [
 // Which web tools this run has, in the model's terms. The adapter enforces the
 // list of sites; this only spares the model a refused call.
 function webDirective(web) {
-  if (!web.fetch) return ' You can search the web; you cannot open web pages.';
-  return ` You can${web.search ? ' search the web and' : ''} open web pages only on these sites:`
+  const search = web.search ? ' You can search the web without any restriction.' : ' You cannot search the web.';
+  if (!web.fetch) return `${search} You cannot open web pages.`;
+  return `${search} Only opening web pages is limited: you can open pages only on these sites:`
     + ` ${web.domains.join(', ')}.`;
 }
 
