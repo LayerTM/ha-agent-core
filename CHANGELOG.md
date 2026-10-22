@@ -6,6 +6,8 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-22
+
 ### Added
 
 - `POST /api/prompt` accepts `web: true` on a read: the run may search the web
