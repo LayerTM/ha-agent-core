@@ -42,6 +42,7 @@ valid (see [Names](#names) and [Console pages](#console-pages)):
 | `runner.launch(spec, { env })` | function | `{ args, env }` for one run (see below) |
 | `runner.createDecoder(spec)` | function | a function turning one parsed line of the agent's JSON-lines output into a list of run events |
 | `runner.endRun(spec)` | optional function | free what this run allocated (a scratch directory, an entry in a live set). Called once per run on EVERY ending — an answer, a model error, a timeout, an abort, a kill, and a failure to spawn, where the run never started but `launch` had already allocated. `spec` is the one `launch` and `createDecoder` received, so it is the run's identity. It may arrive for a `spec` nothing was allocated for, so it must tolerate that and be idempotent; a throw is logged and never changes the run's outcome. An adapter that allocates nothing per run does not ship it. A process that is killed outright never reaches it, so an adapter whose allocation outlives the process needs its own way back to it |
+| `runner.webCapability` | optional object | `{ search, fetch }`, both booleans: whether the engine can search the web and open web pages. Absent, a [web read](#web-reads) is refused; present, `launch` must turn a run's `spec.web` into the engine's own web tools and allow nothing beyond it |
 | `runner.toolName(basename)` | function | the name the agent gives a tool of the `ha` MCP server |
 | `runner.toolBasename(name)` | function | the basename of such a tool name, or `null` for any other tool |
 | `prompt.limitsSource({ apiKey, oauthToken, homeDir })` | function | the account's limits: `null` without a credential, or `{ mode, key, read(fetch)? }` (see below) |
@@ -134,7 +135,12 @@ A confirmed `write` runs no agent; see [Confirmed writes](#confirmed-writes).
 The adapter turns the run spec into a command line. Its `launch(spec, { env })`
 receives `mode` (always `"read"`), `read` (always `true`), `vision`, `imagePath`, `haAllowed` and
 `haDisallowed` (the tools the run may and may not call), `schema`,
-`systemPrompt`, `maxTurns`, `mcpConfigPath`, `settings`, `model` and `stream`.
+`systemPrompt`, `maxTurns`, `mcpConfigPath`, `settings`, `model`, `stream` and `web`.
+`web` is `null` except on a [web read](#web-reads), where it is
+`{ search, fetch, domains }`: the adapter offers web search only when `search`
+is true, and opens pages only when `fetch` is true and only on the sites in
+`domains`; the run then has no `ha` tools and no
+`mcpConfigPath`.
 It must deny every tool call outside `haAllowed` (plus reading `imagePath` for a
 vision run) — that is what keeps a tool out of the model's context at all. It is
 no longer the only enforcement: the relay refuses a call for a tool this run may
@@ -358,6 +364,8 @@ The message is for people and may change. The code is stable:
 | `prompt_too_large` | 413 | the prompt is larger than `limit_bytes` |
 | `memory_too_large` | 400 | the texts of `memory` together are larger than `limit_bytes` |
 | `confirmation_required` | 403 | an unconfirmed write touches `domains` |
+| `web_disabled` | 403 | a web read was asked for and the add-on's options turn the web off |
+| `web_unsupported` | 501 | a web read was asked for and the engine has no web tool this configuration can use |
 | `rate_limited` | 429 | too many requests; see `Retry-After` |
 | `write_unavailable` | 503 | no Home Assistant MCP configuration for writes |
 | `audit_unavailable` | 503 | the audit log cannot be written, so a write is not allowed to act; the errno is in `audit_error` |
@@ -399,6 +407,44 @@ line) carries `memory_change`: `{ "remember": [<up to 3 facts, 1-200 characters>
 the client to confirm with the user; it is absent on every other turn and on a
 request without `memory`. A client that keeps facts sends `memory` (an empty
 list when it has none yet) so that the first fact can be suggested.
+
+### Web reads
+
+A `read` may carry `web: true`: the run may use the web, and in exchange it
+knows nothing of the home and can change nothing in it. Everything a web page
+says is text nobody vetted, so this is decided from the request, not from what
+the run reports it did:
+- the answer is `text` only: `proposal` is always `null`, and there is never an
+  `automation` or a `memory_change`, whatever the model returned;
+- the run has no Home Assistant tool and no relay token, and is given no
+  conversation history, no facts and no camera; a web read carrying `memory`,
+  `edit_automation` or `image_entity` is refused with `mode_mismatch`, as is a
+  `write` carrying `web`;
+- the turn is not added to the conversation's history, so a later turn of the
+  same conversation never reads what the web said.
+
+The audit line of a web read carries `web=1`. It counts against the daily
+budget like any other read.
+
+Two add-on options decide what a web read may do:
+- `chat_web` (`false` by default): unless it is `true`, a web read is refused
+  with `web_disabled`;
+- `chat_web_domains` (empty by default): the only sites whose pages a web read
+  may open, each a plain public host name such as `example.org` (an
+  internationalised name is written in punycode, `xn--…`). Without any, a web
+  read may only search. An entry that is not one — a name ending in `.local`,
+  `.lan`, `.internal`, `.home.arpa`, `.localhost`, `.intranet`, `.corp` or
+  `.private`, or one that spells an IP address, such as `203.0.113.7.nip.io` —
+  turns web reads off, with an error in the add-on log.
+
+The site list limits which pages a run may open, not what it may search for: a
+prompt a client builds from the state of the home leaves with its search
+queries, so a client must not template house state into a web read.
+
+An engine without web tools (no `runner.webCapability`), or one that can only
+open pages while no site is listed, refuses a web read with `web_unsupported`.
+`GET /api/status` publishes `web`: what a web read would be granted,
+`{ "search": <bool>, "fetch": <bool> }`, or `null` when it would be refused.
 
 A `read` whose run fails is not an error answer: it is a `200` (or, streamed, a
 `done` line) with `degraded: true`, a short apology as `text`, and `reason`, the

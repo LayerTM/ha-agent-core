@@ -15,6 +15,7 @@ const { createPromptApp } = require('./server');
 const { shutdown: shutdownRuns } = require('./run');
 const { createAuditSink } = require('./audit');
 const { buildRedactor } = require('./security');
+const { checkWebOptions } = require('./web');
 const { adapter } = require('../adapter-contract');
 const { resolveCoreTarget } = require('./core-target');
 const { startCoreRelay } = require('./core-relay');
@@ -179,6 +180,18 @@ async function start() {
     return () => {};
   }
 
+  // Whether a read may ask for the web, and the sites it may open pages on. A
+  // site that is not a plain host name turns the web off: guessing which site
+  // was meant could only open more than the user listed.
+  let web = checkWebOptions({
+    allowed: options.chat_web === true,
+    domains: options.chat_web_domains === undefined ? [] : options.chat_web_domains,
+  });
+  if ('error' in web) {
+    log(`ERROR: ${web.error} — web reads are off until chat_web_domains is corrected`);
+    web = { allowed: false, domains: [] };
+  }
+
   const token = await loadToken(options);
   // A dedicated restricted-user LLAT (prompt_ha_token) is preferred; the
   // general ha_token is the zero-extra-config fallback. Assist exposure still
@@ -296,6 +309,7 @@ async function start() {
     // add-on may still carry in its options, is not read.
     cameraModel: optionString(options, 'chat_model_camera'),
     dailyBudgetUsd,
+    web,
     // Camera snapshots (vision) go through the same relay, so the HA token and
     // the Core TLS decision live in exactly one place.
     coreRelayUrl: relay ? relay.url : '',

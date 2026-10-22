@@ -20,6 +20,7 @@ const {
 } = require('./notices');
 const { resolveAnswer, entityIdsIn } = require('./targets');
 const { createHistoryStore } = require('./history');
+const { webGrant } = require('./web');
 
 const { run, TIMEOUT_MS, safeLangTag, READ_HA_BASENAMES } = require('./run');
 const { execute } = require('./execute');
@@ -49,6 +50,10 @@ const ERRORS = {
   confirmation_required: [403, 'sensitive action requires explicit confirmation'],
   rate_limited: [429, 'rate limited'],
   write_unavailable: [503, 'write mode unavailable: no HA MCP configured (set an HA token in the add-on options)'],
+  // A read asked for the web. Two causes, two fixes: the add-on's options turn
+  // the web off, or the engine has no web tool this configuration can use.
+  web_disabled: [403, 'web reads are turned off in the add-on options'],
+  web_unsupported: [501, 'this engine offers no web tool for this configuration'],
   // A DIFFERENT cause with a different fix, so a different code: the record of
   // what is done to a home cannot be written, so nothing is allowed to act.
   // The errno is published beside it (`audit_error`) — EROFS and EACCES are the
@@ -80,7 +85,7 @@ function sendError(res, code, { message, ...extra } = {}) {
 
 const BODY_KEYS = new Set([
   'prompt', 'mode', 'conversation_id', 'intents', 'confirmation', 'image_entity', 'stream', 'language',
-  'surface', 'edit_automation', 'memory',
+  'surface', 'edit_automation', 'memory', 'web',
 ]);
 
 // A version published on /api/status is a plain token, whatever the agent printed.
@@ -620,6 +625,9 @@ function createPromptApp({
   model, voiceModel = '', cameraModel = '',
   dailyBudgetUsd = 0,
   coreRelayUrl = '',
+  // The add-on's web options, checked by web.js (checkWebOptions): whether a
+  // read may ask for the web, and the sites a web read may open pages on.
+  web = { allowed: false, domains: [] },
   // Credentials as the add-on already holds them, for /api/account_limits only:
   // they decide WHICH auth mode the account is in, and the OAuth one is the only
   // token the account-limits endpoint upstream accepts. Injected rather than read
@@ -911,6 +919,12 @@ function createPromptApp({
       // The add-on's wall-clock ceiling per request (a TIME) — lets the client pair
       // its own REQUEST_TIMEOUT dynamically. Distinct from the daily-$ budget below.
       prompt_timeout_ms: TIMEOUT_MS,
+      // What a read with `web: true` would be granted, or null when it would be
+      // refused — so a client offers the web only where it is there.
+      web: (() => {
+        const decided = webGrant(web);
+        return 'grant' in decided ? { search: decided.grant.search, fetch: decided.grant.fetch } : null;
+      })(),
       // Daily chat spend cap for a budget sensor (limit 0 = unlimited); absent
       // when the engine does not report what a request costs.
       ...(reportsCost() ? { budget: { limit: budget.limit, spent: Number(budget.spent().toFixed(4)) } } : {}),
@@ -1035,6 +1049,29 @@ function createPromptApp({
           return sendError(res, 'invalid_field', { message: 'image_entity must be a camera.<id> entity', field: 'image_entity' });
         }
         imageEntity = body.image_entity;
+      }
+
+      // A read that may use the web (see web.js): answer-only and house-blind,
+      // so it carries nothing of the home and is never a write.
+      if (body.web !== undefined && typeof body.web !== 'boolean') {
+        return sendError(res, 'invalid_field', { message: 'web must be a boolean', field: 'web' });
+      }
+      let grant = null;
+      if (body.web === true) {
+        if (mode !== 'read') {
+          return sendError(res, 'mode_mismatch', { message: 'web is only valid with mode "read"', field: 'web' });
+        }
+        for (const field of ['memory', 'edit_automation', 'image_entity']) {
+          if (body[field] !== undefined) {
+            return sendError(res, 'mode_mismatch', { message: `${field} is not valid with web`, field });
+          }
+        }
+        const decided = webGrant(web);
+        if ('refusal' in decided) {
+          audit(`prompt[deny] reason=${decided.refusal.replace('_', '-')} caller=${caller}`);
+          return sendError(res, decided.refusal, { field: 'web' });
+        }
+        ({ grant } = decided);
       }
 
       // Optional SSE streaming of the answer text (read only).
@@ -1169,8 +1206,9 @@ function createPromptApp({
       try {
         // What this read may do: live context (the same list the run itself
         // allowlists, so the two cannot disagree), and the only camera it may
-        // read is the entity this request named, if any.
-        runHandle = await beginRun(runId, {
+        // read is the entity this request named, if any. A web-granted read may
+        // do nothing in Home Assistant, so no bearer is minted for it at all.
+        runHandle = grant ? null : await beginRun(runId, {
           basenames: READ_HA_BASENAMES,
           cameras: imageEntity ? [imageEntity] : [],
         });
@@ -1248,14 +1286,14 @@ function createPromptApp({
             bin: claudeBin,
             settings: claudeSettings,
             prompt,
-            mcpConfigPath: runHandle.mcpConfigPath,
+            mcpConfigPath: runHandle ? runHandle.mcpConfigPath : undefined,
             // A voice turn uses the (optional) faster voice model — spoken replies
             // are short, so lower latency beats raw capability. Falls back to the
             // normal model when unset.
             model: resolvedModel,
             cwd: workDir,
             signal: abort.signal,
-            history: conversationId
+            history: conversationId && !grant
               ? conversations.recent(conversationId) : undefined,
             imagePath,
             onText,
@@ -1272,6 +1310,8 @@ function createPromptApp({
             memory,
             // Live `ha` tool names, so a run allowlists what HA actually publishes.
             haTools: haToolCatalog,
+            // The web this read was granted; the run is then house-blind.
+            web: grant,
             // First attempt gets the full ceiling; a retry gets only what's LEFT of
             // the one-request budget, so TOTAL wall-clock across attempts never
             // exceeds TIMEOUT_MS (the client can pair its timeout to that one bound).
@@ -1327,7 +1367,8 @@ function createPromptApp({
         + `${imageEntity ? ` img=${imageEntity}${imagePath ? '' : '(fetch-failed)'}` : ''}`
         + ` lang=${language} langdir=${safeLangTag(body.language) || '-'}`
         + ` surface=${body.surface || '-'} model=${sanitizeId(resolvedModel, 64) || 'default'}`
-        + `${body.edit_automation !== undefined ? ' edit=1' : ''}${memory ? ` memory=${memory.length}` : ''} ${detail}`;
+        + `${body.edit_automation !== undefined ? ' edit=1' : ''}${memory ? ` memory=${memory.length}` : ''}`
+        + `${grant ? ' web=1' : ''} ${detail}`;
 
       // A streaming READ must NEVER terminate with `{type:"error"}` — the
       // integration's NDJSON reader treats that as fatal and the chat hard-fails,
@@ -1398,14 +1439,20 @@ function createPromptApp({
       // A device the model NAMED becomes an entity id here, by Home Assistant's own
       // matcher (targets.js), or the proposal / draft does not leave at all and the
       // answer says which name was not found or not one device.
-      let answerText = outcome.text;
+      // A web-granted read is answer-only, decided from the GRANT: whatever the
+      // run returned beside its text is dropped here, so an engine or a decoder
+      // that let a page fill another field still cannot hand it on.
+      const answer = grant
+        ? { ...outcome, proposal: null, automation: null, memoryChange: null }
+        : outcome;
+      let answerText = answer.text;
       let resolved = { proposal: null, automation: null };
-      if (outcome.proposal || outcome.automation) {
+      if (answer.proposal || answer.automation) {
         let problems;
         try {
           if (!lookupFor) throw new Error('no Home Assistant to look the devices up in');
           ({ problems, ...resolved } = await resolveAnswer(
-            { proposal: outcome.proposal, automation: outcome.automation },
+            { proposal: answer.proposal, automation: answer.automation },
             lookupFor(runId),
             { known: body.edit_automation !== undefined ? entityIdsIn(body.edit_automation) : [] },
           ));
@@ -1419,8 +1466,9 @@ function createPromptApp({
 
       const text = redact(answerText);
       // Remember this read turn (redacted text only) so the next turn in the same
-      // conversation has context.
-      if (conversationId) {
+      // conversation has context. Never a web-granted turn: its text came from
+      // pages nobody vetted, and the next turn may propose.
+      if (conversationId && !grant) {
         conversations.append(conversationId, prompt, text);
       }
       const proposal = resolved.proposal ? redactDeep(resolved.proposal, redact) : null;
@@ -1434,9 +1482,9 @@ function createPromptApp({
       // lengthen a text); ids already bounded to the ones this request sent.
       // Absent unless the request carried `memory` and the message asked to
       // remember or forget, or when nothing is left.
-      const remember = memory && outcome.memoryChange
-        ? outcome.memoryChange.remember.map((t) => factText(redact(t))).filter(Boolean) : [];
-      const forget = memory && outcome.memoryChange ? outcome.memoryChange.forget : [];
+      const remember = memory && answer.memoryChange
+        ? answer.memoryChange.remember.map((t) => factText(redact(t))).filter(Boolean) : [];
+      const forget = memory && answer.memoryChange ? answer.memoryChange.forget : [];
       const memoryChange = remember.length || forget.length ? { remember, forget } : null;
       const toolsUsed = outcome.toolsUsed.map((t) => redact(t));
 
