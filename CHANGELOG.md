@@ -6,6 +6,23 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `POST /api/prompt` accepts `web: true` on a read: the run may search the web
+  and, on the sites listed in the `chat_web_domains` option, open pages. Such a
+  read answers with text only and holds nothing of the home: no Home Assistant
+  tool or token, no conversation history, no facts, no camera, and its turn is
+  not added to the conversation's history. A proposal, an automation draft or a
+  memory change the model returns anyway is dropped. It is refused with
+  `web_disabled` unless the `chat_web` option is on, and with `web_unsupported`
+  when the engine declares no usable web tool. `web` is listed in
+  `request_fields`; `/api/status` publishes what a web read would be granted as
+  `web`; the audit line carries `web=1`.
+- The adapter contract gains an optional `runner.webCapability`
+  (`{ search, fetch }`); a run's spec carries `web`, `null` except on a web
+  read. The API version does not change: an adapter without web tools needs no
+  release.
+
 ## [0.10.0] - 2026-10-22
 
 ### Added

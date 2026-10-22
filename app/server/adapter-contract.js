@@ -57,6 +57,10 @@ const OPTIONAL = {
   // When the engine's local credential stops being usable without a sign-in,
   // read from its timestamps alone: epoch millis, or null when it cannot tell.
   'prompt.credentialsExpiry': 'function',
+  // The engine's own web tools: { search, fetch }, each a boolean. Absent, a
+  // request for a web read is refused. Present, `runner.launch` receives a
+  // web-granted run's `spec.web` and must turn it into the engine's flags.
+  'runner.webCapability': 'object',
 };
 
 // The engine name is published on /api/status and stored by clients, so it is a
@@ -103,6 +107,12 @@ function validateAdapter(mod) {
   if (patterns !== undefined
       && !(Array.isArray(patterns) && patterns.every((re) => re instanceof RegExp && re.global))) {
     problems.push('prompt.secretPatterns must be a list of global regular expressions');
+  }
+  const web = member(mod, 'runner.webCapability');
+  if (web !== undefined && !(web !== null
+      && Object.keys(web).every((k) => k === 'search' || k === 'fetch')
+      && typeof web.search === 'boolean' && typeof web.fetch === 'boolean')) {
+    problems.push('runner.webCapability must be { search: boolean, fetch: boolean }');
   }
   if (problems.length) throw new Error(`engine adapter: ${problems.join('; ')}`);
   return mod;
