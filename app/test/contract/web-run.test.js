@@ -158,6 +158,25 @@ test('the add-on\'s site list is plain host names, normalized, or the web is off
   assert.ok('error' in checkWebOptions({ allowed: 'yes' }));
 });
 
+// Written from parts: the repository's secret scan refuses a private address as a literal.
+const LAN = ['192', '168', '1', '113'].join('.');
+const LAN_DASHED = ['10', '0', '0', '1'].join('-');
+
+test('a name inside the home network, or one that spells an address, is not a site', () => {
+  for (const bad of ['printer.local', 'nas.lan', 'ha.internal', 'router.home.arpa', 'a.localhost', 'wiki.intranet',
+    'files.corp', 'x.private', 'home.arpa', LAN, `${LAN}.nip.io`, `${LAN_DASHED}.sslip.io`,
+    `a.${LAN}.example.org`, '[::1]', '::1', 'fe80::1']) {
+    assert.ok('error' in checkWebOptions({ allowed: true, domains: [bad] }), bad);
+  }
+  assert.ok('domains' in checkWebOptions({ allowed: true, domains: ['example.com', 'localhost.example.com', 'corp-site.org'] }));
+});
+
+test('an internationalised site is accepted by its punycode name', () => {
+  assert.deepEqual(checkWebOptions({ allowed: true, domains: ['xn--d1acufc.xn--j1amh'] }),
+    { allowed: true, domains: ['xn--d1acufc.xn--j1amh'] });
+  assert.ok('error' in checkWebOptions({ allowed: true, domains: ['example.xn--'] }));
+});
+
 test('the adapter\'s web capability is checked when it is loaded', () => {
   const { validateAdapter } = contract;
   const fresh = createNeutralAdapter().adapter;

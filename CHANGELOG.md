@@ -17,7 +17,11 @@ uses [Semantic Versioning](https://semver.org/).
   `web_disabled` unless the `chat_web` option is on, and with `web_unsupported`
   when the engine declares no usable web tool. `web` is listed in
   `request_fields`; `/api/status` publishes what a web read would be granted as
-  `web`; the audit line carries `web=1`.
+  `web`; the audit line carries `web=1`. `chat_web_domains` limits which pages
+  a web read may open, not what it may search for: a prompt templated with
+  house state leaves with its search queries. A site that is not a public host
+  name (`.local`, `.lan`, `.internal`, `.home.arpa` and similar, or a name that
+  spells an IP address) turns the web off; a punycode name is accepted.
 - The adapter contract gains an optional `runner.webCapability`
   (`{ search, fetch }`); a run's spec carries `web`, `null` except on a web
   read. The API version does not change: an adapter without web tools needs no

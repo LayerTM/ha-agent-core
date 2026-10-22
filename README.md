@@ -430,9 +430,16 @@ Two add-on options decide what a web read may do:
 - `chat_web` (`false` by default): unless it is `true`, a web read is refused
   with `web_disabled`;
 - `chat_web_domains` (empty by default): the only sites whose pages a web read
-  may open, each a plain host name such as `example.org`. Without any, a web
-  read may only search. An entry that is not a plain host name turns web reads
-  off, with an error in the add-on log.
+  may open, each a plain public host name such as `example.org` (an
+  internationalised name is written in punycode, `xn--…`). Without any, a web
+  read may only search. An entry that is not one — a name ending in `.local`,
+  `.lan`, `.internal`, `.home.arpa`, `.localhost`, `.intranet`, `.corp` or
+  `.private`, or one that spells an IP address, such as `203.0.113.7.nip.io` —
+  turns web reads off, with an error in the add-on log.
+
+The site list limits which pages a run may open, not what it may search for: a
+prompt a client builds from the state of the home leaves with its search
+queries, so a client must not template house state into a web read.
 
 An engine without web tools (no `runner.webCapability`), or one that can only
 open pages while no site is listed, refuses a web read with `web_unsupported`.

@@ -18,13 +18,24 @@
 const { adapter } = require('../adapter-contract');
 
 // A host name: lower-case labels of letters, digits and inner hyphens, at least
-// two of them, the last one alphabetic. No scheme, port, path or wildcard.
-const DOMAIN_RE = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
+// two of them, the last one alphabetic or punycode (`xn--…`). No scheme, port,
+// path or wildcard.
+const DOMAIN_RE = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:[a-z]{2,63}|xn--[a-z0-9](?:[a-z0-9-]{0,57}[a-z0-9])?)$/;
+// Names that resolve inside a home or an office network: a page opened there
+// would be read from the user's own LAN, not from the web.
+const PRIVATE_SUFFIXES = ['local', 'lan', 'internal', 'home.arpa', 'localhost', 'intranet', 'corp', 'private'];
+// An IPv4 address written into a name, dotted or dashed, as a whole label run
+// (`203.0.113.7.nip.io`, `203-0-113-7.sslip.io`): such a name resolves to that address.
+const EMBEDDED_IPV4_RE = /(?:^|[.-])\d{1,3}[.-]\d{1,3}[.-]\d{1,3}[.-]\d{1,3}(?:[.-]|$)/;
+
+function isPrivateName(domain) {
+  return PRIVATE_SUFFIXES.some((s) => domain === s || domain.endsWith(`.${s}`)) || EMBEDDED_IPV4_RE.test(domain);
+}
 const MAX_DOMAINS = 50;
 
 /**
  * The add-on's web options, checked: `{ allowed, domains }`, or `{ error }` when
- * a domain is not a plain host name (the add-on then turns the web off rather
+ * a domain is not a plain public host name (the add-on then turns the web off rather
  * than guess which site was meant).
  * @param {{ allowed?: unknown, domains?: unknown }} [options]
  * @returns {{ allowed: boolean, domains: string[] } | { error: string }}
@@ -36,8 +47,8 @@ function checkWebOptions({ allowed = false, domains = [] } = {}) {
   const out = [];
   for (const raw of domains) {
     const domain = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
-    if (!DOMAIN_RE.test(domain)) {
-      return { error: `web domain ${JSON.stringify(String(raw).slice(0, 64))} is not a host name` };
+    if (!DOMAIN_RE.test(domain) || isPrivateName(domain)) {
+      return { error: `web domain ${JSON.stringify(String(raw).slice(0, 64))} is not a public host name` };
     }
     if (!out.includes(domain)) out.push(domain);
   }
