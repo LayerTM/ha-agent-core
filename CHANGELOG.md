@@ -4,7 +4,18 @@ All notable changes to this project are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.11.1] - 2026-10-24
+
+### Security
+
+- Update `body-parser` to 2.4.0, which fixes a denial of service where a
+  compressed request body followed by extra bytes could terminate the process.
+
+### Fixed
+
+- `POST /api/prompt` answers `400` with code `unreadable_body` when the request
+  body cannot be decoded (for example a corrupt compressed stream), instead of
+  `500`.
 
 ## [0.11.0] - 2026-10-22
 
