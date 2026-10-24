@@ -39,6 +39,7 @@ const ERRORS = {
   unauthorized: [401, 'unauthorized'],
   not_found: [404, 'not found'],
   invalid_json: [400, 'invalid JSON body'],
+  unreadable_body: [400, 'request body could not be read'],
   body_too_large: [413, 'body too large'],
   invalid_body: [400, 'body must be a JSON object'],
   unknown_field: [400, 'unknown field'],
@@ -1539,6 +1540,11 @@ function createPromptApp({
     }
     if (err && (err.type === 'entity.parse.failed' || err instanceof SyntaxError)) {
       return sendError(res, 'invalid_json');
+    }
+    // Other body-parser refusals (undecodable compressed stream, unsupported
+    // encoding or charset, aborted upload) are the caller's fault, not ours.
+    if (err && Number.isInteger(err.status) && err.status >= 400 && err.status < 500) {
+      return sendError(res, 'unreadable_body');
     }
     console.error('[prompt] handler error:', err && err.message ? err.message : err);
     sendError(res, 'internal');
