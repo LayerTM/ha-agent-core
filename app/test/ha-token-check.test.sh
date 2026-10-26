@@ -29,21 +29,21 @@ start_stub() { # <status>
       const status = Number(process.argv[1]);
       const s = http.createServer((req, res) => { res.writeHead(status, {"content-type": "text/plain"}); res.end("stub"); });
       s.listen(0, "127.0.0.1", () => console.log(s.address().port));
-    ' "$1" > "${work}/port" &
+    ' "$1" "stub-of-$$" > "${work}/port" &
     stub_pid=$!
     for _ in $(seq 1 50); do [ -s "${work}/port" ] && break; sleep 0.1; done
-    cat "${work}/port"
+    port="$(cat "${work}/port")"
 }
 
 # 1. accepted
-port="$(start_stub 200)"
+start_stub 200
 read -r verdict code <<<"$(ha_token_status "http://127.0.0.1:${port}" "${TOKEN}")"
 check "a 200 is accepted" "accepted 200" "${verdict} ${code}"
 accepted_line="$(ha_token_sentence "${verdict}" "${code}")"
 kill "${stub_pid}" 2>/dev/null; wait "${stub_pid}" 2>/dev/null; : > "${work}/port"
 
 # 2. refused
-port="$(start_stub 401)"
+start_stub 401
 read -r verdict code <<<"$(ha_token_status "http://127.0.0.1:${port}" "${TOKEN}")"
 check "a 401 is rejected" "rejected 401" "${verdict} ${code}"
 rejected_line="$(ha_token_sentence "${verdict}" "${code}")"
@@ -70,6 +70,10 @@ check "the refusal names the consequence" "yes" \
 for line in "${accepted_line}" "${rejected_line}" "${unreachable_line}"; do
     check "the token is not printed" "no" "$(printf '%s' "${line}" | grep -qF "${TOKEN}" && echo yes || echo no)"
 done
+
+# no stub may outlive the test (each carries its owner's pid in its argv, so an
+# orphan reparented to init is still found)
+check "no stub node process is left running" "0" "$(pgrep -f "stub-of-$$" | wc -l | tr -d ' ')"
 
 if [ "${fails}" -eq 0 ]; then
     echo "PASS: all ha-token-check checks passed"
