@@ -48,11 +48,11 @@ start_stub() { # <refuse> <early status> <then status>
         res.end("stub");
       });
       s.listen(0, "127.0.0.1", () => console.log(s.address().port));
-    ' "$1" "$2" "$3" "${work}/seen" > "${work}/port" &
+    ' "$1" "$2" "$3" "${work}/seen" "stub-of-$$" > "${work}/port" &
     stub_pid=$!
     : > "${work}/seen"
     for _ in $(seq 1 50); do [ -s "${work}/port" ] && break; sleep 0.1; done
-    cat "${work}/port"
+    port="$(cat "${work}/port")"
 }
 stop_stub() {
     kill "${stub_pid}" 2>/dev/null; wait "${stub_pid}" 2>/dev/null; stub_pid=""
@@ -70,7 +70,7 @@ done
 
 # 2. the control: ONE attempt is what the check used to be, and against a Core
 # that is still starting it lands on the refusal of that instant
-port="$(start_stub 99 502 200)"
+start_stub 99 502 200
 check "a single attempt reports the refusal of that instant" "502" \
     "$(ha_token_ask "http://127.0.0.1:${port}" "${TOKEN}")"
 check "a single attempt says nothing answered" "1" \
@@ -80,14 +80,14 @@ check "without waiting the user is told it could not be checked" "unreachable 50
 stop_stub
 
 # 3. forward: Core refuses twice, then answers
-port="$(start_stub 2 502 200)"
+start_stub 2 502 200
 read -r verdict code <<<"$(ha_token_status "http://127.0.0.1:${port}" "${TOKEN}")"
 check "waiting reaches the verdict" "accepted 200" "${verdict} ${code}"
 check "it asked again until Core answered" "3" "$(seen)"
 stop_stub
 
 # 4. reverse: a refusal is an answer — once, and not waited out
-port="$(start_stub 0 401 401)"
+start_stub 0 401 401
 start="$(date +%s)"
 read -r verdict code <<<"$(ha_token_status "http://127.0.0.1:${port}" "${TOKEN}")"
 elapsed=$(( $(date +%s) - start ))
@@ -104,10 +104,14 @@ check "no answer is neither verdict" "unreachable 000" "${verdict} ${code}"
 check "the wait is bounded by its budget" "yes" "$([ "${elapsed}" -le 6 ] && echo yes || echo no)"
 
 # 6. the budget is one number, and it is what bounds the loop
-port="$(start_stub 5 502 200)"
+start_stub 5 502 200
 HA_CORE_WAIT_SECONDS=0 ha_token_status "http://127.0.0.1:${port}" "${TOKEN}" >/dev/null
 check "a zero budget is one attempt" "1" "$(seen)"
 stop_stub
+
+# no stub may outlive the test (each carries its owner's pid in its argv, so an
+# orphan reparented to init is still found)
+check "no stub node process is left running" "0" "$(pgrep -f "stub-of-$$" | wc -l | tr -d ' ')"
 
 if [ "${fails}" -eq 0 ]; then
     echo "PASS: all ha-core-ready checks passed"

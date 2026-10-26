@@ -55,10 +55,10 @@ start_stub() { # [stall]
         res.end("stub");
       });
       s.listen(0, "127.0.0.1", () => console.log(s.address().port));
-    ' "${1:-}" "${work}/seen" > "${work}/port" &
+    ' "${1:-}" "${work}/seen" "stub-of-$$" > "${work}/port" &
     stub_pid=$!
     for _ in $(seq 1 50); do [ -s "${work}/port" ] && break; sleep 0.1; done
-    cat "${work}/port"
+    port="$(cat "${work}/port")"
 }
 stop_stub() {
     kill "${stub_pid}" 2>/dev/null
@@ -90,7 +90,7 @@ has() { case "$2" in *"$1"*) echo yes ;; *) echo no ;; esac; }
 # The call the defect was measured in: the token as an argument.
 argv_call() { curl -sS -m 5 -H "Authorization: Bearer ${TOKEN}" "$1"; }
 
-port="$(start_stub stall)"
+start_stub stall
 url="http://127.0.0.1:${port}/api/"
 
 # 1. the instrument, proven on a call that really does carry the token in argv
@@ -122,7 +122,7 @@ kill "${call_pid}" 2>/dev/null; wait "${call_pid}" 2>/dev/null; call_pid=""
 stop_stub
 
 # 3. the header still arrives, exactly
-port="$(start_stub)"
+start_stub
 url="http://127.0.0.1:${port}/api/"
 ha_curl "${TOKEN}" -sS -m 5 "${url}" >/dev/null 2>&1
 check "Home Assistant receives the bearer" "Bearer ${TOKEN}" \
@@ -153,6 +153,10 @@ printf '#!/bin/sh\nexit 7\n' > "${work}/exit7"
 chmod +x "${work}/exit7"
 HA_CURL_CMD="${work}/exit7" ha_curl "${TOKEN}" -sS >/dev/null 2>&1
 check "the caller sees curl's exit status" "7" "$?"
+
+# no stub may outlive the test (each carries its owner's pid in its argv, so an
+# orphan reparented to init is still found)
+check "no stub node process is left running" "0" "$(pgrep -f "stub-of-$$" | wc -l | tr -d ' ')"
 
 if [ "${fails}" -eq 0 ]; then
     echo "PASS: all ha-curl checks passed"
