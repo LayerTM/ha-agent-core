@@ -4,6 +4,16 @@ All notable changes to this project are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses [Semantic Versioning](https://semver.org/).
 
+## [0.11.2]
+
+### Changed
+
+- The `hass-mcp` registration is reconciled with the current Home Assistant URL
+  and token at every start: a changed token or URL replaces it, a removed token
+  unregisters it. Needs the adapter to provide the optional
+  `engine_mcp_remove NAME` hook; without it a warning is logged and the old
+  registration stays. A `hass-mcp` the user added without a token is left alone.
+
 ## [0.11.1] - 2026-10-24
 
 ### Security

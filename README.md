@@ -682,6 +682,7 @@ start. It needs these from the hooks file:
 | `engine_provision_plugins` | installs the engine's plugins; an engine without plugins does nothing |
 | `engine_mcp_has NAME` | succeeds when the MCP server `NAME` is registered |
 | `engine_mcp_add NAME [KEY=VALUE...] -- ARGV...` | registers it for the user, with that environment and command line |
+| `engine_mcp_remove NAME` (optional) | unregisters the MCP server `NAME`; the script uses it to replace or drop `hass-mcp` when the Home Assistant token or URL changes. Without it the script logs a warning and leaves the old registration |
 
 These functions run in plain bash (not bashio) and may call `log MESSAGE`.
 `provision-extras --check` prints what is missing, one item per line; the
