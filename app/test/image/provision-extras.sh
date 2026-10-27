@@ -59,7 +59,9 @@ fresh() {
 
 # neutral_hooks [what to leave out]: a neutral engine-hooks.sh. The hooks
 # record their calls in /pins/calls; engine_mcp_has finds the names listed in
-# /pins/mcp-present; engine_mcp_add fails while /pins/mcp-fail exists.
+# /pins/mcp-present; engine_mcp_add fails while /pins/mcp-fail exists;
+# engine_mcp_remove (left out for "engine_mcp_remove") drops the name from
+# /pins/mcp-present and fails while /pins/remove-fail exists.
 neutral_hooks() {
     local omit="${1:-}"
     {
@@ -72,6 +74,8 @@ neutral_hooks() {
             || printf '%s\n' 'engine_mcp_has() { echo "has $1" >> /pins/calls; grep -qxF "$1" /pins/mcp-present 2>/dev/null; }'
         [ "${omit}" = engine_mcp_add ] \
             || printf '%s\n' 'engine_mcp_add() { { printf add; printf " [%s]" "$@"; echo; } >> /pins/calls; [ ! -e /pins/mcp-fail ]; }'
+        [ "${omit}" = engine_mcp_remove ] \
+            || printf '%s\n' 'engine_mcp_remove() { echo "remove $1" >> /pins/calls; [ ! -e /pins/remove-fail ] || return 1; sed -i "/^$1\$/d" /pins/mcp-present 2>/dev/null; return 0; }'
     } > /usr/local/lib/engine-hooks.sh
 }
 
@@ -258,7 +262,7 @@ printf '%s\n' '  › official (anthropics/claude-plugins-official)' '  › skill
 printf '%s\n' 'playwright: playwright-mcp --headless - ✓ Connected' 'hass-mcp: hass-mcp - ✓ Connected' > "${P}/claude-mcp"
 skills_repo v2 s1 s3
 mkdir -p /data/home/.claude/skills/own && printf 'own\n' > /data/home/.claude/skills/own/SKILL.md
-RUN_ENV="CC_USER_MARKETPLACES=me/mp CC_USER_PLUGINS=x@me CC_SKILLS_GIT=file://${SKILLS_REPO} HA_TOKEN=tok HA_URL=http://ha.invalid:1"
+RUN_ENV="CC_USER_MARKETPLACES=me/mp CC_USER_PLUGINS=x@me CC_SKILLS_GIT=file://${SKILLS_REPO} HA_TOKEN=tok"
 run
 snapshot "second run" >> /tmp/claude-golden.actual
 RUN_ENV=""
@@ -267,6 +271,66 @@ if diff -u /src/app/test/fixtures/provision-extras-claude.golden /tmp/claude-gol
 else
     bad "calls, files and log equal the golden (diff above)"
 fi
+
+echo "8. hass-mcp follows the current Home Assistant URL and token"
+FP=/data/.hass-mcp-fingerprint
+# the files that hold a token, other than the calls (which pass it to the engine)
+tokens() { grep -lE 'tok-(old|new|newer)' "${P}/log" "${FP}" 2>/dev/null || true; }
+fresh
+neutral_hooks
+RUN_ENV="HA_TOKEN=tok-old HA_URL=http://ha.invalid:1"
+run
+eq "first start: registers it" "$(grep -E 'hass-mcp' "${P}/calls" | paste -sd'|')" "has hass-mcp|add [hass-mcp] [HA_URL=http://ha.invalid:1] [HA_TOKEN=tok-old] [--] [hass-mcp]"
+eq "the fingerprint file is 0600" "$(stat -c %a "${FP}")" 600
+printf 'playwright\nhass-mcp\n' > "${P}/mcp-present"
+rm -f "${P}/calls"
+run
+eq "same token: nothing is added or removed" "$(grep -E 'hass-mcp|remove|add' "${P}/calls" | paste -sd'|')" "has hass-mcp"
+fp_old="$(cat "${FP}")"
+rm -f "${P}/calls"
+RUN_ENV="HA_TOKEN=tok-new HA_URL=http://ha.invalid:1"
+run
+eq "changed token: removed, then added with the new one" "$(grep -E 'hass-mcp|remove|add \[hass' "${P}/calls" | paste -sd'|')" \
+    "has hass-mcp|remove hass-mcp|add [hass-mcp] [HA_URL=http://ha.invalid:1] [HA_TOKEN=tok-new] [--] [hass-mcp]"
+if [ "$(cat "${FP}")" != "${fp_old}" ]; then ok "the fingerprint changed"; else bad "the fingerprint did not change"; fi
+printf 'playwright\nhass-mcp\n' > "${P}/mcp-present"
+rm -f "${P}/calls"
+RUN_ENV="HA_TOKEN=tok-new HA_URL=http://other.invalid:2"
+run
+contains "a changed URL is followed too" "${P}/calls" "remove hass-mcp"
+printf 'playwright\nhass-mcp\n' > "${P}/mcp-present"
+rm -f "${P}/calls"
+touch "${P}/mcp-fail"
+fp_before="$(cat "${FP}")"
+RUN_ENV="HA_TOKEN=tok-newer HA_URL=http://other.invalid:2"
+run
+rm -f "${P}/mcp-fail"
+eq "a failed add keeps the old fingerprint" "$(cat "${FP}")" "${fp_before}"
+contains "and says so" "${P}/log" "[T]   FAILED hass-mcp"
+printf 'playwright\nhass-mcp\n' > "${P}/mcp-present"
+rm -f "${P}/calls"
+RUN_ENV=""
+run
+eq "token removed: unregistered" "$(grep -E 'hass-mcp|remove' "${P}/calls" | paste -sd'|')" "has hass-mcp|remove hass-mcp"
+absent "and the fingerprint is gone" "${FP}"
+rm -f "${P}/calls"
+printf 'playwright\nhass-mcp\n' > "${P}/mcp-present"
+run
+eq "no token, no fingerprint: a user's hass-mcp is not touched" "$(grep -E 'hass-mcp|remove|add \[hass' "${P}/calls" || true)" ""
+eq "no secret in the logs, calls or fingerprint" "$(tokens)" ""
+fresh
+neutral_hooks engine_mcp_remove
+RUN_ENV="HA_TOKEN=tok-old"
+run
+printf 'playwright\nhass-mcp\n' > "${P}/mcp-present"
+rm -f "${P}/calls"
+RUN_ENV="HA_TOKEN=tok-new"
+run
+eq "an adapter without engine_mcp_remove: exits 0" "${STATUS}" 0
+contains "it warns" "${P}/log" "[T] adapter cannot remove MCP servers; hass-mcp token change needs a manual re-add"
+lacks "and adds nothing" "${P}/calls" "add [hass-mcp]"
+eq "the run completes" "$(tail -n1 "${P}/log")" "[T] provisioning complete"
+RUN_ENV=""
 
 if [ "${fails}" -ne 0 ]; then
     echo "${fails} failed"

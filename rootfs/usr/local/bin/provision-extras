@@ -24,6 +24,8 @@ PROVISION_HOOKS=(
     engine_mcp_has            # engine_mcp_has NAME: succeeds when the MCP server is registered
     engine_mcp_add            # engine_mcp_add NAME [KEY=VALUE...] -- ARGV...: register it for the user
 )
+# Optional: engine_mcp_remove NAME unregisters a server. Without it a changed
+# or removed HA token cannot be followed in the engine's MCP registration.
 
 missing=()
 # shellcheck source=/dev/null
@@ -135,13 +137,64 @@ if ! engine_mcp_has playwright; then
         && log "  ok playwright" || log "  FAILED playwright MCP"
 fi
 
+# hass-mcp carries the token in the engine's own config, so its registration is
+# reconciled with the current HA_URL and HA_TOKEN on every start. What was
+# registered is remembered as a hash of both (never the token itself); a server
+# registered without it (by the user) is left alone.
+hass_fp_file=/data/.hass-mcp-fingerprint
+hass_fp_old="$(cat "${hass_fp_file}" 2>/dev/null || true)"
+
+# hass_mcp_remove: unregisters hass-mcp; fails when the engine cannot
+hass_mcp_remove() {
+    if [ "$(type -t engine_mcp_remove)" = function ]; then
+        engine_mcp_remove hass-mcp >/dev/null 2>&1
+    else
+        log "adapter cannot remove MCP servers; hass-mcp token change needs a manual re-add"
+        return 1
+    fi
+}
+
 if [ -n "${HA_TOKEN:-}" ]; then
+    hass_url="${HA_URL:-http://homeassistant:8123}"
+    hass_fp="$(printf '%s\n%s' "${hass_url}" "${HA_TOKEN}" | sha256sum | cut -d' ' -f1)"
+    present=0
+    engine_mcp_has hass-mcp && present=1
+    if [ "${present}" = 1 ] && [ "${hass_fp_old}" = "${hass_fp}" ]; then
+        :
+    else
+        proceed=1
+        if [ "${present}" = 1 ]; then
+            if [ -n "${hass_fp_old}" ]; then
+                log "hass-mcp: HA URL or token changed, re-registering"
+                hass_mcp_remove || { proceed=0; log "  FAILED hass-mcp"; }
+            else
+                # registered before the fingerprint existed: its token is unknown
+                log "hass-mcp: registered with an unknown token, re-registering"
+                hass_mcp_remove || proceed=0
+            fi
+        else
+            log "registering hass-mcp (HA Token present)"
+        fi
+        if [ "${proceed}" = 1 ]; then
+            if engine_mcp_add hass-mcp \
+                "HA_URL=${hass_url}" \
+                "HA_TOKEN=${HA_TOKEN}" -- hass-mcp >/dev/null 2>&1; then
+                log "  ok hass-mcp"
+                ( umask 077 && printf '%s\n' "${hass_fp}" > "${hass_fp_file}" ) 2>/dev/null
+            else
+                log "  FAILED hass-mcp"
+            fi
+        fi
+    fi
+elif [ -n "${hass_fp_old}" ]; then
+    log "hass-mcp: HA token removed, unregistering"
     if ! engine_mcp_has hass-mcp; then
-        log "registering hass-mcp (HA Token present)"
-        engine_mcp_add hass-mcp \
-            "HA_URL=${HA_URL:-http://homeassistant:8123}" \
-            "HA_TOKEN=${HA_TOKEN}" -- hass-mcp >/dev/null 2>&1 \
-            && log "  ok hass-mcp" || log "  FAILED hass-mcp"
+        rm -f "${hass_fp_file}"
+    elif hass_mcp_remove; then
+        rm -f "${hass_fp_file}"
+        log "  ok hass-mcp removed"
+    else
+        log "  FAILED hass-mcp removal"
     fi
 fi
 
