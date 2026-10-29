@@ -167,6 +167,23 @@ exists "names with a path in them are skipped" "${N}/state/.skills-git"
 exists "the skills dir itself survives" "${N}/skills"
 eq "the names file is rewritten" "$(cat "${N}/state/.skills-git-names")" "$(printf 'a\nc')"
 
+echo "3b. skills_git switched to another repository: re-cloned, not pulled"
+SKILLS_REPO_A="${SKILLS_REPO}"
+SKILLS_REPO="${SKILLS_REPO_A}-b"
+rm -rf "${SKILLS_REPO}"
+skills_repo vB x
+RUN_ENV="CC_SKILLS_GIT=file://${SKILLS_REPO} HA_TOKEN=tok"
+rm -f "${P}/calls"
+run
+eq "exits 0" "${STATUS}" 0
+contains "the new repository is cloned" "${P}/log" "[T] skills_git cloned"
+lacks "the old clone is not pulled" "${P}/log" "skills_git pulled"
+eq "origin is the new repository" "$(git -C "${N}/state/.skills-git" remote get-url origin)" "file://${SKILLS_REPO}"
+eq "the new repository's skill is present" "$(cat "${N}/skills/x/SKILL.md")" "x vB"
+absent "the old repository's skill is gone" "${N}/skills/a"
+SKILLS_REPO="${SKILLS_REPO_A}"
+rm -rf "${SKILLS_REPO}-b"
+
 echo "4. no token, a failing server, a failing clone, no names file yet"
 fresh
 neutral_hooks
