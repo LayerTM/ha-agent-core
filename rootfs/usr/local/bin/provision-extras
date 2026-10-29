@@ -87,7 +87,9 @@ engine_provision_plugins
 # skills_git repo layout: each top-level dir is a skill containing SKILL.md.
 if [ -n "${CC_SKILLS_GIT:-}" ]; then
     cache="${ENGINE_STATE_DIR}/.skills-git"
-    if [ -d "${cache}/.git" ]; then
+    # A clone of another repository (the option was changed) is replaced, not pulled.
+    if [ -d "${cache}/.git" ] \
+        && [ "$(git -C "${cache}" remote get-url origin 2>/dev/null)" = "${CC_SKILLS_GIT}" ]; then
         git -C "${cache}" pull --ff-only >/dev/null 2>&1 && log "skills_git pulled" \
             || log "skills_git pull failed"
     else
