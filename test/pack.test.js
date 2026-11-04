@@ -229,3 +229,21 @@ test('refuses to drop a script the manifest does not have, and to ship a manifes
   });
   assert.throws(() => pack.build({ repo: malformed }), /unshippedScripts is not a map/);
 });
+
+test('every script in the core\'s own manifests that runs `bash test/<file>` names a file this repo has', () => {
+  const root = path.join(__dirname, '..');
+  const checked = [];
+  const missing = [];
+  for (const rel of ['package.json', 'app/package.json', 'ha-tools/package.json']) {
+    const dir = path.dirname(path.join(root, rel));
+    const { scripts = {} } = JSON.parse(fs.readFileSync(path.join(root, rel), 'utf8'));
+    for (const [name, command] of Object.entries(scripts)) {
+      for (const m of command.matchAll(/\bbash\s+(test\/\S+)/g)) {
+        checked.push(`${rel}:${name}`);
+        if (!fs.existsSync(path.join(dir, m[1]))) missing.push(`${rel} script ${name} runs ${m[1]}, which is not in this repo`);
+      }
+    }
+  }
+  assert.ok(checked.length >= 9, `the scan matched ${checked.length} bash-test scripts; the pattern no longer fits the manifests`);
+  assert.deepEqual(missing, []);
+});

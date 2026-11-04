@@ -767,9 +767,9 @@ The archive is an uncompressed ustar stream with every entry under
   other file, its `path`, `mode`, `size` and `sha256`;
 - a `package.json` is packed without the scripts `haAgentCore.unshippedScripts`
   names for it, and with every other one. Today that is `test:usage`,
-  `test:image` and the six `cc-`/`config-list` shell suites (`test:alerts`,
-  `test:config`, `test:monitor`, `test:digest`, `test:audit`,
-  `test:statusline`) in `app/package.json`: the core runs all eight itself, and
+  `test:image` and the other shell suites (`test:alerts`, `test:config`,
+  `test:curl`, `test:ready`, `test:monitor`, `test:digest`, `test:audit`) in
+  `app/package.json`: the core runs all nine itself, and
   their files are its own, so a shipped name would be one no other engine can
   run. What ships is `start`, `test`, `lint` and `typecheck` — the four that
   resolve in any add-on's tree. The list says what to DROP rather than what to
