@@ -40,6 +40,7 @@ const {
   MAX_BODY_BYTES, judgeClientBody, filterServerJson, createSseFilter,
 } = require('./mcp-filter');
 const { haBasename } = require('./ha-tool-names');
+const { createStateNames } = require('./state-names');
 
 // Exactly what the add-on needs, and nothing else.
 const MCP_PATH = '/api/mcp';
@@ -60,6 +61,13 @@ const DRY_RUN_TEXT = /"dry_run"\s*:\s*true/;
 // The one tool a lookup calls, and how long Core has to answer one.
 const LIVE_CONTEXT = 'GetLiveContext';
 const LOOKUP_TIMEOUT_MS = 10000;
+
+// The most of one answer from Home Assistant that is read. MAX_BODY_BYTES bounds
+// what an agent may send; this bounds what the house may hold, and a large house
+// is not an abuse of anything. /api/states carries every state whether exposed or
+// not: 6,300 states are about 4 MiB, so this is room for about 100,000.
+const MAX_ANSWER_BYTES = 64 * 1024 * 1024;
+const answerTooLarge = (what) => `Home Assistant's answer to ${what} is too large (over ${MAX_ANSWER_BYTES / (1024 * 1024)} MiB)`;
 
 // The relay's own question to Home Assistant about the token: an MCP
 // `initialize`, which every MCP server answers and which acts on nothing.
@@ -196,15 +204,15 @@ function allowed(method, pathname, entry) {
   return entry.cameras.has(pathname.slice(CAMERA_PREFIX.length));
 }
 
-// The whole body of a message, or null once it passes MAX_BODY_BYTES.
-function readBody(stream, done) {
+// The whole body of a message, or null once it passes `limit`.
+function readBody(stream, limit, done) {
   const chunks = [];
   let size = 0;
   let over = false;
   stream.on('data', (chunk) => {
     if (over) return;
     size += chunk.length;
-    if (size > MAX_BODY_BYTES) {
+    if (size > limit) {
       over = true;
       chunks.length = 0;
       return;
@@ -212,6 +220,28 @@ function readBody(stream, done) {
     chunks.push(chunk);
   });
   stream.on('end', () => done(over ? null : Buffer.concat(chunks)));
+}
+
+// A JSON answer from Home Assistant, as coreRequest gives it.
+function readJsonAnswer(stream, done) {
+  readBody(stream, MAX_ANSWER_BYTES, (raw) => {
+    let json;
+    try { json = raw === null ? null : JSON.parse(raw.toString('utf8')); } catch { json = null; }
+    done({ json, tooLarge: raw === null });
+  });
+}
+
+// The states list the same way, reduced to what a lookup reads as it arrives.
+function readStatesAnswer(stream, done) {
+  const names = createStateNames();
+  let size = 0;
+  stream.on('data', (chunk) => {
+    size += chunk.length;
+    if (size <= MAX_ANSWER_BYTES) names.push(chunk);
+  });
+  stream.on('end', () => done(size > MAX_ANSWER_BYTES
+    ? { json: null, tooLarge: true }
+    : { json: names.end(), tooLarge: false }));
 }
 
 // Whether a request says it has a body. Only POST /api/mcp may, and that body
@@ -379,7 +409,7 @@ async function startCoreRelay({
     }
 
     if (pathname === MCP_PATH && req.method === 'POST') {
-      readBody(req, (body) => {
+      readBody(req, MAX_BODY_BYTES, (body) => {
         if (body === null) {
           deny(res, 413, 'request body too large');
           return;
@@ -502,8 +532,16 @@ async function startCoreRelay({
           upRes.on('data', (chunk) => sse.push(chunk));
           upRes.on('end', () => { sse.end(); res.end(); });
         } else if (type.startsWith('application/json')) {
-          readBody(upRes, (raw) => {
-            const kept = raw === null ? '' : filterServerJson(raw.toString('utf8'), observe);
+          readBody(upRes, MAX_ANSWER_BYTES, (raw) => {
+            if (raw === null) {
+              // Not an answer that may not reach the agent, which would leave it
+              // waiting for one: it gets its own refusal, like a redirect.
+              const why = answerTooLarge(`${req.method} ${pathname}`);
+              log(`relay upstream: ${why}`);
+              deny(res, 502, why);
+              return;
+            }
+            const kept = filterServerJson(raw.toString('utf8'), observe);
             if (kept === '') {
               delete out['content-type'];
               delete out['content-length'];
@@ -568,9 +606,10 @@ async function startCoreRelay({
 
   // One request of the relay's OWN to Core, with the Home Assistant token: no
   // agent is behind it, so it opens no door on the loopback server. Resolves to
-  // {status, json} (json null when the body is not JSON); rejects when Core
-  // cannot be reached or does not answer within the timeout.
-  function coreRequest(method, pathname, payload) {
+  // {status, json, tooLarge} (json null when the body is not JSON or is past the
+  // bound); rejects when Core cannot be reached, does not answer within the
+  // timeout, or stops halfway through its answer.
+  function coreRequest(method, pathname, payload, readAnswer = readJsonAnswer) {
     const body = payload === undefined ? null : Buffer.from(JSON.stringify(payload));
     const headers = { authorization: `Bearer ${haToken}`, accept: 'application/json' };
     if (body !== null) {
@@ -589,11 +628,8 @@ async function startCoreRelay({
         ...(secure ? { rejectUnauthorized: false } : {}),
       }, (upRes) => {
         if (pathname === MCP_PATH) observeMcpAnswer(upRes.statusCode, `${method} ${pathname}`);
-        readBody(upRes, (raw) => {
-          let json;
-          try { json = raw === null ? null : JSON.parse(raw.toString('utf8')); } catch { json = null; }
-          resolve({ status: upRes.statusCode, json });
-        });
+        upRes.on('error', reject);
+        readAnswer(upRes, (answer) => resolve({ status: upRes.statusCode, ...answer }));
       });
       upstream.on('timeout', () => upstream.destroy(new Error('core did not answer in time')));
       upstream.on('error', reject);
@@ -614,7 +650,8 @@ async function startCoreRelay({
       return coreRequest('POST', MCP_PATH, { jsonrpc: '2.0', id: rpcId, method, params });
     }
     async function rpc(method, params) {
-      const { status, json } = await request(method, params);
+      const { status, json, tooLarge } = await request(method, params);
+      if (tooLarge) throw new Error(answerTooLarge(method));
       if (status !== 200 || !json || json.error || !json.result) {
         throw new Error(`Home Assistant answered ${method} with ${status}`);
       }
@@ -739,8 +776,10 @@ async function startCoreRelay({
         live: (name) => callLive({ name }),
         liveDomain: (domain) => callLive({ domain }),
         async states() {
-          const { status, json } = await coreRequest('GET', '/api/states');
-          if (status !== 200 || !Array.isArray(json)) throw new Error(`Home Assistant answered the states list with ${status}`);
+          const { status, json, tooLarge } = await coreRequest('GET', '/api/states', undefined, readStatesAnswer);
+          if (status !== 200) throw new Error(`Home Assistant answered the states list with ${status}`);
+          if (tooLarge) throw new Error(answerTooLarge('the states list'));
+          if (json === null) throw new Error("Home Assistant's states list is not a list");
           return json;
         },
       };
@@ -767,7 +806,7 @@ async function startCoreRelay({
           record(describeCall(recorded, ' (no answer)'));
           return { ok: false, error: `Home Assistant did not answer: ${err.message}` };
         }
-        const error = actionError(answered);
+        const error = answered.tooLarge ? answerTooLarge('tools/call') : actionError(answered);
         record(describeCall(recorded, error === null ? '' : ' (failed)'));
         return error === null ? { ok: true } : { ok: false, error };
       };

@@ -4,6 +4,23 @@ All notable changes to this project are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses [Semantic Versioning](https://semver.org/).
 
+## [0.11.4] - 2026-11-04
+
+### Fixed
+
+- On a large install every confirmed action through Assist failed, because the
+  states list used to look up a device passed the 1 MiB cap on what the relay
+  reads. Answers from Home Assistant now have their own bound of 64 MiB, the
+  states list is read as it arrives and only entity ids and friendly names are
+  kept. Affected versions: 0.7.9 to 0.11.3.
+- The same cap also hit a large tool catalog, a large live context and a large
+  tool answer. An agent got no answer to its call, and a confirmed action that
+  Home Assistant had carried out was reported as failed.
+- An answer past the bound is now named as too large, with the bound, to the log
+  and to the agent, instead of "answered with 200" or silence.
+- An answer from Home Assistant that stops halfway now fails at once, instead of
+  leaving the lookup or the action waiting on it.
+
 ## [0.11.3] - 2026-10-29
 
 ### Fixed
