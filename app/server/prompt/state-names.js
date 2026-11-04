@@ -3,7 +3,8 @@
 // Reads Home Assistant's states list as it arrives and keeps of each state only
 // what a device lookup reads: its entity id and its friendly name. An install's
 // list holds every state with all its attributes, most of them for devices no
-// lookup will ever ask about, so the list is never held or parsed as a whole.
+// lookup will ever ask about, so the list is never held or parsed as a whole. A
+// state without an entity id is nothing a lookup could find, and is not kept.
 // One state is parsed at a time, and the event loop gets a turn between chunks.
 //
 // The scan works on bytes: every character it looks for is ASCII, and no byte of
@@ -23,7 +24,12 @@ const AFTER_STATE = 1;
 const AFTER_COMMA = 2;
 const isSpace = (byte) => byte === 0x20 || byte === 0x0a || byte === 0x0d || byte === 0x09;
 
+// What one kept state costs beyond its two strings, so that a list of very many
+// tiny states counts too. About what V8 spends on the two objects.
+const KEPT_STATE_BYTES = 64;
+
 function keptOf(state) {
+  if (typeof state.entity_id !== 'string') return null;
   const friendly = state.attributes && state.attributes.friendly_name;
   return {
     entity_id: state.entity_id,
@@ -34,7 +40,7 @@ function keptOf(state) {
 /**
  * @returns {{ push(chunk: Buffer): void,
  *             held(): number,
- *             end(): Array<{entity_id: unknown, attributes: {friendly_name?: string}}>|null }}
+ *             end(): Array<{entity_id: string, attributes: {friendly_name?: string}}>|null }}
  *   `end` gives the states, or null when what arrived is not a list of objects.
  */
 function createStateNames() {
@@ -53,8 +59,10 @@ function createStateNames() {
     parts.push(tail);
     try {
       const kept = keptOf(JSON.parse(Buffer.concat(parts).toString('utf8')));
-      states.push(kept);
-      keptBytes += String(kept.entity_id).length + (kept.attributes.friendly_name || '').length;
+      if (kept !== null) {
+        states.push(kept);
+        keptBytes += KEPT_STATE_BYTES + kept.entity_id.length + (kept.attributes.friendly_name || '').length;
+      }
     } catch {
       broken = true;
     }

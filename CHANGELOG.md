@@ -22,6 +22,8 @@ uses [Semantic Versioning](https://semver.org/).
   bound, to the log and to the agent, instead of "answered with 200" or silence.
 - An answer from Home Assistant that stops halfway now fails at once, for a lookup,
   an action and an agent reading it, instead of leaving them waiting on it.
+- An agent that leaves now closes its request to Home Assistant, and an agent that
+  stops reading a stream now slows it instead of filling memory.
 
 ## [0.11.3] - 2026-10-29
 

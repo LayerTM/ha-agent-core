@@ -215,13 +215,14 @@ test('a tool catalog past the bound says so', async () => {
   assert.match(answer.error, new RegExp(`tools/list is too large.*${BOUND_MIB} MiB`));
 });
 
-test('an action answer past the bound says so, and is recorded as failed', async () => {
+test('an action answer past the bound says so, and is recorded as unread', async () => {
   answerRpc = (rpc, res) => (rpc.method === 'tools/call' ? writeOverBound(res, '{"jsonrpc":"2.0"') : defaultRpc(rpc, res));
   const answer = await relay.act('run')('HassTurnOn', { name: 'x' });
   assert.equal(answer.ok, false);
   assert.match(answer.error, new RegExp(`too large.*${BOUND_MIB} MiB`));
+  // The action went out; only its answer could not be read.
   const line = recorded.at(-1);
-  assert.ok(line.includes('HassTurnOn') && line.includes('(failed)'), line);
+  assert.ok(line.includes('HassTurnOn') && line.includes('(answer too large)'), line);
 });
 
 test('an agent is told when a tool answer is past the bound, instead of waiting for it', async () => {
@@ -477,6 +478,134 @@ test('an answer cut off midway gives its share back', async () => {
 test('a states list that stalls is given up on, and gives its share back', async () => {
   answerStates = (res) => { writeAndStall(res, '[{"entity_id":"sensor.a","pad":"', LARGE_SHARE); };
   await assert.rejects(soon(relay.lookup('run').states(), 'the idle timeout', 15000));
+  const body = shareBody(5);
+  answerRpc = (rpc, res) => sendJson(res, body);
+  assert.equal((await soon(agentCall(CALL), 'the next answer', 20000)).status, 200);
+});
+
+test('an agent gone before Home Assistant answers aborts the request and takes no share', async () => {
+  const body = shareBody(5);
+  // Twice, because one lost share would still leave room for one more answer.
+  for (let round = 0; round < 2; round += 1) {
+    let arrived;
+    const asked = new Promise((resolve) => { arrived = resolve; });
+    answerRpc = (rpc, res) => arrived(res);
+    const gone = openAgent(CALL);
+    gone.answered.catch(() => {});
+    const held = await soon(asked, 'the stub');
+    const closed = new Promise((resolve) => { held.once('close', resolve); });
+    gone.req.destroy();
+    gone.done();
+    await soon(closed, 'the request aborted');
+    sendJson(held, body);
+  }
+  answerRpc = (rpc, res) => sendJson(res, body);
+  assert.equal((await soon(agentCall(CALL), 'the next answer', 20000)).status, 200);
+});
+
+test('an agent gone while the answer arrives gives its share back on every order', async () => {
+  const body = shareBody(5);
+  for (const wait of [0, 1, 5, 20]) {
+    answerRpc = (rpc, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.write(body.slice(0, MIB));
+      setTimeout(() => res.end(body.slice(MIB)), wait);
+    };
+    const gone = openAgent(CALL);
+    gone.answered.catch(() => {});
+    await new Promise((resolve) => { setTimeout(resolve, wait); });
+    gone.req.destroy();
+    gone.done();
+    await new Promise((resolve) => { setTimeout(resolve, 50); });
+  }
+  answerRpc = (rpc, res) => sendJson(res, body);
+  assert.equal((await soon(agentCall(CALL), 'the next answer', 20000)).status, 200);
+});
+
+const sseCall = () => openAgent(CALL, { accept: 'application/json, text/event-stream' });
+
+test('an event past the budget ends the stream and closes the upstream', async () => {
+  let closed;
+  answerRpc = (rpc, res) => {
+    closed = new Promise((resolve) => { res.once('close', resolve); });
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    const pad = Buffer.alloc(MIB, 0x7a);
+    res.write('data: ');
+    (async () => {
+      for (let i = 0; i <= HELD_MIB + 1 && !res.destroyed; i += 1) {
+        if (!res.write(pad)) await Promise.race([new Promise((r) => { res.once('drain', r); }), closed]);
+      }
+    })();
+  };
+  const open = sseCall();
+  try {
+    // No event was complete, so the end may come before any header reached the agent.
+    await assert.rejects(soon(open.answered.then((res) => {
+      res.resume();
+      return readAll(res);
+    }), 'the end of the stream', 20000));
+    await soon(closed, 'upstream close');
+    assert.equal(logged.filter((l) => l.includes('too large')).length, 1, logged.join('\n'));
+  } finally {
+    open.req.destroy();
+    open.done();
+  }
+  const body = shareBody(5);
+  answerRpc = (rpc, res) => sendJson(res, body);
+  assert.equal((await soon(agentCall(CALL), 'the next answer', 20000)).status, 200);
+});
+
+test('an agent not reading a stream slows Home Assistant rather than filling memory', async () => {
+  let sent = 0;
+  let closed;
+  const event = `data: ${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/progress', params: { pad: 'p'.repeat(MIB) } })}\n\n`;
+  answerRpc = (rpc, res) => {
+    closed = new Promise((resolve) => { res.once('close', resolve); });
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    (async () => {
+      while (!res.destroyed && sent < 200) {
+        sent += 1;
+        if (!res.write(event)) await Promise.race([new Promise((r) => { res.once('drain', r); }), closed]);
+      }
+    })();
+  };
+  const open = sseCall();
+  const res = await soon(open.answered, 'headers');
+  await new Promise((resolve) => { setTimeout(resolve, 1500); });
+  assert.ok(sent < 60, `${sent} MiB went out to an agent that read none of it`);
+  open.req.destroy();
+  open.done();
+  res.destroy();
+  await soon(closed, 'upstream close');
+});
+
+test('an agent that stops reading loses the answer and gives its share back', async () => {
+  const body = shareBody(5);
+  answerRpc = (rpc, res) => sendJson(res, body);
+  const idle = openAgent(CALL);
+  try {
+    const res = await soon(idle.answered, 'the answer');
+    assert.equal(res.statusCode, 200);
+    assert.equal((await soon(agentCall(CALL), 'a second answer')).status, 502);
+    // A socket with a write in progress gets one more idle period before it times out.
+    let status = 502;
+    const since = Date.now();
+    while (status !== 200 && Date.now() - since < 25000) {
+      await new Promise((resolve) => { setTimeout(resolve, 1000); });
+      ({ status } = await soon(agentCall(CALL), 'an answer after the idle limit', 20000));
+    }
+    assert.equal(status, 200);
+  } finally {
+    idle.req.destroy();
+    idle.done();
+  }
+});
+
+test('an answer that stalls on its way to an agent is given up on', async () => {
+  answerRpc = (rpc, res) => { writeAndStall(res, '{"jsonrpc":"2.0"', LARGE_SHARE); };
+  const { status, text } = await soon(agentCall(CALL), 'the idle limit', 15000);
+  assert.equal(status, 502);
+  assert.match(text, /stopped answering/);
   const body = shareBody(5);
   answerRpc = (rpc, res) => sendJson(res, body);
   assert.equal((await soon(agentCall(CALL), 'the next answer', 20000)).status, 200);

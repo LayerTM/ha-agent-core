@@ -43,11 +43,18 @@ test('what is held falls back to what was kept once a state is read', () => {
   names.push(Buffer.from('[{"entity_id":"light.a","pad":"xxxxxxxxxxxxxxxx'));
   assert.ok(names.held() > 40);
   names.push(Buffer.from('"}'));
-  assert.equal(names.held(), 'light.a'.length);
+  assert.equal(names.held(), 64 + 'light.a'.length);
 });
 
 test('spaces between states are not a grammar error', () => {
-  assert.deepEqual(scan(' [ { } , \n { } ] '), [{ entity_id: undefined, attributes: {} }, { entity_id: undefined, attributes: {} }]);
+  assert.deepEqual(scan(' [ {"entity_id":"a.b"} , \n {"entity_id":"c.d"} ] ').map((s) => s.entity_id), ['a.b', 'c.d']);
+});
+
+test('a state without an entity id is not kept and costs nothing', () => {
+  const names = createStateNames();
+  names.push(Buffer.from('[{},{"entity_id":7},{"entity_id":"a.b"}]'));
+  assert.deepEqual(names.end(), [{ entity_id: 'a.b', attributes: {} }]);
+  assert.equal(names.held(), 64 + 'a.b'.length);
 });
 
 test('an empty list is a list', () => {
