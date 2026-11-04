@@ -24,8 +24,7 @@
         "test:ready",
         "test:monitor",
         "test:digest",
-        "test:audit",
-        "test:statusline"
+        "test:audit"
       ],
       "ha-tools/package.json": []
     }
