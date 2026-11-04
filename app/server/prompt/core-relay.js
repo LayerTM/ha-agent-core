@@ -80,6 +80,9 @@ const LOOKUP_TIMEOUT_MS = 10000;
 const MIB = 1024 * 1024;
 const MAX_ANSWERS_HELD_BYTES = 16 * MIB;
 const MAX_STATES_BYTES = 64 * MIB;
+// How long an agent has to read one answer it holds a share for, however busy its
+// socket looks. Over loopback the largest answer takes well under a second.
+const DELIVERY_DEADLINE_MS = 60000;
 const answerTooLarge = (what) => `Home Assistant's answer to ${what} is too large (over ${MAX_ANSWERS_HELD_BYTES / MIB} MiB, counting answers being read at the same time)`;
 const statesTooLarge = () => `Home Assistant's states list is too large (over ${MAX_STATES_BYTES / MIB} MiB)`;
 
@@ -352,6 +355,7 @@ function deny(res, status, message) {
  * @param {(line: string) => void} [opts.record]  One audit line per tool call.
  * @param {number} [opts.authProbeEveryMs]  Probe the token at start and then this
  *   often; 0 (the default) probes only when asked.
+ * @param {number} [opts.deliveryDeadlineMs]  How long an agent has to read one answer.
  * @returns {Promise<{
  *   url: string, port: number, issue: (runId: string) => string,
  *   revoke: (token: string) => void, close: () => void,
@@ -374,6 +378,7 @@ function deny(res, status, message) {
  */
 async function startCoreRelay({
   coreOrigin, haToken, log = () => {}, record = () => {}, authProbeEveryMs = 0,
+  deliveryDeadlineMs = DELIVERY_DEADLINE_MS,
 }) {
   // Whether Home Assistant accepts the add-on's token on the MCP path, from the
   // latest answer that said so: 'ok', 'unauthorized', 'unreachable' (a probe got
@@ -676,8 +681,9 @@ async function startCoreRelay({
             // The bytes as they came when all of it may pass: once the agent is
             // only being written to, the text and what it parsed to are not held.
             const answer = kept === text ? raw : Buffer.from(kept);
-            // Fires after this to twice this: a write in progress gets one more period.
-            res.setTimeout(LOOKUP_TIMEOUT_MS, () => res.destroy());
+            const deadline = setTimeout(() => res.destroy(), deliveryDeadlineMs);
+            deadline.unref();
+            res.once('close', () => clearTimeout(deadline));
             out['content-length'] = String(answer.length);
             res.writeHead(upRes.statusCode, out);
             res.end(answer);

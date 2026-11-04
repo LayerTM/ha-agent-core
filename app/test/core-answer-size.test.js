@@ -7,6 +7,7 @@
 const { test, before, after, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('node:http');
+const net = require('node:net');
 const { startCoreRelay } = require('../server/prompt/core-relay');
 const { resolveAnswer } = require('../server/prompt/targets');
 
@@ -109,17 +110,17 @@ beforeEach(() => {
 });
 
 // What an agent sends through the relay, as an agent sends it.
-async function agentCall(rpc) {
-  const token = relay.issue('run-agent', { basenames: ['GetLiveContext', 'HassTurnOn'] });
+async function agentCall(rpc, through = relay) {
+  const token = through.issue('run-agent', { basenames: ['GetLiveContext', 'HassTurnOn'] });
   try {
-    const res = await fetch(`${relay.url}/api/mcp`, {
+    const res = await fetch(`${through.url}/api/mcp`, {
       method: 'POST',
       headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', accept: 'application/json' },
       body: JSON.stringify(rpc),
     });
     return { status: res.status, text: await res.text() };
   } finally {
-    relay.revoke(token);
+    through.revoke(token);
   }
 }
 const CALL = { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'GetLiveContext', arguments: {} } };
@@ -579,25 +580,58 @@ test('an agent not reading a stream slows Home Assistant rather than filling mem
   await soon(closed, 'upstream close');
 });
 
-test('an agent that stops reading loses the answer and gives its share back', async () => {
-  const body = shareBody(5);
-  answerRpc = (rpc, res) => sendJson(res, body);
-  const idle = openAgent(CALL);
-  try {
-    const res = await soon(idle.answered, 'the answer');
-    assert.equal(res.statusCode, 200);
-    assert.equal((await soon(agentCall(CALL), 'a second answer')).status, 502);
-    // A socket with a write in progress gets one more idle period before it times out.
-    let status = 502;
-    const since = Date.now();
-    while (status !== 200 && Date.now() - since < 25000) {
-      await new Promise((resolve) => { setTimeout(resolve, 1000); });
-      ({ status } = await soon(agentCall(CALL), 'an answer after the idle limit', 20000));
+// An agent that reads none of its answer, and either says nothing or keeps sending
+// bytes, which refreshes any limit that watches the socket for activity.
+for (const [how, keepsSending] of [['says nothing', false], ['keeps sending bytes', true]]) {
+  test(`an agent that reads nothing and ${how} loses the answer at the deadline`, async () => {
+    const short = await startCoreRelay({
+      coreOrigin: `http://127.0.0.1:${ha.address().port}`,
+      haToken: 'ha-token-never-in-a-message',
+      deliveryDeadlineMs: 1500,
+    });
+    const token = short.issue('run-idle', { basenames: ['GetLiveContext'] });
+    const rpc = JSON.stringify(CALL);
+    const socket = net.connect(short.port, '127.0.0.1');
+    socket.on('error', () => {});
+    socket.pause();
+    socket.write(`POST /api/mcp HTTP/1.1\r\nHost: relay\r\nAuthorization: Bearer ${token}\r\n`
+      + `Content-Type: application/json\r\nAccept: application/json\r\nContent-Length: ${rpc.length}\r\n\r\n${rpc}`);
+    const dribble = keepsSending
+      ? setInterval(() => { if (!socket.destroyed) socket.write('\r\n'); }, 300)
+      : null;
+    try {
+      const body = shareBody(5);
+      answerRpc = (r, res) => sendJson(res, body);
+      await new Promise((resolve) => { setTimeout(resolve, 500); });
+      assert.equal((await soon(agentCall(CALL, short), 'while it holds its share')).status, 502);
+      await new Promise((resolve) => { setTimeout(resolve, 2000); });
+      assert.equal((await soon(agentCall(CALL, short), 'past the deadline', 20000)).status, 200);
+    } finally {
+      if (dribble) clearInterval(dribble);
+      socket.destroy();
+      short.revoke(token);
+      short.close();
     }
+  });
+}
+
+test('an agent reading at an ordinary pace is not cut off', async () => {
+  const short = await startCoreRelay({
+    coreOrigin: `http://127.0.0.1:${ha.address().port}`,
+    haToken: 'ha-token-never-in-a-message',
+    deliveryDeadlineMs: 1500,
+  });
+  try {
+    const body = shareBody(5);
+    answerRpc = (r, res) => sendJson(res, body);
+    const { status, text } = await soon(agentCall(CALL, short), 'the answer', 20000);
     assert.equal(status, 200);
+    assert.equal(text, body);
+    // The timer goes with the answer: the connection is still usable afterwards.
+    await new Promise((resolve) => { setTimeout(resolve, 2000); });
+    assert.equal((await soon(agentCall(CALL, short), 'the next answer', 20000)).status, 200);
   } finally {
-    idle.req.destroy();
-    idle.done();
+    short.close();
   }
 });
 
