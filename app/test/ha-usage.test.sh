@@ -562,7 +562,8 @@ printf '#!/bin/bash\nprintf "%%s\\n" "$*" >> "%s"\n' "${work}/upkeep-calls" > "$
 : > "${work}/upkeep-calls"
 CC_USAGE_CMD="${work}/ha-usage-rec" USAGE_SWEEP_DAYS=9 USAGE_UPKEEP_FIRST_S=0 USAGE_UPKEEP_INTERVAL_S=1 bash "${upkeep}" > /dev/null &
 loop=$!
-sleep 1.5; kill "${loop}"; wait "${loop}" 2>/dev/null
+for _ in $(seq 100); do [ "$(wc -l < "${work}/upkeep-calls")" -ge 2 ] && break; sleep 0.1; done
+kill "${loop}"; wait "${loop}" 2>/dev/null
 check "it runs the upkeep at once and then every interval, with the sweep days" "$(sort -u "${work}/upkeep-calls")" "--maintain 9"
 check "more than once" "$(( $(wc -l < "${work}/upkeep-calls") >= 2 ))" 1
 check "a sweep that is not a number stops it" "$(USAGE_SWEEP_DAYS=x bash "${upkeep}" 2>/dev/null; echo $?)" 64

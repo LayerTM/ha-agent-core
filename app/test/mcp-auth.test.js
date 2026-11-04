@@ -169,6 +169,10 @@ test('closing the relay stops the timer', async () => {
   answer = 200;
   await withRelay({ authProbeEveryMs: 20 }, async (relay) => {
     await until(() => relay.mcpAuth() === 'ok');
+    // A tick just before the close leaves a probe on its way, and it reaches Home
+    // Assistant after the close. Closing with none in flight means anything seen
+    // from here on was started by a timer that outlived the close.
+    await relay.probeAuth();
   });
   const after_ = seen.length;
   await new Promise((r) => setTimeout(r, 80));
