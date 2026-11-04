@@ -62,12 +62,46 @@ const DRY_RUN_TEXT = /"dry_run"\s*:\s*true/;
 const LIVE_CONTEXT = 'GetLiveContext';
 const LOOKUP_TIMEOUT_MS = 10000;
 
-// The most of one answer from Home Assistant that is read. MAX_BODY_BYTES bounds
-// what an agent may send; this bounds what the house may hold, and a large house
-// is not an abuse of anything. /api/states carries every state whether exposed or
-// not: 6,300 states are about 4 MiB, so this is room for about 100,000.
-const MAX_ANSWER_BYTES = 64 * 1024 * 1024;
-const answerTooLarge = (what) => `Home Assistant's answer to ${what} is too large (over ${MAX_ANSWER_BYTES / (1024 * 1024)} MiB)`;
+// What is read of Home Assistant's answers. MAX_BODY_BYTES bounds what an agent
+// may send; these bound what the house may hold, and a large house is not an abuse
+// of anything.
+//
+// MAX_ANSWERS_HELD_BYTES is one budget for the whole process, shared by every
+// answer being read or delivered at the same moment, so that two runs cannot
+// multiply it. An answer that would pass it is refused as too large, at once. A
+// JSON answer costs up to about seven times its bytes while it is parsed (the
+// bytes, their text, what that parses to), so this keeps the relay near 160 MiB at
+// its worst on a small host. A tool answer carries only what is exposed to Assist.
+//
+// MAX_STATES_BYTES is how much of one states list is read at all. The list is not
+// held (state-names.js), so it can pass the budget's size. /api/states carries
+// every state whether exposed or not: 6,300 states are about 4 MiB, so this is room
+// for about 100,000.
+const MIB = 1024 * 1024;
+const MAX_ANSWERS_HELD_BYTES = 16 * MIB;
+const MAX_STATES_BYTES = 64 * MIB;
+const answerTooLarge = (what) => `Home Assistant's answer to ${what} is too large (over ${MAX_ANSWERS_HELD_BYTES / MIB} MiB, counting answers being read at the same time)`;
+const statesTooLarge = () => `Home Assistant's states list is too large (over ${MAX_STATES_BYTES / MIB} MiB)`;
+
+let answerBytesHeld = 0;
+// One answer's share of the budget. `take` is false when there is no room for that
+// many more bytes, and then nothing is taken; `release` gives back all of it and
+// may be called any number of times.
+function answerHold() {
+  let mine = 0;
+  return {
+    take(bytes) {
+      if (answerBytesHeld + bytes > MAX_ANSWERS_HELD_BYTES) return false;
+      answerBytesHeld += bytes;
+      mine += bytes;
+      return true;
+    },
+    release() {
+      answerBytesHeld -= mine;
+      mine = 0;
+    },
+  };
+}
 
 // The relay's own question to Home Assistant about the token: an MCP
 // `initialize`, which every MCP server answers and which acts on nothing.
@@ -204,44 +238,81 @@ function allowed(method, pathname, entry) {
   return entry.cameras.has(pathname.slice(CAMERA_PREFIX.length));
 }
 
-// The whole body of a message, or null once it passes `limit`.
-function readBody(stream, limit, done) {
-  const chunks = [];
-  let size = 0;
-  let over = false;
+// The whole body of a message, or null the moment `admit` turns a chunk's size
+// down. `done` is called once; what still arrives after a refusal is dropped.
+function readAdmitted(stream, admit, done) {
+  let chunks = [];
   stream.on('data', (chunk) => {
-    if (over) return;
-    size += chunk.length;
-    if (size > limit) {
-      over = true;
-      chunks.length = 0;
+    if (chunks === null) return;
+    if (admit(chunk.length)) {
+      chunks.push(chunk);
       return;
     }
-    chunks.push(chunk);
+    chunks = null;
+    done(null);
   });
-  stream.on('end', () => done(over ? null : Buffer.concat(chunks)));
+  stream.on('end', () => {
+    if (chunks === null) return;
+    const whole = Buffer.concat(chunks);
+    chunks = null;
+    done(whole);
+  });
 }
 
-// A JSON answer from Home Assistant, as coreRequest gives it.
+// What an agent sends, up to `limit`.
+function readBody(stream, limit, done) {
+  let size = 0;
+  readAdmitted(stream, (bytes) => {
+    size += bytes;
+    return size <= limit;
+  }, done);
+}
+
+// A JSON answer from Home Assistant, as coreRequest gives it. It holds its share
+// until it is parsed; one that passes the budget, or breaks, gives it back as its
+// connection closes.
 function readJsonAnswer(stream, done) {
-  readBody(stream, MAX_ANSWER_BYTES, (raw) => {
+  const hold = answerHold();
+  stream.once('close', hold.release);
+  readAdmitted(stream, hold.take, (raw) => {
     let json;
     try { json = raw === null ? null : JSON.parse(raw.toString('utf8')); } catch { json = null; }
+    hold.release();
     done({ json, tooLarge: raw === null });
+    if (raw === null) stream.destroy();
   });
 }
 
 // The states list the same way, reduced to what a lookup reads as it arrives.
 function readStatesAnswer(stream, done) {
   const names = createStateNames();
+  const hold = answerHold();
+  stream.once('close', hold.release);
   let size = 0;
+  let settled = false;
+  const refuse = (why) => {
+    settled = true;
+    hold.release();
+    done({ json: null, tooLarge: true, why });
+    stream.destroy();
+  };
   stream.on('data', (chunk) => {
+    if (settled) return;
     size += chunk.length;
-    if (size <= MAX_ANSWER_BYTES) names.push(chunk);
+    if (size > MAX_STATES_BYTES) {
+      refuse(statesTooLarge);
+      return;
+    }
+    const before = names.held();
+    names.push(chunk);
+    if (!hold.take(names.held() - before)) refuse(() => answerTooLarge('the states list'));
   });
-  stream.on('end', () => done(size > MAX_ANSWER_BYTES
-    ? { json: null, tooLarge: true }
-    : { json: names.end(), tooLarge: false }));
+  stream.on('end', () => {
+    if (settled) return;
+    settled = true;
+    hold.release();
+    done({ json: names.end(), tooLarge: false });
+  });
 }
 
 // Whether a request says it has a body. Only POST /api/mcp may, and that body
@@ -503,6 +574,21 @@ async function startCoreRelay({
         for (const [name, value] of Object.entries(upRes.headers)) {
           if (FORWARD_TO_CLIENT.has(name)) out[name] = value;
         }
+        // An agent that goes away has no use for the rest of the answer, and an
+        // answer that breaks must end what the agent is reading: without this it
+        // waits on a response that will never finish. Before the headers it can
+        // still be told why; after them, only that the answer did not complete.
+        const stopped = () => {
+          log(`relay upstream: Home Assistant stopped answering ${req.method} ${pathname}`);
+          if (!res.headersSent) deny(res, 502, 'Home Assistant stopped answering');
+          else res.destroy();
+        };
+        upRes.once('error', stopped);
+        const closeUpstream = () => {
+          upRes.off('error', stopped);
+          upRes.destroy();
+        };
+        res.once('close', closeUpstream);
         const type = String(upRes.headers['content-type'] || '');
         if (pathname !== MCP_PATH || !(upRes.statusCode >= 200 && upRes.statusCode < 300)) {
           // An answer Home Assistant refused used to travel back untouched and
@@ -532,16 +618,23 @@ async function startCoreRelay({
           upRes.on('data', (chunk) => sse.push(chunk));
           upRes.on('end', () => { sse.end(); res.end(); });
         } else if (type.startsWith('application/json')) {
-          readBody(upRes, MAX_ANSWER_BYTES, (raw) => {
+          // Its share of the budget is held until the agent has the answer: a slow
+          // reader keeps the bytes here.
+          const hold = answerHold();
+          res.once('close', hold.release);
+          readAdmitted(upRes, hold.take, (raw) => {
             if (raw === null) {
               // Not an answer that may not reach the agent, which would leave it
               // waiting for one: it gets its own refusal, like a redirect.
               const why = answerTooLarge(`${req.method} ${pathname}`);
               log(`relay upstream: ${why}`);
+              hold.release();
               deny(res, 502, why);
+              closeUpstream();
               return;
             }
-            const kept = filterServerJson(raw.toString('utf8'), observe);
+            const text = raw.toString('utf8');
+            const kept = filterServerJson(text, observe);
             if (kept === '') {
               delete out['content-type'];
               delete out['content-length'];
@@ -549,9 +642,12 @@ async function startCoreRelay({
               res.end();
               return;
             }
-            out['content-length'] = String(Buffer.byteLength(kept));
+            // The bytes as they came when all of it may pass: once the agent is
+            // only being written to, the text and what it parsed to are not held.
+            const answer = kept === text ? raw : Buffer.from(kept);
+            out['content-length'] = String(answer.length);
             res.writeHead(upRes.statusCode, out);
-            res.end(kept);
+            res.end(answer);
           });
         } else {
           // A success the agent cannot read as JSON-RPC carries nothing it may
@@ -776,9 +872,9 @@ async function startCoreRelay({
         live: (name) => callLive({ name }),
         liveDomain: (domain) => callLive({ domain }),
         async states() {
-          const { status, json, tooLarge } = await coreRequest('GET', '/api/states', undefined, readStatesAnswer);
+          const { status, json, tooLarge, why } = await coreRequest('GET', '/api/states', undefined, readStatesAnswer);
           if (status !== 200) throw new Error(`Home Assistant answered the states list with ${status}`);
-          if (tooLarge) throw new Error(answerTooLarge('the states list'));
+          if (tooLarge) throw new Error(why());
           if (json === null) throw new Error("Home Assistant's states list is not a list");
           return json;
         },

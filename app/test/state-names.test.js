@@ -38,6 +38,18 @@ test('a list delivered byte by byte reads the same', () => {
   assert.deepEqual(scan(...[...bytes].map((b) => [b])), KEPT);
 });
 
+test('what is held falls back to what was kept once a state is read', () => {
+  const names = createStateNames();
+  names.push(Buffer.from('[{"entity_id":"light.a","pad":"xxxxxxxxxxxxxxxx'));
+  assert.ok(names.held() > 40);
+  names.push(Buffer.from('"}'));
+  assert.equal(names.held(), 'light.a'.length);
+});
+
+test('spaces between states are not a grammar error', () => {
+  assert.deepEqual(scan(' [ { } , \n { } ] '), [{ entity_id: undefined, attributes: {} }, { entity_id: undefined, attributes: {} }]);
+});
+
 test('an empty list is a list', () => {
   assert.deepEqual(scan(' [ ] \n'), []);
 });
@@ -55,6 +67,12 @@ for (const [what, text] of [
   ['a state that is not JSON', '[{entity_id:1}]'],
   ['content after the list', '[{"entity_id":"light.a"}] x'],
   ['a second list', '[][]'],
+  ['a comma alone', '[,]'],
+  ['a comma first', '[,{}]'],
+  ['a comma last', '[{},]'],
+  ['two commas', '[{},,{}]'],
+  ['no comma', '[{}{}]'],
+  ['no comma across space', '[{} {}]'],
 ]) {
   test(`${what} is not a list of states`, () => {
     assert.equal(scan(text), null);

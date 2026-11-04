@@ -17,6 +17,10 @@ const OPEN_BRACE = 0x7b;
 const CLOSE_BRACE = 0x7d;
 const OPEN_BRACKET = 0x5b;
 const CLOSE_BRACKET = 0x5d;
+// Between states: the first value or the end, a comma or the end, or a value.
+const FIRST = 0;
+const AFTER_STATE = 1;
+const AFTER_COMMA = 2;
 const isSpace = (byte) => byte === 0x20 || byte === 0x0a || byte === 0x0d || byte === 0x09;
 
 function keptOf(state) {
@@ -29,6 +33,7 @@ function keptOf(state) {
 
 /**
  * @returns {{ push(chunk: Buffer): void,
+ *             held(): number,
  *             end(): Array<{entity_id: unknown, attributes: {friendly_name?: string}}>|null }}
  *   `end` gives the states, or null when what arrived is not a list of objects.
  */
@@ -39,16 +44,23 @@ function createStateNames() {
   let escaped = false;
   let closed = false;
   let broken = false;
+  let expected = FIRST;    // what may come next between states
+  let keptBytes = 0;
+  let partsBytes = 0;
   let parts = [];          // the bytes of the state being read, from earlier chunks
 
   function finish(tail) {
     parts.push(tail);
     try {
-      states.push(keptOf(JSON.parse(Buffer.concat(parts).toString('utf8'))));
+      const kept = keptOf(JSON.parse(Buffer.concat(parts).toString('utf8')));
+      states.push(kept);
+      keptBytes += String(kept.entity_id).length + (kept.attributes.friendly_name || '').length;
     } catch {
       broken = true;
     }
     parts = [];
+    partsBytes = 0;
+    expected = AFTER_STATE;
   }
 
   return {
@@ -77,17 +89,27 @@ function createStateNames() {
         } else if (depth === 0) {
           if (byte === OPEN_BRACKET) depth = 1;
           else broken = true;
-        } else if (byte === OPEN_BRACE) {
+        } else if (byte === OPEN_BRACE && expected !== AFTER_STATE) {
           depth = 2;
           start = i;
-        } else if (byte === CLOSE_BRACKET) {
+        } else if (byte === CLOSE_BRACKET && expected !== AFTER_COMMA) {
           depth = 0;
           closed = true;
-        } else if (byte !== COMMA) {
+        } else if (byte === COMMA && expected === AFTER_STATE) {
+          expected = AFTER_COMMA;
+        } else {
           broken = true;
         }
       }
-      if (start !== -1 && !broken) parts.push(chunk.subarray(start));
+      if (start !== -1 && !broken) {
+        parts.push(chunk.subarray(start));
+        partsBytes += chunk.length - start;
+      }
+    },
+    // What this reader is holding right now, about: the state being read and what
+    // was kept of the others.
+    held() {
+      return partsBytes + keptBytes;
     },
     end() {
       return closed && !broken ? states : null;

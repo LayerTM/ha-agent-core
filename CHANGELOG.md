@@ -10,16 +10,18 @@ uses [Semantic Versioning](https://semver.org/).
 
 - On a large install every confirmed action through Assist failed, because the
   states list used to look up a device passed the 1 MiB cap on what the relay
-  reads. Answers from Home Assistant now have their own bound of 64 MiB, the
-  states list is read as it arrives and only entity ids and friendly names are
-  kept. Affected versions: 0.7.9 to 0.11.3.
+  reads. The states list is now read as it arrives, up to 64 MiB, and only entity
+  ids and friendly names are kept. Affected versions: 0.7.9 to 0.11.3.
 - The same cap also hit a large tool catalog, a large live context and a large
   tool answer. An agent got no answer to its call, and a confirmed action that
   Home Assistant had carried out was reported as failed.
-- An answer past the bound is now named as too large, with the bound, to the log
-  and to the agent, instead of "answered with 200" or silence.
-- An answer from Home Assistant that stops halfway now fails at once, instead of
-  leaving the lookup or the action waiting on it.
+  All other answers from Home Assistant now share one budget of 16 MiB across
+  everything being read or delivered at the same time.
+- An answer past its bound is refused the moment the bound is passed, and the
+  connection to Home Assistant is closed. It is named as too large, with the
+  bound, to the log and to the agent, instead of "answered with 200" or silence.
+- An answer from Home Assistant that stops halfway now fails at once, for a lookup,
+  an action and an agent reading it, instead of leaving them waiting on it.
 
 ## [0.11.3] - 2026-10-29
 
