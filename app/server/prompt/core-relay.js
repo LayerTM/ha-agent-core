@@ -40,6 +40,7 @@ const {
   MAX_BODY_BYTES, judgeClientBody, filterServerJson, createSseFilter,
 } = require('./mcp-filter');
 const { haBasename } = require('./ha-tool-names');
+const { createStateNames } = require('./state-names');
 
 // Exactly what the add-on needs, and nothing else.
 const MCP_PATH = '/api/mcp';
@@ -60,6 +61,64 @@ const DRY_RUN_TEXT = /"dry_run"\s*:\s*true/;
 // The one tool a lookup calls, and how long Core has to answer one.
 const LIVE_CONTEXT = 'GetLiveContext';
 const LOOKUP_TIMEOUT_MS = 10000;
+
+// What is read of Home Assistant's answers. MAX_BODY_BYTES bounds what an agent
+// may send; these bound what the house may hold, and a large house is not an abuse
+// of anything.
+//
+// MAX_ANSWERS_HELD_BYTES is one budget for the whole process, shared by every
+// answer being read or delivered at the same moment, so that two runs cannot
+// multiply it. An answer that would pass it is refused as too large, at once. A
+// JSON answer costs up to about seven times its bytes while it is parsed (the
+// bytes, their text, what that parses to), so this keeps the relay near 160 MiB at
+// its worst on a small host. A tool answer carries only what is exposed to Assist.
+//
+// MAX_STATES_BYTES is how much of one states list is read at all. The list is not
+// held (state-names.js), so it can pass the budget's size. /api/states carries
+// every state whether exposed or not: 6,300 states are about 4 MiB, so this is room
+// for about 100,000.
+const MIB = 1024 * 1024;
+const MAX_ANSWERS_HELD_BYTES = 16 * MIB;
+const MAX_STATES_BYTES = 64 * MIB;
+// How long an agent has to read one answer it holds a share for, however busy its
+// socket looks. Over loopback the largest answer takes well under a second.
+const DELIVERY_DEADLINE_MS = 60000;
+const answerTooLarge = (what) => `Home Assistant's answer to ${what} is too large (over ${MAX_ANSWERS_HELD_BYTES / MIB} MiB, counting answers being read at the same time)`;
+const statesTooLarge = () => `Home Assistant's states list is too large (over ${MAX_STATES_BYTES / MIB} MiB)`;
+
+let answerBytesHeld = 0;
+// One answer's share of the budget. `take` is false when there is no room for that
+// many more bytes, and then nothing is taken; `release` gives back all of it, may
+// be called any number of times, and is final: a released share takes nothing more,
+// so no order of events can leave bytes charged with nobody left to give them back.
+function answerHold() {
+  let mine = 0;
+  let released = false;
+  return {
+    take(bytes) {
+      if (released || answerBytesHeld + bytes > MAX_ANSWERS_HELD_BYTES) return false;
+      answerBytesHeld += bytes;
+      mine += bytes;
+      return true;
+    },
+    release() {
+      released = true;
+      answerBytesHeld -= mine;
+      mine = 0;
+    },
+  };
+}
+
+// Calls `onStall` when `stream` has delivered nothing for `ms`, until it closes or
+// ends. A timer of its own, not the socket's: that socket goes back to the pool.
+function watchStall(stream, ms, onStall) {
+  const timer = setTimeout(onStall, ms);
+  timer.unref();
+  stream.on('data', () => timer.refresh());
+  const stop = () => clearTimeout(timer);
+  stream.once('end', stop);
+  stream.once('close', stop);
+}
 
 // The relay's own question to Home Assistant about the token: an MCP
 // `initialize`, which every MCP server answers and which acts on nothing.
@@ -196,22 +255,81 @@ function allowed(method, pathname, entry) {
   return entry.cameras.has(pathname.slice(CAMERA_PREFIX.length));
 }
 
-// The whole body of a message, or null once it passes MAX_BODY_BYTES.
-function readBody(stream, done) {
-  const chunks = [];
-  let size = 0;
-  let over = false;
+// The whole body of a message, or null the moment `admit` turns a chunk's size
+// down. `done` is called once; what still arrives after a refusal is dropped.
+function readAdmitted(stream, admit, done) {
+  let chunks = [];
   stream.on('data', (chunk) => {
-    if (over) return;
-    size += chunk.length;
-    if (size > MAX_BODY_BYTES) {
-      over = true;
-      chunks.length = 0;
+    if (chunks === null) return;
+    if (admit(chunk.length)) {
+      chunks.push(chunk);
       return;
     }
-    chunks.push(chunk);
+    chunks = null;
+    done(null);
   });
-  stream.on('end', () => done(over ? null : Buffer.concat(chunks)));
+  stream.on('end', () => {
+    if (chunks === null) return;
+    const whole = Buffer.concat(chunks);
+    chunks = null;
+    done(whole);
+  });
+}
+
+// What an agent sends, up to `limit`.
+function readBody(stream, limit, done) {
+  let size = 0;
+  readAdmitted(stream, (bytes) => {
+    size += bytes;
+    return size <= limit;
+  }, done);
+}
+
+// A JSON answer from Home Assistant, as coreRequest gives it. It holds its share
+// until it is parsed; one that passes the budget, or breaks, gives it back as its
+// connection closes.
+function readJsonAnswer(stream, done) {
+  const hold = answerHold();
+  stream.once('close', hold.release);
+  readAdmitted(stream, hold.take, (raw) => {
+    let json;
+    try { json = raw === null ? null : JSON.parse(raw.toString('utf8')); } catch { json = null; }
+    hold.release();
+    done({ json, tooLarge: raw === null });
+    if (raw === null) stream.destroy();
+  });
+}
+
+// The states list the same way, reduced to what a lookup reads as it arrives.
+function readStatesAnswer(stream, done) {
+  const names = createStateNames();
+  const hold = answerHold();
+  stream.once('close', hold.release);
+  let size = 0;
+  let settled = false;
+  const refuse = (why) => {
+    settled = true;
+    hold.release();
+    done({ json: null, tooLarge: true, why });
+    stream.destroy();
+  };
+  stream.on('data', (chunk) => {
+    if (settled) return;
+    size += chunk.length;
+    if (size > MAX_STATES_BYTES) {
+      refuse(statesTooLarge);
+      return;
+    }
+    const before = names.held();
+    names.push(chunk);
+    if (!hold.take(names.held() - before)) refuse(() => answerTooLarge('the states list'));
+  });
+  stream.on('end', () => {
+    if (settled) return;
+    settled = true;
+    hold.release();
+    done({ json: names.end(), tooLarge: false });
+  });
 }
 
 // Whether a request says it has a body. Only POST /api/mcp may, and that body
@@ -237,6 +355,7 @@ function deny(res, status, message) {
  * @param {(line: string) => void} [opts.record]  One audit line per tool call.
  * @param {number} [opts.authProbeEveryMs]  Probe the token at start and then this
  *   often; 0 (the default) probes only when asked.
+ * @param {number} [opts.deliveryDeadlineMs]  How long an agent has to read one answer.
  * @returns {Promise<{
  *   url: string, port: number, issue: (runId: string) => string,
  *   revoke: (token: string) => void, close: () => void,
@@ -259,6 +378,7 @@ function deny(res, status, message) {
  */
 async function startCoreRelay({
   coreOrigin, haToken, log = () => {}, record = () => {}, authProbeEveryMs = 0,
+  deliveryDeadlineMs = DELIVERY_DEADLINE_MS,
 }) {
   // Whether Home Assistant accepts the add-on's token on the MCP path, from the
   // latest answer that said so: 'ok', 'unauthorized', 'unreachable' (a probe got
@@ -379,7 +499,7 @@ async function startCoreRelay({
     }
 
     if (pathname === MCP_PATH && req.method === 'POST') {
-      readBody(req, (body) => {
+      readBody(req, MAX_BODY_BYTES, (body) => {
         if (body === null) {
           deny(res, 413, 'request body too large');
           return;
@@ -424,6 +544,12 @@ async function startCoreRelay({
   }
 
   function forward(req, res, pathname, body, observe, runId) {
+    // The agent left while its request was being read; nothing was sent for it.
+    if (res.destroyed) return;
+    // What this answer holds of the budget. The response owns it: every way an
+    // answer ends, delivered, refused, broken or abandoned, closes the response, and
+    // the listener is in place before anything can be read or anyone can leave.
+    const share = answerHold();
     const headers = { authorization: `Bearer ${haToken}` };
     for (const [name, value] of Object.entries(req.headers)) {
       if (FORWARD_TO_CORE.has(name)) headers[name] = value;
@@ -473,6 +599,16 @@ async function startCoreRelay({
         for (const [name, value] of Object.entries(upRes.headers)) {
           if (FORWARD_TO_CLIENT.has(name)) out[name] = value;
         }
+        // An answer that breaks must end what the agent is reading: without this it
+        // waits on a response that will never finish. Before the headers it can
+        // still be told why; after them, only that the answer did not complete.
+        const stopped = () => {
+          if (res.destroyed) return;
+          log(`relay upstream: Home Assistant stopped answering ${req.method} ${pathname}`);
+          if (!res.headersSent) deny(res, 502, 'Home Assistant stopped answering');
+          else res.destroy();
+        };
+        upRes.once('error', stopped);
         const type = String(upRes.headers['content-type'] || '');
         if (pathname !== MCP_PATH || !(upRes.statusCode >= 200 && upRes.statusCode < 300)) {
           // An answer Home Assistant refused used to travel back untouched and
@@ -498,12 +634,43 @@ async function startCoreRelay({
           delete out['content-length'];
           res.writeHead(upRes.statusCode, out);
           upRes.setEncoding('utf8');
-          const sse = createSseFilter((chunk) => res.write(chunk), observe);
-          upRes.on('data', (chunk) => sse.push(chunk));
+          // Home Assistant waits for an agent that is not reading, so what piles up
+          // here is only the event still being read, and that counts as held.
+          const sse = createSseFilter((chunk) => { if (!res.write(chunk)) upRes.pause(); }, observe);
+          res.on('drain', () => upRes.resume());
+          upRes.on('data', (chunk) => {
+            if (res.destroyed) return;
+            const before = sse.held();
+            sse.push(chunk);
+            if (share.take(sse.held() - before)) return;
+            log(`relay upstream: ${answerTooLarge(`${req.method} ${pathname}`)}`);
+            res.destroy();
+          });
           upRes.on('end', () => { sse.end(); res.end(); });
         } else if (type.startsWith('application/json')) {
-          readBody(upRes, (raw) => {
-            const kept = raw === null ? '' : filterServerJson(raw.toString('utf8'), observe);
+          // Its share is held until the agent has the answer: a slow reader keeps the
+          // bytes here. So neither side may stall for long while holding it, or one
+          // connection could keep every other answer refused. No limit runs before
+          // the headers: nothing is held yet, and a tool may rightly take its time.
+          watchStall(upRes, LOOKUP_TIMEOUT_MS, () => {
+            stopped();
+            upRes.off('error', stopped);
+            upRes.destroy();
+          });
+          readAdmitted(upRes, share.take, (raw) => {
+            if (raw === null) {
+              // Not an answer that may not reach the agent, which would leave it
+              // waiting for one: it gets its own refusal, like a redirect.
+              const why = answerTooLarge(`${req.method} ${pathname}`);
+              log(`relay upstream: ${why}`);
+              share.release();
+              deny(res, 502, why);
+              upRes.off('error', stopped);
+              upRes.destroy();
+              return;
+            }
+            const text = raw.toString('utf8');
+            const kept = filterServerJson(text, observe);
             if (kept === '') {
               delete out['content-type'];
               delete out['content-length'];
@@ -511,9 +678,15 @@ async function startCoreRelay({
               res.end();
               return;
             }
-            out['content-length'] = String(Buffer.byteLength(kept));
+            // The bytes as they came when all of it may pass: once the agent is
+            // only being written to, the text and what it parsed to are not held.
+            const answer = kept === text ? raw : Buffer.from(kept);
+            const deadline = setTimeout(() => res.destroy(), deliveryDeadlineMs);
+            deadline.unref();
+            res.once('close', () => clearTimeout(deadline));
+            out['content-length'] = String(answer.length);
             res.writeHead(upRes.statusCode, out);
-            res.end(kept);
+            res.end(answer);
           });
         } else {
           // A success the agent cannot read as JSON-RPC carries nothing it may
@@ -527,8 +700,15 @@ async function startCoreRelay({
       },
     );
 
+    // An agent that leaves has no use for the rest, so Home Assistant is not kept
+    // answering it. Same tick as the request: nothing can have closed in between.
+    res.once('close', () => {
+      share.release();
+      if (!res.writableFinished) upstream.destroy();
+    });
+
     upstream.on('error', (err) => {
-      log(`relay upstream error: ${err.message}`);
+      if (!res.destroyed) log(`relay upstream error: ${err.message}`);
       // The read never reached Home Assistant, or its answer never came back.
       // Silence is not a record of it.
       if (CAMERA_PATH_RE.test(pathname)) recordCamera(runId, pathname, ' (no answer)');
@@ -568,9 +748,10 @@ async function startCoreRelay({
 
   // One request of the relay's OWN to Core, with the Home Assistant token: no
   // agent is behind it, so it opens no door on the loopback server. Resolves to
-  // {status, json} (json null when the body is not JSON); rejects when Core
-  // cannot be reached or does not answer within the timeout.
-  function coreRequest(method, pathname, payload) {
+  // {status, json, tooLarge} (json null when the body is not JSON or is past the
+  // bound); rejects when Core cannot be reached, does not answer within the
+  // timeout, or stops halfway through its answer.
+  function coreRequest(method, pathname, payload, readAnswer = readJsonAnswer) {
     const body = payload === undefined ? null : Buffer.from(JSON.stringify(payload));
     const headers = { authorization: `Bearer ${haToken}`, accept: 'application/json' };
     if (body !== null) {
@@ -589,11 +770,8 @@ async function startCoreRelay({
         ...(secure ? { rejectUnauthorized: false } : {}),
       }, (upRes) => {
         if (pathname === MCP_PATH) observeMcpAnswer(upRes.statusCode, `${method} ${pathname}`);
-        readBody(upRes, (raw) => {
-          let json;
-          try { json = raw === null ? null : JSON.parse(raw.toString('utf8')); } catch { json = null; }
-          resolve({ status: upRes.statusCode, json });
-        });
+        upRes.on('error', reject);
+        readAnswer(upRes, (answer) => resolve({ status: upRes.statusCode, ...answer }));
       });
       upstream.on('timeout', () => upstream.destroy(new Error('core did not answer in time')));
       upstream.on('error', reject);
@@ -614,7 +792,8 @@ async function startCoreRelay({
       return coreRequest('POST', MCP_PATH, { jsonrpc: '2.0', id: rpcId, method, params });
     }
     async function rpc(method, params) {
-      const { status, json } = await request(method, params);
+      const { status, json, tooLarge } = await request(method, params);
+      if (tooLarge) throw new Error(answerTooLarge(method));
       if (status !== 200 || !json || json.error || !json.result) {
         throw new Error(`Home Assistant answered ${method} with ${status}`);
       }
@@ -739,8 +918,10 @@ async function startCoreRelay({
         live: (name) => callLive({ name }),
         liveDomain: (domain) => callLive({ domain }),
         async states() {
-          const { status, json } = await coreRequest('GET', '/api/states');
-          if (status !== 200 || !Array.isArray(json)) throw new Error(`Home Assistant answered the states list with ${status}`);
+          const { status, json, tooLarge, why } = await coreRequest('GET', '/api/states', undefined, readStatesAnswer);
+          if (status !== 200) throw new Error(`Home Assistant answered the states list with ${status}`);
+          if (tooLarge) throw new Error(why());
+          if (json === null) throw new Error("Home Assistant's states list is not a list");
           return json;
         },
       };
@@ -767,8 +948,10 @@ async function startCoreRelay({
           record(describeCall(recorded, ' (no answer)'));
           return { ok: false, error: `Home Assistant did not answer: ${err.message}` };
         }
-        const error = actionError(answered);
-        record(describeCall(recorded, error === null ? '' : ' (failed)'));
+        // Too large says nothing about the action: it went out, its answer went unread.
+        const error = answered.tooLarge ? answerTooLarge('tools/call') : actionError(answered);
+        const mark = answered.tooLarge ? ' (answer too large)' : (error === null ? '' : ' (failed)');
+        record(describeCall(recorded, mark));
         return error === null ? { ok: true } : { ok: false, error };
       };
     },

@@ -182,6 +182,8 @@ function createSseFilter(write, observe = null) {
         pending = pending.slice(cut + 2);
       }
     },
+    // What is waiting for the rest of its event.
+    held: () => pending.length,
     end() {
       if (pending.trim() !== '') flushEvent(pending);
       pending = '';
