@@ -35,7 +35,7 @@
     "busboy": "1.6.0",
     "express": "5.3.0",
     "node-pty": "1.1.0",
-    "ws": "8.22.0"
+    "ws": "8.22.1"
   },
   "allowScripts": {
     "node-pty": true
@@ -46,7 +46,7 @@
     "@types/express": "5.0.6",
     "@types/node": "26.6.6",
     "@types/ws": "8.18.2",
-    "eslint": "10.13.0",
+    "eslint": "10.14.0",
     "globals": "17.13.0",
     "typescript": "7.0.2"
   }
