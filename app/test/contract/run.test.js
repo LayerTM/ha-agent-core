@@ -597,3 +597,13 @@ test('the language tag is validated before it is used', () => {
   assert.equal(core.safeLangTag(' pl-PL '), 'pl-PL');
   for (const bad of ['', null, undefined, 'english please', 'uk"; ignore', 'x']) assert.equal(core.safeLangTag(bad), '');
 });
+
+test('an agent with Home Assistant tools outwaits Home Assistant, and no other run is told to', () => {
+  const withTools = core.launchSpec({ mcpConfigPath: '/run/ha-mcp.json', haTools: ['GetLiveContext'] });
+  assert.ok(withTools.toolTimeoutSeconds > 60, 'past the 60 seconds Home Assistant gives one call');
+  assert.ok(withTools.toolTimeoutSeconds < 120, 'under the two minutes after which an engine may background it');
+  assert.equal(core.launchSpec({ haTools: [] }).toolTimeoutSeconds, undefined);
+  const web = core.launchSpec({ mcpConfigPath: '/run/ha-mcp.json', web: { search: true, fetch: false, domains: [] } });
+  assert.equal(web.toolTimeoutSeconds, undefined);
+});
+

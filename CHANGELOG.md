@@ -10,6 +10,8 @@ uses [Semantic Versioning](https://semver.org/).
 
 - `GET /api/status` publishes `protect_secrets_level`, read from the
   `PROTECT_SECRETS_LEVEL` environment variable, or `null` without one.
+- A run with Home Assistant tools gives its adapter `toolTimeoutSeconds`, 90. An adapter
+  must set its engine's timeout for a tool of that server to it.
 - The list of protected files is shipped by the core at
   `/usr/share/agent-core/protected-paths.txt`. An add-on that carries its own copy
   must drop it: the assembly refuses a path both sides claim.

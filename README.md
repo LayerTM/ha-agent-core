@@ -135,7 +135,11 @@ A confirmed `write` runs no agent; see [Confirmed writes](#confirmed-writes).
 The adapter turns the run spec into a command line. Its `launch(spec, { env })`
 receives `mode` (always `"read"`), `read` (always `true`), `vision`, `imagePath`, `haAllowed` and
 `haDisallowed` (the tools the run may and may not call), `schema`,
-`systemPrompt`, `maxTurns`, `mcpConfigPath`, `settings`, `model`, `stream` and `web`.
+`systemPrompt`, `maxTurns`, `mcpConfigPath`, `toolTimeoutSeconds`, `settings`, `model`,
+`stream` and `web`.
+`toolTimeoutSeconds` comes with `mcpConfigPath`, and the adapter must set the engine's own
+timeout for a tool of that server to it: an engine that gives up at Home Assistant's limit
+of 60 seconds reports its own timeout, and the agent never reads that the tool was cut off.
 `web` is `null` except on a [web read](#web-reads), where it is
 `{ search, fetch, domains }`: the adapter offers web search only when `search`
 is true, and opens pages only when `fetch` is true and only on the sites in

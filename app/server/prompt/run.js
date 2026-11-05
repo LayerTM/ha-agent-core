@@ -34,6 +34,11 @@ const TIMEOUT_MS = Math.min(
 // error and the chat showed nothing. Give the recovery real headroom; the
 // wall-clock TIMEOUT_MS (120s default) is the true runaway bound.
 const MAX_TURNS = 20;
+// How long the agent itself waits for one Home Assistant tool. Home Assistant gives one
+// call 60 seconds and then says so: an agent that gives up at the same moment reports
+// its own timeout instead, and never reads what happened to the tool. Past 60 seconds,
+// and under the two minutes after which an engine may move a tool to the background.
+const AGENT_TOOL_TIMEOUT_SECONDS = 90;
 // Agent streams are verbose (thinking deltas, hook events); this caps the raw
 // stream as a DoS bound. The 256 KB contract cap applies to the final text.
 const STREAM_CAP_BYTES = 8 * 1024 * 1024;
@@ -579,7 +584,8 @@ function haToolPlan({ mcpConfigPath, haTools }) {
  * @returns {{
  *   mode: 'read', read: true, vision: boolean, imagePath: string|undefined,
  *   haAllowed: string[], haDisallowed: string[], schema: string, systemPrompt: string,
- *   maxTurns: number, mcpConfigPath: string|undefined, settings: string|undefined,
+ *   maxTurns: number, mcpConfigPath: string|undefined, toolTimeoutSeconds: number|undefined,
+ *   settings: string|undefined,
  *   model: string|undefined, stream: boolean,
  *   web: { search: boolean, fetch: boolean, domains: readonly string[] } | null,
  * }}
@@ -599,6 +605,7 @@ function launchSpec({
       systemPrompt: WEB_SYSTEM_PROMPT + webDirective(web) + languageDirective(language) + voiceDirective(surface),
       maxTurns: MAX_TURNS,
       mcpConfigPath: undefined,
+      toolTimeoutSeconds: undefined,
       settings: settings || undefined,
       model: model || undefined,
       stream: Boolean(stream),
@@ -623,6 +630,7 @@ function launchSpec({
       + closedDirective(),
     maxTurns: MAX_TURNS,
     mcpConfigPath: mcpConfigPath || undefined,
+    toolTimeoutSeconds: mcpConfigPath ? AGENT_TOOL_TIMEOUT_SECONDS : undefined,
     settings: settings || undefined,
     model: model || undefined,
     stream: Boolean(stream),
