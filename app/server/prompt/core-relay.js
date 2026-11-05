@@ -350,6 +350,12 @@ function readStatesAnswer(stream, done) {
   });
 }
 
+// Whether a JSON-RPC answer says its call failed.
+function answerFailed(message) {
+  return message.error !== undefined
+    || Boolean(message.result && typeof message.result === 'object' && message.result.isError === true);
+}
+
 // Whether a request says it has a body. Only POST /api/mcp may, and that body
 // is read and judged; any other request with one is refused.
 function hasBody(req) {
@@ -447,6 +453,7 @@ async function startCoreRelay({
   /** @type {Map<string, Map<string, {id: unknown, name: string, args: unknown, runId: string}>>} */
   const awaiting = new Map();
   let unansweredRequests = 0;
+  const openUpstreams = new Set();
 
   // The end of a run's life settles the calls it never got an answer to. A call
   // Home Assistant never answered is still something the run asked for, and
@@ -473,10 +480,32 @@ async function startCoreRelay({
       const call = pending && pending.get(String(message.id));
       if (!call) return;
       pending.delete(String(message.id));
-      const failed = message.error !== undefined
-        || (message.result && typeof message.result === 'object' && message.result.isError === true);
-      record(describeCall(call, isDryRun(call, message) ? ' (dry-run)' : (failed ? ' (failed)' : '')));
+      record(describeCall(call, isDryRun(call, message) ? ' (dry-run)' : (answerFailed(message) ? ' (failed)' : '')));
     };
+  }
+
+  // What is left to say of a request's calls once its run may have ended: the lines
+  // for each outcome, because the calls themselves carry their whole arguments and
+  // this lasts for as long as the tool runs.
+  function lateLines(calls, runId) {
+    return new Map(calls.map((call) => [String(call.id), {
+      answered: describeCall({ ...call, runId }, ' (answered after its run ended)'),
+      failed: describeCall({ ...call, runId }, ' (failed, after its run ended)'),
+    }]));
+  }
+
+  // An answer nobody is left to read still says how the tool ended. While the run is
+  // live its call is settled as usual; once the run has ended the call is already
+  // recorded as unanswered, and this is the line that corrects it.
+  function recordUnread(json, runId, observe, late) {
+    for (const message of Array.isArray(json) ? json : [json]) {
+      if (message && typeof message === 'object' && 'id' in message && message.id !== null) {
+        const pending = awaiting.get(runId);
+        const lines = late.get(String(message.id));
+        if (pending && pending.has(String(message.id))) observe(message);
+        else if (lines) record(answerFailed(message) ? lines.failed : lines.answered);
+      }
+    }
   }
   const target = new URL(coreOrigin);
   const secure = target.protocol === 'https:';
@@ -551,7 +580,8 @@ async function startCoreRelay({
             if (!pending) { pending = new Map(); awaiting.set(runId, pending); }
             pending.set(String(call.id), { ...call, runId });
           }
-          forward(req, res, pathname, body, observerFor(runId), runId);
+          const answerable = (verdict.calls || []).filter((call) => call.answerable);
+          forward(req, res, pathname, body, observerFor(runId), runId, lateLines(answerable, runId));
           return;
         }
         res.writeHead(verdict.status, verdict.type ? { 'content-type': verdict.type } : {});
@@ -565,7 +595,7 @@ async function startCoreRelay({
       return;
     }
     req.resume();
-    forward(req, res, pathname, null, observerFor(runId), runId);
+    forward(req, res, pathname, null, observerFor(runId), runId, new Map());
   });
 
   // The request to Core, with the Home Assistant token in place of the relay's.
@@ -575,14 +605,15 @@ async function startCoreRelay({
     record(capBytes(`camera run=${runId}${mark}: ${pathname.slice(CAMERA_PREFIX.length)}`, LINE_CAP));
   }
 
-  function forward(req, res, pathname, body, observe, runId) {
+  function forward(req, res, pathname, body, observe, runId, late) {
     // The agent left while its request was being read; nothing was sent for it.
     if (res.destroyed) return;
     // What this answer holds of the budget. The response owns it: every way an
     // answer ends, delivered, refused, broken or abandoned, closes the response, and
     // the listener is in place before anything can be read or anyone can leave.
     const share = agentAnswerHold();
-    let answered = false;
+    let answerStream = null;
+    let upstreamOpen = true;
     // Not the body: this outlives its sending, and the handler below must not keep it.
     const mayRunTool = body !== null;
     // Counted until an agent starts reading its answer or the request ends.
@@ -612,7 +643,7 @@ async function startCoreRelay({
         ...(secure ? { rejectUnauthorized: false } : {}),
       },
       (upRes) => {
-        answered = true;
+        answerStream = upRes;
         if (pathname === MCP_PATH) observeMcpAnswer(upRes.statusCode, `${req.method} ${pathname}`);
         // Only while the run is still live: an answer that lands after its bearer
         // was revoked would leave a mark nothing ever clears.
@@ -631,9 +662,17 @@ async function startCoreRelay({
           recordCamera(runId, pathname, ok ? '' : (redirected ? ' (no answer)' : ' (failed)'));
         }
         // Nobody is left to read it: what it says about the token and the camera read
-        // is noted above, and the rest goes nowhere.
+        // is noted above, what it says about the tool is recorded, and the rest goes
+        // nowhere. An event stream is not read for that: it has no end to wait for.
         if (res.destroyed) {
-          upRes.resume();
+          const isJson = String(upRes.headers['content-type'] || '').startsWith('application/json');
+          if (pathname === MCP_PATH && late.size > 0 && isJson) {
+            readJsonAnswer(upRes, ({ json }) => {
+              if (json !== null) recordUnread(json, runId, observe, late);
+            });
+          } else {
+            upRes.resume();
+          }
           return;
         }
         stopWaiting();
@@ -803,23 +842,37 @@ async function startCoreRelay({
     );
 
     // An agent that leaves has no use for the rest of an answer, so Home Assistant is
-    // not kept sending it. Only a POST can be running a tool, and before its answer
-    // starts it stays open: Home Assistant cancels a tool whose request closes,
-    // wherever it has got to, and a script stopped halfway can leave a device on.
-    // Same tick as the request: nothing can have closed in between.
+    // not kept sending it. But Home Assistant cancels a tool whose request closes,
+    // wherever it has got to, and a script stopped halfway can leave a device on, so
+    // a POST whose tool may still be running stays open: one with no answer yet, or
+    // answered by an event stream, which can start before the tool is done. What still
+    // arrives is discarded, and it counts as waiting again, because nobody will read it
+    // to its end. Same tick as the request: nothing can have closed in between.
     res.once('close', () => {
       share.release();
-      if (res.writableFinished) return;
-      if (answered || !mayRunTool) {
+      if (res.writableFinished || !upstreamOpen) return;
+      const toolDone = answerStream !== null
+        && !String(answerStream.headers['content-type'] || '').startsWith('text/event-stream');
+      if (!mayRunTool || toolDone) {
         upstream.destroy();
         return;
+      }
+      if (answerStream !== null) answerStream.resume();
+      if (!waiting) {
+        waiting = true;
+        unansweredRequests += 1;
       }
       const limit = setTimeout(() => upstream.destroy(), abandonedRequestMs);
       limit.unref();
       upstream.once('close', () => clearTimeout(limit));
     });
 
-    upstream.once('close', stopWaiting);
+    openUpstreams.add(upstream);
+    upstream.once('close', () => {
+      upstreamOpen = false;
+      openUpstreams.delete(upstream);
+      stopWaiting();
+    });
     upstream.on('error', (err) => {
       if (!res.destroyed) log(`relay upstream error: ${err.message}`);
       // The read never reached Home Assistant, or its answer never came back.
@@ -1084,6 +1137,10 @@ async function startCoreRelay({
       refusedRuns.clear();
       server.close();
       server.closeAllConnections();
+      // Nothing outlives the relay: left open they would hold the process up. Home
+      // Assistant cancels any tool still running on one of these, and says nothing.
+      if (openUpstreams.size > 0) log(`relay closing: ${openUpstreams.size} requests to Home Assistant still open are closed, which cancels any tool still running on them`);
+      for (const upstream of openUpstreams) upstream.destroy();
     },
   };
 }
