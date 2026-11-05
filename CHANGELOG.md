@@ -21,6 +21,8 @@ uses [Semantic Versioning](https://semver.org/).
   outlived its run, which used to read only `(no answer)`.
 - A tool answered over an event stream also finishes when its agent leaves, as a tool
   answered over JSON already did.
+- Only a tool call stays open for its tool and counts towards the 64 waiting for Home
+  Assistant. Anything else closes when its agent leaves and is never refused for that.
 - Stopping the relay closes the requests still open to Home Assistant at once and logs
   how many, so they cannot hold up the process. A tool still running on one of them is
   cancelled.

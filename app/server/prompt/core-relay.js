@@ -306,8 +306,7 @@ function readBody(stream, limit, done) {
 // A JSON answer from Home Assistant, as coreRequest gives it. It holds its share
 // until it is parsed; one that passes the budget, or breaks, gives it back as its
 // connection closes.
-function readJsonAnswer(stream, done) {
-  const hold = ownAnswerHold();
+function readJsonAnswer(stream, done, hold = ownAnswerHold()) {
   stream.once('close', hold.release);
   readAdmitted(stream, hold.take, (raw) => {
     let json;
@@ -560,8 +559,10 @@ async function startCoreRelay({
         }
         const verdict = judgeClientBody(body.toString('utf8'), entry.basenames);
         if (verdict.forward === true) {
-          // Before anything is recorded as sent: this one goes nowhere.
-          if (unansweredRequests >= maxUnansweredRequests) {
+          // Before anything is recorded as sent: this one goes nowhere. Only a call of a
+          // tool: the rest cannot pile up, and an agent still needs them to start.
+          const callsTool = (verdict.calls || []).length > 0;
+          if (callsTool && unansweredRequests >= maxUnansweredRequests) {
             const why = `too many requests are waiting for Home Assistant to answer (${unansweredRequests})`;
             log(`relay refused ${req.method} ${pathname}: ${why}`);
             deny(res, 503, why);
@@ -581,7 +582,7 @@ async function startCoreRelay({
             pending.set(String(call.id), { ...call, runId });
           }
           const answerable = (verdict.calls || []).filter((call) => call.answerable);
-          forward(req, res, pathname, body, observerFor(runId), runId, lateLines(answerable, runId));
+          forward(req, res, pathname, body, observerFor(runId), runId, callsTool, lateLines(answerable, runId));
           return;
         }
         res.writeHead(verdict.status, verdict.type ? { 'content-type': verdict.type } : {});
@@ -595,7 +596,7 @@ async function startCoreRelay({
       return;
     }
     req.resume();
-    forward(req, res, pathname, null, observerFor(runId), runId, new Map());
+    forward(req, res, pathname, null, observerFor(runId), runId, false, new Map());
   });
 
   // The request to Core, with the Home Assistant token in place of the relay's.
@@ -605,7 +606,7 @@ async function startCoreRelay({
     record(capBytes(`camera run=${runId}${mark}: ${pathname.slice(CAMERA_PREFIX.length)}`, LINE_CAP));
   }
 
-  function forward(req, res, pathname, body, observe, runId, late) {
+  function forward(req, res, pathname, body, observe, runId, mayRunTool, late) {
     // The agent left while its request was being read; nothing was sent for it.
     if (res.destroyed) return;
     // What this answer holds of the budget. The response owns it: every way an
@@ -614,8 +615,6 @@ async function startCoreRelay({
     const share = agentAnswerHold();
     let answerStream = null;
     let upstreamOpen = true;
-    // Not the body: this outlives its sending, and the handler below must not keep it.
-    const mayRunTool = body !== null;
     // Counted until an agent starts reading its answer or the request ends.
     let waiting = mayRunTool;
     if (waiting) unansweredRequests += 1;
@@ -667,9 +666,11 @@ async function startCoreRelay({
         if (res.destroyed) {
           const isJson = String(upRes.headers['content-type'] || '').startsWith('application/json');
           if (pathname === MCP_PATH && late.size > 0 && isJson) {
+            // An agent's answer on the agents' budget, and not for longer than any other.
+            watchStall(upRes, answerStallMs, () => upRes.destroy());
             readJsonAnswer(upRes, ({ json }) => {
               if (json !== null) recordUnread(json, runId, observe, late);
-            });
+            }, agentAnswerHold());
           } else {
             upRes.resume();
           }
@@ -772,6 +773,8 @@ async function startCoreRelay({
           res.once('close', () => {
             clearTimeout(deliveryTimer);
             clearTimeout(stallTimer);
+            // The stream can stay open after this, and its share has gone back.
+            sse.discard();
           });
           upRes.on('data', (chunk) => {
             if (res.destroyed) return;

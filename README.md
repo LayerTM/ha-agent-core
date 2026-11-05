@@ -245,10 +245,10 @@ keeps it within the tools the run's allowlist names.
   one, and one that comes with a body is refused with 400.
 
 An agent that leaves does not stop a tool it called: Home Assistant cancels a tool
-whose request closes, wherever it has got to, so a POST stays open until Home
+whose request closes, wherever it has got to, so a `tools/call` stays open until Home
 Assistant ends it, for up to an hour, and what still arrives is discarded. With 64
-POSTs waiting for Home Assistant, new ones from agents are refused with 503 and an
-error that says why. The count is shared: one agent can fill it for another, for as
+tool calls waiting for Home Assistant, new ones from agents are refused with 503 and
+an error that says why. The count is shared: one agent can fill it for another, for as
 long as Home Assistant takes to answer. The core's own lookups and confirmed actions
 do not count. A tool still running when the add-on stops is cancelled, because the
 process closes its request; the log says how many requests were open.

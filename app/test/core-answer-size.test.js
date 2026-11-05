@@ -576,6 +576,7 @@ async function silentHa() {
     },
   };
 }
+const TOOL_CALL = { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'HassTurnOn', arguments: {} } };
 const PING = { jsonrpc: '2.0', id: 1, method: 'ping', params: {} };
 function postThrough(through, token, rpc) {
   const leaving = new AbortController();
@@ -595,8 +596,8 @@ test('a request whose agent has left does not keep its body in memory', async ()
   const gc = vm.runInNewContext('gc');
   const stub = await silentHa();
   const short = await startCoreRelay({ coreOrigin: stub.url, haToken: 'ha-token-never-in-a-message', authProbeEveryMs: 0 });
-  const token = short.issue('run-held', { basenames: [] });
-  const padded = { ...PING, params: { padding: 'p'.repeat(256 * 1024) } };
+  const token = short.issue('run-held', { basenames: ['HassTurnOn'] });
+  const padded = { ...TOOL_CALL, params: { name: 'HassTurnOn', arguments: { padding: 'p'.repeat(256 * 1024) } } };
   try {
     gc();
     const buffersAtStart = process.memoryUsage().arrayBuffers;
@@ -624,17 +625,17 @@ test('past the bound new requests are refused by name, and what runs is never cl
   const short = await startCoreRelay({
     coreOrigin: stub.url, haToken: 'ha-token-never-in-a-message', authProbeEveryMs: 0, maxUnansweredRequests: 2, log: (l) => logged.push(l),
   });
-  const token = short.issue('run-bound', { basenames: [] });
+  const token = short.issue('run-bound', { basenames: ['HassTurnOn'] });
   try {
     // One agent left and one stays: both are waiting, and both count.
-    const left = postThrough(short, token, PING);
+    const left = postThrough(short, token, TOOL_CALL);
     await soon(stub.received(1), 'the first request');
     left.leave();
     await settle();
-    const stays = postThrough(short, token, PING);
+    const stays = postThrough(short, token, TOOL_CALL);
     await soon(stub.received(2), 'the second request');
 
-    const refused = await soon(postThrough(short, token, PING).answer, 'the refusal');
+    const refused = await soon(postThrough(short, token, TOOL_CALL).answer, 'the refusal');
     assert.equal(refused.status, 503);
     assert.match((await refused.json()).error, /too many requests are waiting for Home Assistant/);
     assert.equal(stub.open.length, 2, 'the refused request went nowhere');
@@ -645,7 +646,7 @@ test('past the bound new requests are refused by name, and what runs is never cl
     stub.open[1].writeHead(200, { 'content-type': 'text/event-stream' });
     stub.open[1].write(': working\n\n');
     await settle();
-    const next = postThrough(short, token, PING);
+    const next = postThrough(short, token, TOOL_CALL);
     await soon(stub.received(3), 'the next request');
     stub.open[1].end();
     assert.equal((await soon(stays.answer, 'the answer it stayed for')).status, 200);
@@ -663,19 +664,19 @@ test('an answer that starts for an agent that left keeps its place until it ends
   const short = await startCoreRelay({
     coreOrigin: stub.url, haToken: 'ha-token-never-in-a-message', authProbeEveryMs: 0, maxUnansweredRequests: 1,
   });
-  const token = short.issue('run-started', { basenames: [] });
+  const token = short.issue('run-started', { basenames: ['HassTurnOn'] });
   try {
-    const left = postThrough(short, token, PING);
+    const left = postThrough(short, token, TOOL_CALL);
     await soon(stub.received(1), 'the request');
     left.leave();
     await settle();
     stub.open[0].writeHead(200, { 'content-type': 'application/json' });
     stub.open[0].write('{');
     await settle();
-    assert.equal((await soon(postThrough(short, token, PING).answer, 'the refusal')).status, 503);
+    assert.equal((await soon(postThrough(short, token, TOOL_CALL).answer, 'the refusal')).status, 503);
     stub.open[0].end('}');
     await settle();
-    const next = postThrough(short, token, PING);
+    const next = postThrough(short, token, TOOL_CALL);
     await soon(stub.received(2), 'the next request');
     sendJson(stub.open[1], { jsonrpc: '2.0', id: 1, result: {} });
     assert.equal((await soon(next.answer, 'the next answer')).status, 200);
@@ -692,17 +693,17 @@ test('a request that ends without an answer frees its place, however its agent l
   const short = await startCoreRelay({
     coreOrigin: `http://127.0.0.1:${dropping.address().port}`, haToken: 'ha-token-never-in-a-message', authProbeEveryMs: 0, maxUnansweredRequests: 1,
   });
-  const token = short.issue('run-dropped', { basenames: [] });
+  const token = short.issue('run-dropped', { basenames: ['HassTurnOn'] });
   try {
     for (let i = 0; i < 40; i += 1) {
-      const call = postThrough(short, token, PING);
+      const call = postThrough(short, token, TOOL_CALL);
       // Around the moment the connection drops, so the two ends close in either order.
       setTimeout(() => call.leave(), i % 8);
       await call.answer.catch(() => {});
       await new Promise((resolve) => { setTimeout(resolve, 10); });
     }
     await settle();
-    const last = await soon(postThrough(short, token, PING).answer, 'the last call');
+    const last = await soon(postThrough(short, token, TOOL_CALL).answer, 'the last call');
     assert.equal(last.status, 502, 'it reached Home Assistant, which dropped it');
   } finally {
     short.revoke(token);
@@ -1169,9 +1170,9 @@ test('an answer after the run ended corrects the record, and nothing else does',
 test('a tool whose answer is an event stream finishes when its agent leaves', async () => {
   const stub = await silentHa();
   const short = await startCoreRelay({ coreOrigin: stub.url, haToken: 'ha-token-never-in-a-message', maxUnansweredRequests: 1 });
-  const token = short.issue('run-sse', { basenames: [] });
+  const token = short.issue('run-sse', { basenames: ['HassTurnOn'] });
   try {
-    const left = postThrough(short, token, PING);
+    const left = postThrough(short, token, TOOL_CALL);
     await soon(stub.received(1), 'the request');
     stub.open[0].writeHead(200, { 'content-type': 'text/event-stream' });
     stub.open[0].write(': working\n\n');
@@ -1180,10 +1181,10 @@ test('a tool whose answer is an event stream finishes when its agent leaves', as
     await settle();
     assert.equal(stub.open[0].destroyed, false, 'the request closed, which cancels the tool');
     // Nobody is left to read it to its end, so it holds a place again.
-    assert.equal((await soon(postThrough(short, token, PING).answer, 'the refusal')).status, 503);
+    assert.equal((await soon(postThrough(short, token, TOOL_CALL).answer, 'the refusal')).status, 503);
     stub.open[0].end();
     await settle();
-    const next = postThrough(short, token, PING);
+    const next = postThrough(short, token, TOOL_CALL);
     await soon(stub.received(2), 'the next request');
     sendJson(stub.open[1], { jsonrpc: '2.0', id: 1, result: {} });
     assert.equal((await soon(next.answer, 'the next answer')).status, 200);
@@ -1198,9 +1199,9 @@ test('closing the relay closes what is still open, and says how many', async () 
   const stub = await silentHa();
   const lines = [];
   const short = await startCoreRelay({ coreOrigin: stub.url, haToken: 'ha-token-never-in-a-message', log: (l) => lines.push(l) });
-  const token = short.issue('run-close', { basenames: [] });
+  const token = short.issue('run-close', { basenames: ['HassTurnOn'] });
   try {
-    const left = postThrough(short, token, PING);
+    const left = postThrough(short, token, TOOL_CALL);
     await soon(stub.received(1), 'the request');
     left.leave();
     await settle();
@@ -1236,6 +1237,98 @@ test('a request whose run has ended keeps none of a tool call\'s arguments in me
     assert.equal(stub.open.filter((r) => !r.destroyed).length, 40, 'every request stays open');
     assert.ok(kept < 4 * MIB, `${(kept / MIB).toFixed(1)} MiB kept of 10 MiB sent`);
   } finally {
+    short.close();
+    stub.close();
+  }
+});
+
+test('a POST with no tool in it closes when its agent leaves, and is never refused for the count', async () => {
+  const stub = await silentHa();
+  const short = await startCoreRelay({ coreOrigin: stub.url, haToken: 'ha-token-never-in-a-message', maxUnansweredRequests: 1 });
+  const token = short.issue('run-ping', { basenames: ['HassTurnOn'] });
+  try {
+    const running = postThrough(short, token, TOOL_CALL);
+    await soon(stub.received(1), 'the tool call');
+    const ping = postThrough(short, token, PING);
+    await soon(stub.received(2), 'the ping');
+    const closed = new Promise((resolve) => { stub.open[1].once('close', resolve); });
+    ping.leave();
+    await soon(closed, 'the ping closing');
+    running.leave();
+    await settle();
+    assert.equal(stub.open[0].destroyed, false, 'the tool call closed');
+  } finally {
+    short.revoke(token);
+    short.close();
+    stub.close();
+  }
+});
+
+test('a partial event of a stream its agent left is not kept in memory', async () => {
+  v8.setFlagsFromString('--expose-gc');
+  const gc = vm.runInNewContext('gc');
+  const stub = await silentHa();
+  const short = await startCoreRelay({ coreOrigin: stub.url, haToken: 'ha-token-never-in-a-message' });
+  const token = short.issue('run-partial', { basenames: ['HassTurnOn'] });
+  const pad = Buffer.alloc(4 * MIB, 0x7a);
+  try {
+    gc();
+    const heapAtStart = process.memoryUsage().heapUsed;
+    for (let i = 0; i < 8; i += 1) {
+      const left = postThrough(short, token, TOOL_CALL);
+      await soon(stub.received(i + 1), 'the request');
+      stub.open[i].writeHead(200, { 'content-type': 'text/event-stream' });
+      stub.open[i].write(': start\n\n');
+      await soon(left.answer, 'the stream');
+      stub.open[i].write('data: ');
+      stub.open[i].write(pad);
+      await sleep(200);
+      left.leave();
+      await settle();
+    }
+    gc();
+    const kept = process.memoryUsage().heapUsed - heapAtStart;
+    assert.equal(stub.open.filter((r) => !r.destroyed).length, 8, 'every request stays open');
+    assert.ok(kept < 8 * MIB, `${(kept / MIB).toFixed(1)} MiB kept of 32 MiB`);
+  } finally {
+    short.revoke(token);
+    short.close();
+    stub.close();
+  }
+});
+
+test('an answer to an agent that left draws on the agents\' budget, and may not stall', async () => {
+  const stub = await silentHa();
+  const short = await startCoreRelay({ coreOrigin: stub.url, haToken: 'ha-token-never-in-a-message', answerStallMs: 500 });
+  const token = short.issue('run-late', { basenames: ['HassTurnOn', 'GetLiveContext'] });
+  try {
+    const left = postThrough(short, token, TOOL_CALL);
+    await soon(stub.received(1), 'the request');
+    left.leave();
+    await settle();
+    const closed = new Promise((resolve) => { stub.open[0].once('close', resolve); });
+    stub.open[0].writeHead(200, { 'content-type': 'application/json' });
+    stub.open[0].write('{"pad":"');
+    stub.open[0].write(Buffer.alloc(LARGE_SHARE * MIB, 0x7a));
+    await settle();
+
+    // The core's own answer of the same size has its own budget.
+    const own = short.lookup('run-late').states();
+    await soon(stub.received(2), 'the lookup');
+    sendJson(stub.open[1], JSON.stringify([{ entity_id: 'sensor.big', attributes: { pad: 'z'.repeat(LARGE_SHARE * MIB) } }]));
+    assert.equal((await soon(own, 'the lookup', 20000))[0].entity_id, 'sensor.big');
+    // An agent's has not, until the stall gives it back.
+    const next = postThrough(short, token, CALL);
+    await soon(stub.received(3), 'the next call');
+    sendJson(stub.open[2], shareBody(5));
+    assert.equal((await soon(next.answer, 'the refusal', 20000)).status, 502);
+    await soon(closed, 'the stalled answer closing');
+    const later = postThrough(short, token, CALL);
+    await soon(stub.received(4), 'the call after it');
+    sendJson(stub.open[3], shareBody(5));
+    assert.equal((await soon(later.answer, 'the call after it', 20000)).status, 200);
+  } finally {
+    short.revoke(token);
     short.close();
     stub.close();
   }
