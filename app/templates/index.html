@@ -25,6 +25,9 @@
       const retries = () => {
         try { return Number(sessionStorage.getItem(KEY)) || 0; } catch { return null; }
       };
+      const counted = (count) => {
+        try { sessionStorage.setItem(KEY, String(count)); return true; } catch { return false; }
+      };
       const giveUp = () => {
         const note = document.createElement('p');
         note.style.cssText = 'margin:24px;font:16px system-ui;color:#fff;background:#000;padding:12px';
@@ -35,13 +38,13 @@
         if (failed) return;
         failed = true;
         const done = retries();
-        if (done === null || done >= DELAYS_MS.length) {
+        // Counted before it waits: a reload by hand still counts as one. What cannot be
+        // counted is not repeated: the next page would read the same number.
+        if (done === null || done >= DELAYS_MS.length || !counted(done + 1)) {
           if (document.body) giveUp();
           else document.addEventListener('DOMContentLoaded', giveUp);
           return;
         }
-        // Counted before it waits: a reload by hand still counts as one.
-        try { sessionStorage.setItem(KEY, String(done + 1)); } catch { /* read above */ }
         setTimeout(() => location.reload(), DELAYS_MS[done]);
       };
       // A failed load does not bubble, and is only seen on the way down.

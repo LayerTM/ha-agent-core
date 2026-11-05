@@ -1333,3 +1333,132 @@ test('an answer to an agent that left draws on the agents\' budget, and may not 
     stub.close();
   }
 });
+
+// --- Everything held is counted in the bytes Home Assistant sent.
+
+const WIDE = '界';  // three bytes on the wire, one unit of a string
+const wideEvent = (mib) => `data: {"jsonrpc":"2.0","id":7,"result":{"text":"${WIDE.repeat((mib * MIB) / 3)}`;
+
+test('a partial event of wide characters past the budget ends the stream', async () => {
+  answerRpc = (rpc, res) => { streamHead(res); res.write(wideEvent(BOUND_MIB + 2)); };
+  const open = openAgent(CALL, SSE);
+  try {
+    await assert.rejects(soon(open.answered.then((res) => {
+      res.resume();
+      return readAll(res);
+    }), 'the end of the stream', 20000));
+    assert.equal(logged.filter((l) => l.includes('too large')).length, 1, logged.join('\n'));
+  } finally {
+    open.req.destroy();
+    open.done();
+  }
+});
+
+test('streams of wide characters and a JSON answer share one budget, in bytes', async () => {
+  const stalled = [];
+  answerRpc = (rpc, res) => {
+    stalled.push(res);
+    streamHead(res);
+    res.write(wideEvent(6));
+  };
+  const first = openAgent(CALL, SSE);
+  const second = openAgent(CALL, SSE);
+  first.answered.catch(() => {});
+  second.answered.catch(() => {});
+  try {
+    await sleep(500);
+    assert.equal(stalled.length, 2);
+    // 12 MiB held: there is no room for 6 more, though they are only 2 MiB of units each.
+    const body = shareBody(5);
+    answerRpc = (rpc, res) => sendJson(res, body);
+    const third = await soon(agentCall(CALL), 'a JSON answer', 20000);
+    assert.equal(third.status, 502);
+    assert.match(third.text, /too large/);
+  } finally {
+    first.req.destroy();
+    first.done();
+    second.req.destroy();
+    second.done();
+  }
+  await settle();
+  const body = shareBody(5);
+  answerRpc = (rpc, res) => sendJson(res, body);
+  assert.equal((await soon(agentCall(CALL), 'the next answer', 20000)).status, 200);
+});
+
+// --- What the audit may say of an answer nobody read.
+
+async function leftThenAnswered(answer, { revoke }) {
+  const stub = await silentHa();
+  const lines = [];
+  const short = await startCoreRelay({ coreOrigin: stub.url, haToken: 'ha-token-never-in-a-message', record: (l) => lines.push(l) });
+  const token = short.issue('run-audit', { basenames: ['HassTurnOn'] });
+  try {
+    const left = postThrough(short, token, { ...TOOL_CALL, id: 7 });
+    await soon(stub.received(1), 'the request');
+    left.leave();
+    await settle();
+    if (revoke) short.revoke(token);
+    sendJson(stub.open[0], JSON.stringify(answer));
+    await settle();
+    if (!revoke) short.revoke(token);
+    return lines;
+  } finally {
+    short.close();
+    stub.close();
+  }
+}
+const said = (lines, mark) => lines.filter((l) => l.includes(mark)).length;
+const RESULT = { jsonrpc: '2.0', id: 7, result: { content: [] } };
+const FAILURE = { jsonrpc: '2.0', id: 7, error: { code: 1, message: 'no' } };
+
+test('after its run ended a call is settled once, by the first answer', async () => {
+  const lines = await leftThenAnswered([RESULT, FAILURE], { revoke: true });
+  assert.equal(said(lines, '(no answer)'), 1, lines.join('\n'));
+  assert.equal(said(lines, 'after its run ended'), 1, lines.join('\n'));
+  assert.equal(said(lines, '(answered after its run ended)'), 1, lines.join('\n'));
+});
+
+test('while its run is live a call is settled once, and never as after the run', async () => {
+  const lines = await leftThenAnswered([RESULT, RESULT], { revoke: false });
+  assert.equal(said(lines, 'after its run ended'), 0, lines.join('\n'));
+  assert.equal(said(lines, '(no answer)'), 0, lines.join('\n'));
+  assert.equal(lines.filter((l) => l.includes('HassTurnOn')).length, 1, lines.join('\n'));
+});
+
+for (const [what, message] of [
+  ['a request from the server', { jsonrpc: '2.0', id: 7, method: 'sampling/createMessage', params: {} }],
+  ['a message with neither result nor error', { jsonrpc: '2.0', id: 7 }],
+  ['a message with both a method and a result', { jsonrpc: '2.0', id: 7, method: 'x', result: {} }],
+]) {
+  test(`${what} says nothing about how a tool ended`, async () => {
+    const lines = await leftThenAnswered(message, { revoke: true });
+    assert.equal(said(lines, '(no answer)'), 1, lines.join('\n'));
+    assert.equal(said(lines, 'after its run ended'), 0, lines.join('\n'));
+  });
+}
+
+test('the end of a run is a fact of that run, not a call missing from the record', async () => {
+  // Two requests with one id: the first answer settles the call, and the second must
+  // not read that as the run having ended.
+  const stub = await silentHa();
+  const lines = [];
+  const short = await startCoreRelay({ coreOrigin: stub.url, haToken: 'ha-token-never-in-a-message', record: (l) => lines.push(l) });
+  const token = short.issue('run-same-id', { basenames: ['HassTurnOn'] });
+  try {
+    for (let i = 0; i < 2; i += 1) {
+      const left = postThrough(short, token, { ...TOOL_CALL, id: 7 });
+      await soon(stub.received(i + 1), 'the request');
+      left.leave();
+      await settle();
+    }
+    sendJson(stub.open[0], RESULT);
+    sendJson(stub.open[1], RESULT);
+    await settle();
+    assert.equal(said(lines, 'after its run ended'), 0, lines.join('\n'));
+  } finally {
+    short.revoke(token);
+    short.close();
+    stub.close();
+  }
+});

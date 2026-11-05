@@ -338,3 +338,19 @@ test('tools/list is NOT gated, deliberately', () => {
   assert.deepEqual(judge(rpc('initialize', 0, {}), null), { forward: true, calls: [] });
   assert.deepEqual(judge(rpc('ping', 1), null), { forward: true, calls: [] });
 });
+
+test('what an event stream holds is counted in bytes, whatever the text', () => {
+  const sse = createSseFilter(() => {});
+  sse.push('data: 界');
+  assert.equal(sse.held(), Buffer.byteLength('data: 界'));
+  sse.push('🏠\r\n');
+  assert.equal(sse.held(), Buffer.byteLength('data: 界🏠\n'));
+  sse.push('\n: é');
+  assert.equal(sse.held(), Buffer.byteLength(': é'), 'the event is complete');
+  sse.discard();
+  assert.equal(sse.held(), 0);
+  sse.push('x');
+  assert.equal(sse.held(), 1);
+  sse.end();
+  assert.equal(sse.held(), 0);
+});

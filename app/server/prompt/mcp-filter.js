@@ -166,6 +166,7 @@ function filterServerJson(text, observe = null) {
  */
 function createSseFilter(write, observe = null) {
   let pending = '';
+  let pendingBytes = 0;
   const flushEvent = (event) => {
     const data = event.split('\n')
       .filter((line) => line.startsWith('data:'))
@@ -175,22 +176,28 @@ function createSseFilter(write, observe = null) {
   };
   return {
     push(chunk) {
-      pending += chunk.replace(/\r\n/g, '\n');
+      const text = chunk.replace(/\r\n/g, '\n');
+      pending += text;
+      pendingBytes += Buffer.byteLength(text);
       let cut;
       while ((cut = pending.indexOf('\n\n')) !== -1) {
-        flushEvent(pending.slice(0, cut));
+        const event = pending.slice(0, cut);
+        flushEvent(event);
         pending = pending.slice(cut + 2);
+        pendingBytes -= Buffer.byteLength(event) + 2;
       }
     },
-    // What is waiting for the rest of its event.
-    held: () => pending.length,
+    // How many bytes are waiting for the rest of their event.
+    held: () => pendingBytes,
     // Nobody is left to read the rest.
     discard() {
       pending = '';
+      pendingBytes = 0;
     },
     end() {
       if (pending.trim() !== '') flushEvent(pending);
       pending = '';
+      pendingBytes = 0;
     },
   };
 }

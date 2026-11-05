@@ -349,6 +349,14 @@ function readStatesAnswer(stream, done) {
   });
 }
 
+// Whether a message is a JSON-RPC response to a call: an id and an outcome, and no
+// method, which would make it a request of the server's own.
+function isResponse(message) {
+  return Boolean(message) && typeof message === 'object'
+    && message.id !== undefined && message.id !== null && message.method === undefined
+    && (message.result !== undefined || message.error !== undefined);
+}
+
 // Whether a JSON-RPC answer says its call failed.
 function answerFailed(message) {
   return message.error !== undefined
@@ -444,7 +452,7 @@ async function startCoreRelay({
   // request names at most one). Both are given when the bearer is minted, so
   // there is no moment in which a live bearer means less than it will mean later.
   // An entry with an empty set may call nothing and read nothing: unset refuses.
-  /** @type {Map<string, {runId: string, basenames: Set<string>, cameras: Set<string>}>} */
+  /** @type {Map<string, {runId: string, basenames: Set<string>, cameras: Set<string>, ended: boolean}>} */
   const runs = new Map();
   // Calls a run has sent and Home Assistant has not answered yet, per run rather
   // than per request: the answer may come back on this POST or on the run's own
@@ -495,14 +503,15 @@ async function startCoreRelay({
 
   // An answer nobody is left to read still says how the tool ended. While the run is
   // live its call is settled as usual; once the run has ended the call is already
-  // recorded as unanswered, and this is the line that corrects it.
-  function recordUnread(json, runId, observe, late) {
+  // recorded as unanswered, and this is the line that corrects it. Each call once, by
+  // the first real answer to it; anything else in the body says nothing about it.
+  function recordUnread(json, run, observe, late) {
     for (const message of Array.isArray(json) ? json : [json]) {
-      if (message && typeof message === 'object' && 'id' in message && message.id !== null) {
-        const pending = awaiting.get(runId);
-        const lines = late.get(String(message.id));
-        if (pending && pending.has(String(message.id))) observe(message);
-        else if (lines) record(answerFailed(message) ? lines.failed : lines.answered);
+      const lines = isResponse(message) ? late.get(String(message.id)) : undefined;
+      if (lines) {
+        late.delete(String(message.id));
+        if (run.ended) record(answerFailed(message) ? lines.failed : lines.answered);
+        else observe(message);
       }
     }
   }
@@ -582,7 +591,7 @@ async function startCoreRelay({
             pending.set(String(call.id), { ...call, runId });
           }
           const answerable = (verdict.calls || []).filter((call) => call.answerable);
-          forward(req, res, pathname, body, observerFor(runId), runId, callsTool, lateLines(answerable, runId));
+          forward(req, res, pathname, body, observerFor(runId), runId, { mayRunTool: callsTool, late: lateLines(answerable, runId), run: entry });
           return;
         }
         res.writeHead(verdict.status, verdict.type ? { 'content-type': verdict.type } : {});
@@ -596,7 +605,7 @@ async function startCoreRelay({
       return;
     }
     req.resume();
-    forward(req, res, pathname, null, observerFor(runId), runId, false, new Map());
+    forward(req, res, pathname, null, observerFor(runId), runId, { mayRunTool: false, late: new Map(), run: entry });
   });
 
   // The request to Core, with the Home Assistant token in place of the relay's.
@@ -606,7 +615,7 @@ async function startCoreRelay({
     record(capBytes(`camera run=${runId}${mark}: ${pathname.slice(CAMERA_PREFIX.length)}`, LINE_CAP));
   }
 
-  function forward(req, res, pathname, body, observe, runId, mayRunTool, late) {
+  function forward(req, res, pathname, body, observe, runId, { mayRunTool, late, run }) {
     // The agent left while its request was being read; nothing was sent for it.
     if (res.destroyed) return;
     // What this answer holds of the budget. The response owns it: every way an
@@ -669,7 +678,7 @@ async function startCoreRelay({
             // An agent's answer on the agents' budget, and not for longer than any other.
             watchStall(upRes, answerStallMs, () => upRes.destroy());
             readJsonAnswer(upRes, ({ json }) => {
-              if (json !== null) recordUnread(json, runId, observe, late);
+              if (json !== null) recordUnread(json, run, observe, late);
             }, agentAnswerHold());
           } else {
             upRes.resume();
@@ -1048,6 +1057,7 @@ async function startCoreRelay({
         runId,
         basenames: new Set([...basenames].map(haBasename)),
         cameras: new Set(cameras),
+        ended: false,
       });
       return token;
     },
@@ -1055,6 +1065,7 @@ async function startCoreRelay({
       const entry = runs.get(token);
       runs.delete(token);
       if (entry === undefined) return;
+      entry.ended = true;
       refusedRuns.delete(entry.runId);
       settleUnanswered(entry.runId);
     },

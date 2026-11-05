@@ -16,7 +16,7 @@ const found = page.match(/<script id="load-retry">([\s\S]*?)<\/script>/);
 
 const APPLIED = { cssRules: [{}] };
 
-function browser({ storage = new Map(), blocked = false, sheets = [APPLIED], scriptRan = true } = {}) {
+function browser({ storage = new Map(), blocked = false, full = false, sheets = [APPLIED], scriptRan = true } = {}) {
   const listeners = {};
   const timers = [];
   const reloads = [];
@@ -24,7 +24,7 @@ function browser({ storage = new Map(), blocked = false, sheets = [APPLIED], scr
   const on = (name) => (type, fn) => { listeners[`${name}.${type}`] = fn; };
   const store = {
     getItem(k) { if (blocked) throw new Error('blocked'); return storage.has(k) ? storage.get(k) : null; },
-    setItem(k, v) { if (blocked) throw new Error('blocked'); storage.set(k, v); },
+    setItem(k, v) { if (blocked || full) throw new Error('quota'); storage.set(k, v); },
     removeItem(k) { if (blocked) throw new Error('blocked'); storage.delete(k); },
   };
   const window = { addEventListener: on('window'), consoleScriptRan: scriptRan };
@@ -104,6 +104,14 @@ test('without storage to count in it does not reload at all', () => {
   const b = browser({ blocked: true });
   failedFile(b, SCRIPT);
   assert.equal(b.timers.length, 0);
+  assert.match(b.notes[0], /could not load/);
+});
+
+test('storage it can read but not write stops it too: the count could not grow', () => {
+  const b = browser({ full: true });
+  failedFile(b, SCRIPT);
+  assert.equal(b.timers.length, 0);
+  assert.equal(b.reloads.length, 0);
   assert.match(b.notes[0], /could not load/);
 });
 
