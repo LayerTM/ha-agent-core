@@ -71,7 +71,9 @@ const LOOKUP_TIMEOUT_MS = 10000;
 // cannot multiply it. An answer that would pass it is refused as too large, at once.
 // The core's own answers (a lookup, an action) draw on a second budget of the same
 // size: an agent may keep its share for as long as the delivery deadline, and that
-// must not refuse the core a question of its own. A JSON answer costs up to about
+// must not refuse the core a question of its own. What a resolution remembers of the
+// lookups it has read draws on a third, or a full memory would refuse the next read:
+// what does not fit is asked for again (targets.js). A JSON answer costs up to about
 // seven times its bytes while it is parsed (the bytes, their text, what that parses
 // to). A tool answer carries only what is exposed to Assist.
 //
@@ -126,6 +128,7 @@ function answerBudget() {
 }
 const agentAnswerHold = answerBudget();
 const ownAnswerHold = answerBudget();
+const rememberedAnswerHold = answerBudget();
 
 // Calls `onStall` when `stream` has delivered nothing for `ms`, until it closes or
 // ends. A timer of its own, not the socket's: that socket goes back to the pool.
@@ -397,6 +400,7 @@ function deny(res, status, message) {
  *   probeAuth: () => Promise<null|'ok'|'unauthorized'|'unreachable'>,
  *   tokenRefusal: (runId: string) => null|number,
  *   lookup: (runId: string) => {
+ *     memoryHold: () => { take: (bytes: number) => boolean, release: () => void },
  *     live: (name: string) => Promise<{ok: boolean, text: string}>,
  *     liveDomain: (domain: string) => Promise<{ok: boolean, text: string}>,
  *     states: () => Promise<Array<{entity_id: string, attributes?: object}>>,
@@ -1095,6 +1099,7 @@ async function startCoreRelay({
         return { ok, text: ok ? answer.result : '' };
       }
       return {
+        memoryHold: rememberedAnswerHold,
         live: (name) => callLive({ name }),
         liveDomain: (domain) => callLive({ domain }),
         async states() {

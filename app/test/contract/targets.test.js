@@ -20,7 +20,7 @@ const { adapter, branding } = createNeutralAdapter();
 useAdapter(adapter, branding);
 
 const { startCoreRelay } = require('../../server/prompt/core-relay');
-const { resolveAnswer } = require('../../server/prompt/targets');
+const { resolveAnswer, createResolver } = require('../../server/prompt/targets');
 const { createPromptApp } = require('../../server/prompt/server');
 const { buildRedactor } = require('../../server/prompt/security');
 
@@ -226,7 +226,8 @@ test('an id the edited automation carries stands in its slots only, never in a p
 function stalledLookup() {
   const calls = [];
   const never = () => new Promise(() => {});
-  return { calls, live: (n) => { calls.push(n); return never(); }, liveDomain: never, states: never };
+  const memoryHold = () => ({ take: () => true, release: () => {} });
+  return { calls, memoryHold, live: (n) => { calls.push(n); return never(); }, liveDomain: never, states: never };
 }
 
 test('an answer naming more devices than one answer may is refused before any lookup', async () => {
@@ -314,4 +315,54 @@ test('before the lookup a target is any one line of text; after it, only an enti
   assert.equal(named('   '), null);
   assert.equal(validateProposal(proposalOf(intent(['Sandbox Test Lamp']))), null, 'what leaves the add-on carries ids');
   assert.notEqual(validateProposal(proposalOf(intent(['light.porch']))), null);
+});
+
+// One device's answer, and a lookup that says what it was asked.
+const deviceAnswer = (name) => ({ ok: true, text: `- names: ${name}\n  domain: light\n  state: on\n` });
+const roomFor = (bytes) => {
+  let room = bytes;
+  return { take(n) { if (n > room) return false; room -= n; return true; }, release() {} };
+};
+
+test('a name wanted twice at once goes out once', async () => {
+  const asked = [];
+  const lookup = {
+    live: async (name) => { asked.push(name); return deviceAnswer(name); },
+    liveDomain: async () => deviceAnswer('Hall'),
+    states: async () => [],
+  };
+  const resolver = createResolver(lookup, roomFor(1000), new AbortController().signal);
+  await Promise.all([resolver.resolve('Hall'), resolver.resolve('Hall')]);
+  assert.deepEqual(asked, ['Hall']);
+});
+
+test('an answer that does not fit goes out once at a time, and again when it next comes up', async () => {
+  const asked = [];
+  const lookup = {
+    live: async (name) => { asked.push(name); return deviceAnswer(name); },
+    liveDomain: async () => deviceAnswer('Hall'),
+    states: async () => [],
+  };
+  const resolver = createResolver(lookup, roomFor(0), new AbortController().signal);
+  await Promise.all([resolver.resolve('Hall'), resolver.resolve('Hall')]);
+  await resolver.resolve('Hall');
+  assert.deepEqual(asked, ['Hall', 'Hall']);
+});
+
+test('a resolution refused at its deadline asks nothing more', async () => {
+  const asked = [];
+  let answerFirst;
+  const first = new Promise((resolve) => { answerFirst = resolve; });
+  const lookup = {
+    memoryHold: () => roomFor(1000),
+    live: (name) => { asked.push(name); return first.then(() => deviceAnswer(name)); },
+    liveDomain: async () => deviceAnswer('Hall'),
+    states: async () => [],
+  };
+  const targets = ['Hall', 'Porch', 'Attic'];
+  const out = await resolveAnswer({ proposal: { summary: 'Off', intents: [{ intent: 'HassTurnOff', targets, data: {}, risk: 'low' }] }, automation: null }, lookup, { deadlineMs: 5 });
+  assert.equal(out.problems[0].problem, 'unavailable');
+  answerFirst();
+  await new Promise(setImmediate);
+  assert.deepEqual(asked, ['Hall']);
 });

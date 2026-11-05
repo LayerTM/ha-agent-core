@@ -26,6 +26,11 @@ uses [Semantic Versioning](https://semver.org/).
 - Stopping the relay closes the requests still open to Home Assistant at once and logs
   how many, so they cannot hold up the process. A tool still running on one of them is
   cancelled.
+- Answers about many devices that were each very large could run the server out of
+  memory, because what a lookup remembered counted against nothing. It now has its own
+  budget of 16 MiB, and an answer that does not fit is asked for again.
+- A lookup refused at its deadline went on asking Home Assistant about every device it
+  had left, for an answer nobody waited for. It now stops there.
 - Someone asking through Assist for a device on an install past the size bound was
   told to try again, which could not help. They are now told Home Assistant's answer
   is too large, in every supported language, and the audit marks such a lookup

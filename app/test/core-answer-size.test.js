@@ -8,6 +8,7 @@ const { test, before, after, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('node:http');
 const net = require('node:net');
+const { fork } = require('node:child_process');
 const v8 = require('node:v8');
 const vm = require('node:vm');
 const fs = require('node:fs');
@@ -1460,5 +1461,121 @@ test('the end of a run is a fact of that run, not a call missing from the record
     short.revoke(token);
     short.close();
     stub.close();
+  }
+});
+
+// --- What a resolution remembers of Home Assistant's answers is held too.
+
+// A home of `count` devices, each its own domain, in which every lookup's answer
+// carries `mib` MiB more than the device.
+function largeLookups(count, mib) {
+  const pad = '#'.repeat(mib * MIB);
+  const device = (i) => `- names: Device ${i}\n  domain: d${i}\n  state: on\n# ${pad}\n`;
+  const asked = { lookups: 0 };
+  const statesOf = JSON.stringify(Array.from({ length: count }, (_, i) => ({ entity_id: `light.device_${i}`, attributes: { friendly_name: `Device ${i}` } })));
+  const handle = (req, res, rpc) => {
+    if (req.url === '/api/states') return sendJson(res, statesOf);
+    if (rpc.method === 'tools/list') return defaultRpc(rpc, res);
+    asked.lookups += 1;
+    const { name, domain } = rpc.params.arguments;
+    const i = Number(/(\d+)$/.exec(name || domain)[1]);
+    return sendJson(res, liveAnswer(rpc.id, device(i)));
+  };
+  return { asked, handle };
+}
+const serving = (handle) => http.createServer((req, res) => {
+  const chunks = [];
+  req.on('data', (c) => chunks.push(c));
+  req.on('end', () => handle(req, res, chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : null));
+});
+
+test('a resolution past what may be remembered still resolves', async () => {
+  const home = largeLookups(6, 4);
+  const stub = serving(home.handle);
+  await new Promise((resolve) => { stub.listen(0, '127.0.0.1', resolve); });
+  const short = await startCoreRelay({ coreOrigin: `http://127.0.0.1:${stub.address().port}`, haToken: 'ha-token-never-in-a-message' });
+  try {
+    const targets = Array.from({ length: 6 }, (_, i) => `Device ${i}`);
+    const intents = [{ intent: 'HassTurnOff', targets, data: {}, risk: 'low' }];
+    const out = await soon(resolveAnswer({ proposal: { summary: 'Off', intents }, automation: null }, short.lookup('run')), 'the resolution', 60000);
+    assert.deepEqual(out.problems, []);
+    assert.deepEqual(out.proposal.intents[0].targets, Array.from({ length: 6 }, (_, i) => `light.device_${i}`));
+    assert.equal(home.asked.lookups, 18, 'three questions about each device');
+  } finally {
+    short.close();
+    stub.close();
+    stub.closeAllConnections();
+  }
+});
+
+test('what a resolution remembers is given back when it ends', async () => {
+  const home = largeLookups(3, 5);
+  const stub = serving(home.handle);
+  await new Promise((resolve) => { stub.listen(0, '127.0.0.1', resolve); });
+  const short = await startCoreRelay({ coreOrigin: `http://127.0.0.1:${stub.address().port}`, haToken: 'ha-token-never-in-a-message' });
+  try {
+    const ask = () => {
+      const lookup = short.lookup('run');
+      const hold = lookup.memoryHold();
+      const room = hold.take(16 * MIB);
+      hold.release();
+      return room;
+    };
+    const intents = [0, 1, 2].map((i) => ({ intent: 'HassTurnOff', targets: [`Device ${i}`], data: {}, risk: 'low' }));
+    await soon(resolveAnswer({ proposal: { summary: 'Off', intents }, automation: null }, short.lookup('run')), 'the resolution', 60000);
+    assert.equal(ask(), true, 'bytes were left charged');
+  } finally {
+    short.close();
+    stub.close();
+    stub.closeAllConnections();
+  }
+});
+
+test('an answer arriving after the deadline refused the resolution charges nothing', async () => {
+  const home = largeLookups(1, 5);
+  let answerNow;
+  const held = new Promise((resolve) => { answerNow = resolve; });
+  const stub = serving((req, res, rpc) => held.then(() => home.handle(req, res, rpc)));
+  await new Promise((resolve) => { stub.listen(0, '127.0.0.1', resolve); });
+  const short = await startCoreRelay({ coreOrigin: `http://127.0.0.1:${stub.address().port}`, haToken: 'ha-token-never-in-a-message' });
+  try {
+    const lookup = short.lookup('run');
+    let answered;
+    const late = new Promise((resolve) => { answered = resolve; });
+    const watched = { ...lookup, live: (name) => lookup.live(name).finally(answered) };
+    const intents = [{ intent: 'HassTurnOff', targets: ['Device 0'], data: {}, risk: 'low' }];
+    const out = await resolveAnswer({ proposal: { summary: 'Off', intents }, automation: null }, watched, { deadlineMs: 50 });
+    assert.equal(out.problems[0].problem, 'unavailable');
+    answerNow();
+    await soon(late, 'the late answer', 30000);
+    await new Promise(setImmediate);
+    const hold = lookup.memoryHold();
+    const room = hold.take(16 * MIB);
+    hold.release();
+    assert.equal(room, true, 'bytes were left charged');
+  } finally {
+    short.close();
+    stub.close();
+    stub.closeAllConnections();
+  }
+});
+
+test('sixty names answered with 4 MiB each do not take the process down', async () => {
+  const home = largeLookups(60, 4);
+  const stub = serving(home.handle);
+  await new Promise((resolve) => { stub.listen(0, '127.0.0.1', resolve); });
+  try {
+    const child = fork(path.join(__dirname, 'fixtures', 'resolve-on-small-heap.js'), [`http://127.0.0.1:${stub.address().port}`], {
+      execArgv: ['--max-old-space-size=256'], silent: true,
+    });
+    let out = '';
+    child.stdout.on('data', (d) => { out += d; });
+    child.stderr.resume();
+    const ended = await soon(new Promise((resolve) => { child.once('exit', (code, signal) => resolve({ code, signal })); }), 'the resolution', 150000);
+    assert.deepEqual(ended, { code: 0, signal: null }, 'the process died');
+    assert.deepEqual(JSON.parse(out).targets, Array.from({ length: 60 }, (_, i) => `light.device_${i}`));
+  } finally {
+    stub.close();
+    stub.closeAllConnections();
   }
 });

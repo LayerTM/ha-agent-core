@@ -253,6 +253,11 @@ long as Home Assistant takes to answer. The core's own lookups and confirmed act
 do not count. A tool still running when the add-on stops is cancelled, because the
 process closes its request; the log says how many requests were open.
 
+An answer from Home Assistant past what may be held is refused as too large, and that
+says nothing about what it answered: a confirmed action whose answer is too large may
+have happened, though it reads as `too large` and the audit marks it
+`(answer too large)`. This takes an answer of many MiB, or several at the same moment.
+
 From Home Assistant, answers and notifications pass, in JSON and in
 server-sent-event streams. A request the server makes of the agent (sampling,
 elicitation, roots) is dropped.
