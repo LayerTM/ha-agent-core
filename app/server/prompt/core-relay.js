@@ -572,7 +572,7 @@ async function startCoreRelay({
     let answered = false;
     // Not the body: this outlives its sending, and the handler below must not keep it.
     const mayRunTool = body !== null;
-    // Counted until the answer starts or the request ends, whichever comes first.
+    // Counted until an agent starts reading its answer or the request ends.
     let waiting = mayRunTool;
     if (waiting) unansweredRequests += 1;
     const stopWaiting = () => {
@@ -600,7 +600,6 @@ async function startCoreRelay({
       },
       (upRes) => {
         answered = true;
-        stopWaiting();
         if (pathname === MCP_PATH) observeMcpAnswer(upRes.statusCode, `${req.method} ${pathname}`);
         // Only while the run is still live: an answer that lands after its bearer
         // was revoked would leave a mark nothing ever clears.
@@ -624,6 +623,7 @@ async function startCoreRelay({
           upRes.resume();
           return;
         }
+        stopWaiting();
         // A redirect is never followed: node does not follow by default, and the
         // Authorization header must not travel to another origin. Surfaced as a
         // plain error so it cannot be mistaken for an auth failure.

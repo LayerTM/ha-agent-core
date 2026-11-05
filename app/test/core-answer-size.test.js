@@ -647,6 +647,34 @@ test('past the bound new requests are refused by name, and what runs is never cl
   }
 });
 
+test('an answer that starts for an agent that left keeps its place until it ends', async () => {
+  const stub = await silentHa();
+  const short = await startCoreRelay({
+    coreOrigin: stub.url, haToken: 'ha-token-never-in-a-message', authProbeEveryMs: 0, maxUnansweredRequests: 1,
+  });
+  const token = short.issue('run-started', { basenames: [] });
+  try {
+    const left = postThrough(short, token, PING);
+    await soon(stub.received(1), 'the request');
+    left.leave();
+    await settle();
+    stub.open[0].writeHead(200, { 'content-type': 'application/json' });
+    stub.open[0].write('{');
+    await settle();
+    assert.equal((await soon(postThrough(short, token, PING).answer, 'the refusal')).status, 503);
+    stub.open[0].end('}');
+    await settle();
+    const next = postThrough(short, token, PING);
+    await soon(stub.received(2), 'the next request');
+    sendJson(stub.open[1], { jsonrpc: '2.0', id: 1, result: {} });
+    assert.equal((await soon(next.answer, 'the next answer')).status, 200);
+  } finally {
+    short.revoke(token);
+    short.close();
+    stub.close();
+  }
+});
+
 test('a request that ends without an answer frees its place, however its agent left', async () => {
   const dropping = http.createServer((req) => { req.resume(); req.once('end', () => req.socket.destroy()); });
   await new Promise((resolve) => { dropping.listen(0, '127.0.0.1', resolve); });
