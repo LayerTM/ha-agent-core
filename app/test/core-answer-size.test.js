@@ -484,7 +484,7 @@ test('a states list that stalls is given up on, and gives its share back', async
   assert.equal((await soon(agentCall(CALL), 'the next answer', 20000)).status, 200);
 });
 
-test('an agent gone before Home Assistant answers aborts the request and takes no share', async () => {
+test('an agent gone before Home Assistant answers leaves the tool running and takes no share', async () => {
   const body = shareBody(5);
   // Twice, because one lost share would still leave room for one more answer.
   for (let round = 0; round < 2; round += 1) {
@@ -494,14 +494,48 @@ test('an agent gone before Home Assistant answers aborts the request and takes n
     const gone = openAgent(CALL);
     gone.answered.catch(() => {});
     const held = await soon(asked, 'the stub');
-    const closed = new Promise((resolve) => { held.once('close', resolve); });
+    let closedEarly = false;
+    held.once('close', () => { closedEarly = !held.writableFinished; });
     gone.req.destroy();
     gone.done();
-    await soon(closed, 'the request aborted');
-    sendJson(held, body);
+    await new Promise((resolve) => { setTimeout(resolve, 300); });
+    assert.equal(closedEarly, false, 'the request closed, which cancels the tool');
+    await new Promise((resolve) => { held.once('finish', resolve); sendJson(held, body); });
   }
   answerRpc = (rpc, res) => sendJson(res, body);
   assert.equal((await soon(agentCall(CALL), 'the next answer', 20000)).status, 200);
+});
+
+test('a tool that outlives its agent is not waited for without end', async () => {
+  const short = await startCoreRelay({
+    coreOrigin: `http://127.0.0.1:${ha.address().port}`,
+    haToken: 'ha-token-never-in-a-message',
+    abandonedRequestMs: 300,
+  });
+  const token = short.issue('run-gone', { basenames: ['GetLiveContext'] });
+  let closed;
+  let arrived;
+  const asked = new Promise((resolve) => { arrived = resolve; });
+  answerRpc = (rpc, res) => {
+    closed = new Promise((resolve) => { res.once('close', resolve); });
+    arrived();
+  };
+  const leaving = new AbortController();
+  const call = fetch(`${short.url}/api/mcp`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', accept: 'application/json' },
+    body: JSON.stringify(CALL),
+    signal: leaving.signal,
+  }).catch(() => {});
+  try {
+    await soon(asked, 'the stub');
+    leaving.abort();
+    await call;
+    await soon(closed, 'the request closing at the limit');
+  } finally {
+    short.revoke(token);
+    short.close();
+  }
 });
 
 test('an agent gone while the answer arrives gives its share back on every order', async () => {

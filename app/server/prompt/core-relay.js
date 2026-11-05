@@ -83,6 +83,8 @@ const MAX_STATES_BYTES = 64 * MIB;
 // How long an agent has to read one answer it holds a share for, however busy its
 // socket looks. Over loopback the largest answer takes well under a second.
 const DELIVERY_DEADLINE_MS = 60000;
+// How long a request stays open once its agent has left, for a tool still running.
+const ABANDONED_REQUEST_MS = 60 * 60 * 1000;
 const answerTooLarge = (what) => `Home Assistant's answer to ${what} is too large (over ${MAX_ANSWERS_HELD_BYTES / MIB} MiB, counting answers being read at the same time)`;
 const statesTooLarge = () => `Home Assistant's states list is too large (over ${MAX_STATES_BYTES / MIB} MiB)`;
 
@@ -356,6 +358,7 @@ function deny(res, status, message) {
  * @param {number} [opts.authProbeEveryMs]  Probe the token at start and then this
  *   often; 0 (the default) probes only when asked.
  * @param {number} [opts.deliveryDeadlineMs]  How long an agent has to read one answer.
+ * @param {number} [opts.abandonedRequestMs]  How long a tool may outlive the agent that called it.
  * @returns {Promise<{
  *   url: string, port: number, issue: (runId: string) => string,
  *   revoke: (token: string) => void, close: () => void,
@@ -379,6 +382,7 @@ function deny(res, status, message) {
 async function startCoreRelay({
   coreOrigin, haToken, log = () => {}, record = () => {}, authProbeEveryMs = 0,
   deliveryDeadlineMs = DELIVERY_DEADLINE_MS,
+  abandonedRequestMs = ABANDONED_REQUEST_MS,
 }) {
   // Whether Home Assistant accepts the add-on's token on the MCP path, from the
   // latest answer that said so: 'ok', 'unauthorized', 'unreachable' (a probe got
@@ -550,6 +554,7 @@ async function startCoreRelay({
     // answer ends, delivered, refused, broken or abandoned, closes the response, and
     // the listener is in place before anything can be read or anyone can leave.
     const share = answerHold();
+    let answered = false;
     const headers = { authorization: `Bearer ${haToken}` };
     for (const [name, value] of Object.entries(req.headers)) {
       if (FORWARD_TO_CORE.has(name)) headers[name] = value;
@@ -570,6 +575,7 @@ async function startCoreRelay({
         ...(secure ? { rejectUnauthorized: false } : {}),
       },
       (upRes) => {
+        answered = true;
         if (pathname === MCP_PATH) observeMcpAnswer(upRes.statusCode, `${req.method} ${pathname}`);
         // Only while the run is still live: an answer that lands after its bearer
         // was revoked would leave a mark nothing ever clears.
@@ -586,6 +592,12 @@ async function startCoreRelay({
           // only what it means.
           const ok = upRes.statusCode >= 200 && upRes.statusCode < 300;
           recordCamera(runId, pathname, ok ? '' : (redirected ? ' (no answer)' : ' (failed)'));
+        }
+        // Nobody is left to read it: what it says about the token and the camera read
+        // is noted above, and the rest goes nowhere.
+        if (res.destroyed) {
+          upRes.resume();
+          return;
         }
         // A redirect is never followed: node does not follow by default, and the
         // Authorization header must not travel to another origin. Surfaced as a
@@ -700,11 +712,21 @@ async function startCoreRelay({
       },
     );
 
-    // An agent that leaves has no use for the rest, so Home Assistant is not kept
-    // answering it. Same tick as the request: nothing can have closed in between.
+    // An agent that leaves has no use for the rest of an answer, so Home Assistant is
+    // not kept sending it. Before the answer starts the request stays open: Home
+    // Assistant cancels a tool whose request closes, wherever it has got to, and a
+    // script stopped halfway can leave a device on. Same tick as the request: nothing
+    // can have closed in between.
     res.once('close', () => {
       share.release();
-      if (!res.writableFinished) upstream.destroy();
+      if (res.writableFinished) return;
+      if (answered) {
+        upstream.destroy();
+        return;
+      }
+      const limit = setTimeout(() => upstream.destroy(), abandonedRequestMs);
+      limit.unref();
+      upstream.once('close', () => clearTimeout(limit));
     });
 
     upstream.on('error', (err) => {
