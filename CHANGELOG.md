@@ -12,8 +12,9 @@ uses [Semantic Versioning](https://semver.org/).
   example a run that ended during a script with a delay, Home Assistant cancelled the
   tool wherever it had got to. A script with several steps could stop halfway and
   leave a device on. The tool now finishes; its answer is discarded. A tool still
-  running an hour after its agent left is given up on, and with 64 such requests open
-  new ones are refused by name until one ends. Affected version: 0.11.4.
+  running an hour after its agent left is given up on. With 64 requests waiting for
+  Home Assistant to answer, new ones from agents are refused with an error that says
+  why, and none of those waiting is closed for it. Affected version: 0.11.4.
 
 ## [0.11.4] - 2026-11-04
 

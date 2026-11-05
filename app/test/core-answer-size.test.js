@@ -611,34 +611,65 @@ test('a request whose agent has left does not keep its body in memory', async ()
 test('past the bound new requests are refused by name, and what runs is never closed', async () => {
   const stub = await silentHa();
   const short = await startCoreRelay({
-    coreOrigin: stub.url, haToken: 'ha-token-never-in-a-message', authProbeEveryMs: 0, maxAbandonedRequests: 2, log: (l) => logged.push(l),
+    coreOrigin: stub.url, haToken: 'ha-token-never-in-a-message', authProbeEveryMs: 0, maxUnansweredRequests: 2, log: (l) => logged.push(l),
   });
   const token = short.issue('run-bound', { basenames: [] });
   try {
-    for (let i = 0; i < 2; i += 1) {
-      const call = postThrough(short, token, PING);
-      await soon(stub.received(i + 1), 'the request');
-      call.leave();
-      await settle();
-    }
+    // One agent left and one stays: both are waiting, and both count.
+    const left = postThrough(short, token, PING);
+    await soon(stub.received(1), 'the first request');
+    left.leave();
+    await settle();
+    const stays = postThrough(short, token, PING);
+    await soon(stub.received(2), 'the second request');
+
     const refused = await soon(postThrough(short, token, PING).answer, 'the refusal');
     assert.equal(refused.status, 503);
-    assert.match((await refused.json()).error, /still running after their agents left/);
+    assert.match((await refused.json()).error, /too many requests are waiting for Home Assistant/);
     assert.equal(stub.open.length, 2, 'the refused request went nowhere');
     assert.ok(stub.open.every((r) => !r.destroyed), 'a running tool was closed');
-    assert.ok(logged.some((l) => l.includes('still running after their agents left')), logged.join('\n'));
+    assert.ok(logged.some((l) => l.includes('too many requests are waiting')), logged.join('\n'));
 
-    // A request that an agent stays for is not counted, and one that ends frees its place.
-    sendJson(stub.open[0], { jsonrpc: '2.0', id: 1, result: {} });
+    // An answer that has started frees its place, though it has not finished.
+    stub.open[1].writeHead(200, { 'content-type': 'text/event-stream' });
+    stub.open[1].write(': working\n\n');
     await settle();
     const next = postThrough(short, token, PING);
     await soon(stub.received(3), 'the next request');
+    stub.open[1].end();
+    assert.equal((await soon(stays.answer, 'the answer it stayed for')).status, 200);
     sendJson(stub.open[2], { jsonrpc: '2.0', id: 1, result: {} });
     assert.equal((await soon(next.answer, 'the next answer')).status, 200);
   } finally {
     short.revoke(token);
     short.close();
     stub.close();
+  }
+});
+
+test('a request that ends without an answer frees its place, however its agent left', async () => {
+  const dropping = http.createServer((req) => { req.resume(); req.once('end', () => req.socket.destroy()); });
+  await new Promise((resolve) => { dropping.listen(0, '127.0.0.1', resolve); });
+  const short = await startCoreRelay({
+    coreOrigin: `http://127.0.0.1:${dropping.address().port}`, haToken: 'ha-token-never-in-a-message', authProbeEveryMs: 0, maxUnansweredRequests: 1,
+  });
+  const token = short.issue('run-dropped', { basenames: [] });
+  try {
+    for (let i = 0; i < 40; i += 1) {
+      const call = postThrough(short, token, PING);
+      // Around the moment the connection drops, so the two ends close in either order.
+      setTimeout(() => call.leave(), i % 8);
+      await call.answer.catch(() => {});
+      await new Promise((resolve) => { setTimeout(resolve, 10); });
+    }
+    await settle();
+    const last = await soon(postThrough(short, token, PING).answer, 'the last call');
+    assert.equal(last.status, 502, 'it reached Home Assistant, which dropped it');
+  } finally {
+    short.revoke(token);
+    short.close();
+    dropping.close();
+    dropping.closeAllConnections();
   }
 });
 
