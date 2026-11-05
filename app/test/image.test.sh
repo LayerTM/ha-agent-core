@@ -5,6 +5,7 @@
 # the provisioning of skills, plugins and MCP servers).
 #
 # Requires Docker. The image is image/Dockerfile.
+# No network: nothing in here may reach a Home Assistant, whatever the name resolves to.
 #
 # Run, from app/:  npm run test:image
 set -euo pipefail
@@ -17,6 +18,6 @@ image="$(docker build -q "${here}/image")"
 status=0
 for script in "${here}"/image/*.sh; do
     echo "== ${script##*/}"
-    docker run --rm --entrypoint bash -v "${repo}:/src:ro" "${image}" "/src/app/test/image/${script##*/}" || status=1
+    docker run --rm --network none --entrypoint bash -v "${repo}:/src:ro" "${image}" "/src/app/test/image/${script##*/}" || status=1
 done
 exit "${status}"

@@ -49,6 +49,10 @@ test('the shutdown the bootstrap returns releases every listener it opened', asy
   const { createNeutralAdapter } = require('../fixtures/neutral-adapter');
   const { adapter, branding } = createNeutralAdapter();
   useAdapter(adapter, branding);
+  // With a token there is a relay, and a relay asks Core about the token as it
+  // starts; nothing listens here, so it is told no one answered.
+  require('../../server/prompt/core-target').resolveCoreTarget = async () => (
+    { origin: 'http://127.0.0.1:1', ssl: false, port: 1, source: 'test' });
   const promptServer = require('../../server/prompt');
 
   assert.deepEqual(listeningServers(), [], 'nothing is listening before the first start');
