@@ -1,34 +1,3 @@
 #!/usr/bin/env bash
-# First on PATH in a hermetic test run (../hermetic-test.js): passes a call to
-# loopback on to the real tool, and refuses and records any other destination.
-set -u
-
-self="$(cd "$(dirname "$0")" && pwd)"
-name="${0##*/}"
-
-for arg in "$@"; do
-    case "${arg}" in
-        file://*) ;;
-        [a-zA-Z]*://*)
-            host="${arg#*://}"
-            host="${host#*@}"
-            case "${host}" in
-                localhost|localhost[:/?#]*|127.*|\[::1\]*) ;;
-                *)
-                    printf '%s called with %s\n' "${name}" "${arg}" >> "${HERMETIC_RECORD}"
-                    echo "${name}: hermetic test run: ${arg} refused" >&2
-                    exit 7
-                    ;;
-            esac
-            ;;
-    esac
-done
-
-IFS=: read -r -a dirs <<< "${PATH}"
-for dir in "${dirs[@]}"; do
-    if [ "${dir}" != "${self}" ] && [ -x "${dir}/${name}" ]; then
-        exec "${dir}/${name}" "$@"
-    fi
-done
-echo "${name}: not found" >&2
-exit 127
+# Found first on PATH in a hermetic test run; see ../hermetic-shim.sh.
+exec bash "$(dirname "$0")/../hermetic-shim.sh" wget "$@"

@@ -14,13 +14,16 @@ const path = require('node:path');
 
 const RUNNER = path.join(__dirname, '..', 'test-support', 'hermetic-test.js');
 const FAR = '192.0.2.1';
+// Never a name that may resolve: if the guard regresses, these calls really run.
+const NAME = 'core-name.invalid';
+const BOUND = 20000;
 
 function underGuard(script) {
-  return spawnSync(process.execPath, [RUNNER, process.execPath, '-e', script], { encoding: 'utf8' });
+  return spawnSync(process.execPath, [RUNNER, process.execPath, '-e', script], { encoding: 'utf8', timeout: BOUND });
 }
 
 function shellUnderGuard(script) {
-  return spawnSync(process.execPath, [RUNNER, 'bash', '-c', script], { encoding: 'utf8' });
+  return spawnSync(process.execPath, [RUNNER, 'bash', '-c', script], { encoding: 'utf8', timeout: BOUND });
 }
 
 test('this suite itself runs guarded: run without the runner, it is red', () => {
@@ -48,7 +51,7 @@ test('the image suite gives its containers no network', () => {
 });
 
 const ATTEMPTS = {
-  'fetch by name': "fetch('http://homeassistant:8123/api/mcp').catch(() => {});",
+  'fetch by name': `fetch('http://${NAME}:8123/api/mcp').catch(() => {});`,
   'fetch by address': `fetch('http://${FAR}:8123/').catch(() => {});`,
   'http.request': `require('node:http').get('http://${FAR}/').on('error', () => {});`,
   'https.request': `require('node:https').get('https://${FAR}/').on('error', () => {});`,
@@ -68,8 +71,8 @@ for (const [what, script] of Object.entries(ATTEMPTS)) {
 }
 
 test('the refused destination and the caller are named', () => {
-  const result = underGuard("fetch('http://homeassistant:8123/api/mcp').catch(() => {});");
-  assert.match(result.stderr, /homeassistant:8123/);
+  const result = underGuard(`fetch('http://${NAME}:8123/api/mcp').catch(() => {});`);
+  assert.match(result.stderr, /core-name\.invalid:8123/);
   assert.match(result.stderr, /\n\s+at /);
 });
 
@@ -81,8 +84,71 @@ for (const tool of ['curl', 'wget']) {
   });
 }
 
-test('a name that only starts like loopback is refused', () => {
-  assert.equal(shellUnderGuard('curl http://localhost.invalid/ || true').status, 1);
+const REFUSED_CALLS = [
+  // No scheme: the tool assumes http.
+  `curl ${NAME}:8123/api`,
+  `curl ${NAME}`,
+  'curl core-name-with-no-dot',
+  `curl ${FAR}`,
+  `curl -sS ${NAME}:8123/api`,
+  `curl -m 5 ${FAR}`,
+  `curl -m5 -o/dev/null ${FAR}`,
+  `curl -sSm 5 ${FAR}`,
+  // The destination in an option.
+  `curl --url=http://${NAME}:8123/`,
+  `curl --url=${NAME}:8123/api`,
+  `curl --url ${NAME}:8123/api`,
+  `curl -x http://${FAR}:3128 http://127.0.0.1:1/`,
+  `curl --proxy=${FAR}:3128 http://127.0.0.1:1/`,
+  // Names and addresses that only look local.
+  'curl http://localhost.invalid/',
+  'curl http://127.0.0.1.invalid/',
+  `curl http://127.0.0.1@${FAR}/`,
+  'curl 127.invalid',
+  // An option this does not know: its value is taken for a destination, loudly.
+  'curl --some-future-option value http://127.0.0.1:1/',
+  // wget has its own options.
+  `wget ${NAME}:8123/api`,
+  `wget -q -O - ${FAR}/`,
+  `wget --output-document=- ${FAR}`,
+];
+
+for (const call of REFUSED_CALLS) {
+  test(`refused: ${call}`, () => {
+    const result = shellUnderGuard(`${call} || true`);
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stderr, /called with /);
+  });
+}
+
+const PASSING_CALLS = [
+  'curl -sS -m 5 -o /dev/null -w "%{http_code}" -H "X-Test: yes" http://127.0.0.1:PORT/',
+  'curl -sSm5 http://127.0.0.1:PORT/',
+  'curl --silent --max-time 5 --output /dev/null http://localhost:PORT/',
+  'curl -s --url 127.0.0.1:PORT',
+  'curl -s localhost:PORT/x',
+  'curl -s -d "body with spaces.and.dots" -X POST 127.0.0.1:PORT/',
+  'printf "header = \\"X-Test: yes\\"\\n" | curl -K - -s http://127.0.0.1:PORT/',
+  'curl --version',
+  'curl -s file:///dev/null',
+];
+
+test('calls to this machine are passed on to the real tool', async () => {
+  const server = http.createServer((req, res) => { req.resume(); res.end('ok'); });
+  await new Promise((resolve) => { server.listen(0, '127.0.0.1', resolve); });
+  const { port } = server.address();
+  try {
+    for (const call of PASSING_CALLS) {
+      // eslint-disable-next-line no-await-in-loop
+      const result = await new Promise((resolve) => {
+        execFile(process.execPath, [RUNNER, 'bash', '-c', call.replaceAll('PORT', String(port))], { encoding: 'utf8' },
+          (error, stdout, stderr) => resolve({ code: error ? error.code : 0, stderr }));
+      });
+      assert.equal(result.code, 0, `${call}: ${result.stderr}`);
+    }
+  } finally {
+    server.close();
+  }
 });
 
 test('a failing command keeps its own exit status', () => {
