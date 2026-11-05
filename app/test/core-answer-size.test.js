@@ -506,6 +506,36 @@ test('an agent gone before Home Assistant answers leaves the tool running and ta
   assert.equal((await soon(agentCall(CALL), 'the next answer', 20000)).status, 200);
 });
 
+test('a request with no tool behind it closes when its agent leaves', async () => {
+  const rawHa = http.createServer();
+  let closed;
+  let arrived;
+  const asked = new Promise((resolve) => { arrived = resolve; });
+  rawHa.on('request', (req, res) => {
+    closed = new Promise((resolve) => { res.once('close', resolve); });
+    arrived();
+  });
+  await new Promise((resolve) => { rawHa.listen(0, '127.0.0.1', resolve); });
+  const short = await startCoreRelay({ coreOrigin: `http://127.0.0.1:${rawHa.address().port}`, haToken: 'ha-token-never-in-a-message' });
+  const token = short.issue('run-get', { basenames: [] });
+  const leaving = new AbortController();
+  const call = fetch(`${short.url}/api/mcp`, {
+    headers: { authorization: `Bearer ${token}`, accept: 'text/event-stream' },
+    signal: leaving.signal,
+  }).catch(() => {});
+  try {
+    await soon(asked, 'the stub');
+    leaving.abort();
+    await call;
+    await soon(closed, 'the request closing');
+  } finally {
+    short.revoke(token);
+    short.close();
+    rawHa.close();
+    rawHa.closeAllConnections();
+  }
+});
+
 test('a tool that outlives its agent is not waited for without end', async () => {
   const short = await startCoreRelay({
     coreOrigin: `http://127.0.0.1:${ha.address().port}`,

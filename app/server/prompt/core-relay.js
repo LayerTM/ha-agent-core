@@ -713,14 +713,14 @@ async function startCoreRelay({
     );
 
     // An agent that leaves has no use for the rest of an answer, so Home Assistant is
-    // not kept sending it. Before the answer starts the request stays open: Home
-    // Assistant cancels a tool whose request closes, wherever it has got to, and a
-    // script stopped halfway can leave a device on. Same tick as the request: nothing
-    // can have closed in between.
+    // not kept sending it. Only a POST can be running a tool, and before its answer
+    // starts it stays open: Home Assistant cancels a tool whose request closes,
+    // wherever it has got to, and a script stopped halfway can leave a device on.
+    // Same tick as the request: nothing can have closed in between.
     res.once('close', () => {
       share.release();
       if (res.writableFinished) return;
-      if (answered) {
+      if (answered || body === null) {
         upstream.destroy();
         return;
       }
