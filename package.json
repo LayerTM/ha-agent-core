@@ -35,6 +35,7 @@
     "package-lock.json",
     "app/server/",
     "app/templates/",
+    "app/test-support/",
     "app/package.json",
     "app/package-lock.json",
     "app/install-scripts.json",
@@ -48,7 +49,7 @@
     "tools/smoke-allowed-packages.js"
   ],
   "scripts": {
-    "test": "node --test \"test/**/*.test.js\"",
+    "test": "node app/test-support/hermetic-test.js node --test \"test/**/*.test.js\"",
     "lint": "eslint .",
     "typecheck": "tsc -p jsconfig.json",
     "pack:core": "node tools/pack.js --out dist"
