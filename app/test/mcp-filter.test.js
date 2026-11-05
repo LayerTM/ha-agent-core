@@ -25,27 +25,29 @@ const judge = (value, may = MAY) => judgeClientBody(typeof value === 'string' ? 
 test('the methods a prompt run needs are forwarded', () => {
   for (const m of [rpc('initialize', 0, {}), rpc('ping', 1), rpc('tools/list', 2),
     rpc('notifications/initialized'), rpc('notifications/cancelled', undefined, { requestId: 3 })]) {
-    assert.deepEqual(judge(m), { forward: true, calls: [] }, m.method);
+    assert.deepEqual(judge(m), { forward: true, batch: false, calls: [] }, m.method);
   }
-  assert.deepEqual(judge([rpc('tools/list', 1), rpc('notifications/initialized')]), { forward: true, calls: [] });
+  assert.deepEqual(judge([rpc('tools/list', 1), rpc('notifications/initialized')]), { forward: true, batch: true, calls: [] });
 });
 
 test('a forwarded body names the calls it makes, and only those', () => {
   // What a record of this body would have to say: which tool, with what.
   assert.deepEqual(judge(rpc('tools/call', 3, { name: 'HassTurnOn', arguments: { name: 'lamp' } })), {
     forward: true,
+    batch: false,
     calls: [{ id: 3, answerable: true, name: 'HassTurnOn', args: { name: 'lamp' } }],
   });
   // A call without an id is named too. It expects no answer — which is a fact
   // about the record, not about the action: Home Assistant is still asked.
   assert.deepEqual(judge(rpc('tools/call', undefined, { name: 'HassTurnOn' })), {
     forward: true,
+    batch: false,
     calls: [{ id: undefined, answerable: false, name: 'HassTurnOn', args: undefined }],
   });
   // A batch names each of its calls, and nothing that is not one.
   assert.deepEqual(
     judge([rpc('tools/list', 1), rpc('tools/call', 2, { name: 'GetLiveContext', arguments: {} })]),
-    { forward: true, calls: [{ id: 2, answerable: true, name: 'GetLiveContext', args: {} }] },
+    { forward: true, batch: true, calls: [{ id: 2, answerable: true, name: 'GetLiveContext', args: {} }] },
   );
   // A call that names no tool names no ALLOWED tool either, so it is refused
   // rather than forwarded with an invented name.
@@ -291,7 +293,7 @@ test('the three name shapes converge to one basename', () => {
     assert.equal(haBasename(name), 'GetLiveContext', name);
     assert.deepEqual(
       judge(rpc('tools/call', 1, { name, arguments: {} }), new Set(['GetLiveContext'])),
-      { forward: true, calls: [{ id: 1, answerable: true, name, args: {} }] },
+      { forward: true, batch: false, calls: [{ id: 1, answerable: true, name, args: {} }] },
       name,
     );
   }
@@ -333,10 +335,10 @@ test('tools/list is NOT gated, deliberately', () => {
   // — narrowing what may be LISTED would blind that and change nothing about what
   // may be CALLED. So this asserts the silence: a run allowed one tool still sees
   // the whole list.
-  assert.deepEqual(judge(rpc('tools/list', 2), new Set(['GetLiveContext'])), { forward: true, calls: [] });
-  assert.deepEqual(judge(rpc('tools/list', 2), null), { forward: true, calls: [] });
-  assert.deepEqual(judge(rpc('initialize', 0, {}), null), { forward: true, calls: [] });
-  assert.deepEqual(judge(rpc('ping', 1), null), { forward: true, calls: [] });
+  assert.deepEqual(judge(rpc('tools/list', 2), new Set(['GetLiveContext'])), { forward: true, batch: false, calls: [] });
+  assert.deepEqual(judge(rpc('tools/list', 2), null), { forward: true, batch: false, calls: [] });
+  assert.deepEqual(judge(rpc('initialize', 0, {}), null), { forward: true, batch: false, calls: [] });
+  assert.deepEqual(judge(rpc('ping', 1), null), { forward: true, batch: false, calls: [] });
 });
 
 test('what an event stream holds is counted in bytes, whatever the text', () => {

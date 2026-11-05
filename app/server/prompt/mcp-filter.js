@@ -55,7 +55,7 @@ function errorFor(id, code, message) {
  *
  * @param {string} text
  * @param {Set<string>|null} [basenames]
- * @returns {{ forward: true, calls: {id: unknown, answerable: boolean, name: string, args: unknown}[] }
+ * @returns {{ forward: true, batch: boolean, calls: {id: unknown, answerable: boolean, name: string, args: unknown}[] }
  *   | { forward: false, status: number, body: string, type?: string }}
  */
 function judgeClientBody(text, basenames = null) {
@@ -104,7 +104,7 @@ function judgeClientBody(text, basenames = null) {
         name: typeof m.params?.name === 'string' ? m.params.name : '',
         args: m.params?.arguments,
       }));
-    return { forward: true, calls };
+    return { forward: true, batch, calls };
   }
 
   // Nothing of a body with a refused message is forwarded. Every request in it is

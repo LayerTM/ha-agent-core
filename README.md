@@ -246,12 +246,19 @@ keeps it within the tools the run's allowlist names.
 
 An agent that leaves does not stop a tool it called: Home Assistant cancels a tool
 whose request closes, wherever it has got to, so a `tools/call` stays open until Home
-Assistant ends it, for up to an hour, and what still arrives is discarded. With 64
+Assistant ends it, and what still arrives is discarded. With 64
 tool calls waiting for Home Assistant, new ones from agents are refused with 503 and
 an error that says why. The count is shared: one agent can fill it for another, for as
 long as Home Assistant takes to answer. The core's own lookups and confirmed actions
-do not count. A tool still running when the add-on stops is cancelled, because the
-process closes its request; the log says how many requests were open.
+do not count.
+
+Two things do stop a running tool, wherever it has got to, and a device whose last step
+had not come stays as it is. Home Assistant gives one call 60 seconds (measured on
+2026.10.4 and 2026.11.0), whether its agent stayed or left: a script that takes longer
+is cancelled, the agent gets a tool error that says so and that the tool may have stopped
+halfway, and the audit marks it `(failed)`. And a tool still running when the add-on
+stops is cancelled, because the process closes its request; the log says how many
+requests were open.
 
 An answer from Home Assistant past what may be held is refused as too large, and that
 says nothing about what it answered: a confirmed action whose answer is too large may

@@ -19,13 +19,22 @@ uses [Semantic Versioning](https://semver.org/).
 - The audit now says how a tool ended when its agent had already left, including
   `(answered after its run ended)` and `(failed, after its run ended)` for a tool that
   outlived its run, which used to read only `(no answer)`.
-- A tool answered over an event stream also finishes when its agent leaves, as a tool
-  answered over JSON already did.
+- A tool answered over an event stream is also not stopped by its agent leaving, as a
+  tool answered over JSON already was.
+- A tool past Home Assistant's limit for one call was cut off with an empty 504, and
+  all an agent could say was that its request failed. It now gets a tool error saying
+  the tool was cut off and may have stopped halfway, and the audit marks it `(failed)`.
+- What 0.11.5 said of a tool whose agent left was too broad. It finishes only inside
+  Home Assistant's limit of 60 seconds for one call (measured on 2026.10.4 and
+  2026.11.0): past that Home Assistant cancels it wherever it has got to, agent present
+  or gone. The hour is not how long a tool can run, only how long the relay waits for a
+  Home Assistant that never ends a request.
 - Only a tool call stays open for its tool and counts towards the 64 waiting for Home
   Assistant. Anything else closes when its agent leaves and is never refused for that.
 - Stopping the relay closes the requests still open to Home Assistant at once and logs
   how many, so they cannot hold up the process. A tool still running on one of them is
-  cancelled.
+  cancelled, as a script was when measured, and a device whose last step had not come
+  stays as it is.
 - Answers about many devices that were each very large could run the server out of
   memory, because what a lookup remembered counted against nothing. It now has its own
   budget of 16 MiB, and an answer that does not fit is asked for again.

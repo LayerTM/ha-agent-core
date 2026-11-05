@@ -88,6 +88,7 @@ const MAX_STATES_BYTES = 64 * MIB;
 // socket looks. Over loopback the largest answer takes well under a second.
 const DELIVERY_DEADLINE_MS = 60000;
 // How long a request stays open once its agent has left, for a tool still running.
+// Home Assistant ends a call itself long before this: it is for one that never does.
 const ABANDONED_REQUEST_MS = 60 * 60 * 1000;
 // How many POSTs may wait for Home Assistant to start answering before new ones are
 // refused, whether their agents stayed or left; the ones waiting are never closed for
@@ -366,6 +367,15 @@ function answerFailed(message) {
     || Boolean(message.result && typeof message.result === 'object' && message.result.isError === true);
 }
 
+// What an agent is told of a tool Home Assistant gave up on (504, with no body). As an
+// answer to its call, or all it can say is that the request failed.
+function toolCutOff(id, seconds) {
+  const text = `Home Assistant cut this tool off after ${seconds} s, at its limit for one call. `
+    + 'It may have stopped halfway: steps already done stay done, the rest did not happen. '
+    + 'Check the state of the devices before calling it again.';
+  return { jsonrpc: '2.0', id, result: { isError: true, content: [{ type: 'text', text }] } };
+}
+
 // Whether a request says it has a body. Only POST /api/mcp may, and that body
 // is read and judged; any other request with one is refused.
 function hasBody(req) {
@@ -595,7 +605,7 @@ async function startCoreRelay({
             pending.set(String(call.id), { ...call, runId });
           }
           const answerable = (verdict.calls || []).filter((call) => call.answerable);
-          forward(req, res, pathname, body, observerFor(runId), runId, { mayRunTool: callsTool, late: lateLines(answerable, runId), run: entry });
+          forward(req, res, pathname, body, observerFor(runId), runId, { mayRunTool: callsTool, late: lateLines(answerable, runId), run: entry, callIds: answerable.map((call) => call.id), batch: verdict.batch });
           return;
         }
         res.writeHead(verdict.status, verdict.type ? { 'content-type': verdict.type } : {});
@@ -609,7 +619,7 @@ async function startCoreRelay({
       return;
     }
     req.resume();
-    forward(req, res, pathname, null, observerFor(runId), runId, { mayRunTool: false, late: new Map(), run: entry });
+    forward(req, res, pathname, null, observerFor(runId), runId, { mayRunTool: false, late: new Map(), run: entry, callIds: [], batch: false });
   });
 
   // The request to Core, with the Home Assistant token in place of the relay's.
@@ -619,13 +629,14 @@ async function startCoreRelay({
     record(capBytes(`camera run=${runId}${mark}: ${pathname.slice(CAMERA_PREFIX.length)}`, LINE_CAP));
   }
 
-  function forward(req, res, pathname, body, observe, runId, { mayRunTool, late, run }) {
+  function forward(req, res, pathname, body, observe, runId, { mayRunTool, late, run, callIds, batch }) {
     // The agent left while its request was being read; nothing was sent for it.
     if (res.destroyed) return;
     // What this answer holds of the budget. The response owns it: every way an
     // answer ends, delivered, refused, broken or abandoned, closes the response, and
     // the listener is in place before anything can be read or anyone can leave.
     const share = agentAnswerHold();
+    const asked = Date.now();
     let answerStream = null;
     let upstreamOpen = true;
     // Counted until an agent starts reading its answer or the request ends.
@@ -662,6 +673,19 @@ async function startCoreRelay({
         if (authFromStatus(upRes.statusCode) === 'unauthorized'
           && [...runs.values()].some((entry) => entry.runId === runId)) {
           refusedRuns.set(runId, upRes.statusCode);
+        }
+        if (upRes.statusCode === 504 && callIds.length > 0) {
+          upRes.resume();
+          stopWaiting();
+          const seconds = Math.round((Date.now() - asked) / 1000);
+          const answers = callIds.map((id) => toolCutOff(id, seconds));
+          log(`relay upstream: Home Assistant cut off ${answers.length} tool call(s) after ${seconds} s (504)`);
+          recordUnread(answers, run, observe, late);
+          if (!res.destroyed) {
+            res.writeHead(200, { 'content-type': 'application/json' });
+            res.end(JSON.stringify(batch ? answers : answers[0]));
+          }
+          return;
         }
         const redirected = upRes.statusCode >= 300 && upRes.statusCode < 400;
         if (CAMERA_PATH_RE.test(pathname)) {
