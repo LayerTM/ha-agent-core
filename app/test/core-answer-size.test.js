@@ -8,6 +8,8 @@ const { test, before, after, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('node:http');
 const net = require('node:net');
+const v8 = require('node:v8');
+const vm = require('node:vm');
 const { startCoreRelay } = require('../server/prompt/core-relay');
 const { resolveAnswer } = require('../server/prompt/targets');
 
@@ -533,6 +535,110 @@ test('a request with no tool behind it closes when its agent leaves', async () =
     short.close();
     rawHa.close();
     rawHa.closeAllConnections();
+  }
+});
+
+// A Home Assistant that reads each request and has not answered it yet, keeping
+// nothing of it: what stays in this process is what the relay keeps.
+async function silentHa() {
+  const open = [];
+  let notify = () => {};
+  const server = http.createServer((req, res) => {
+    req.resume();
+    req.once('end', () => {
+      open.push(res);
+      notify();
+    });
+  });
+  await new Promise((resolve) => { server.listen(0, '127.0.0.1', resolve); });
+  return {
+    open,
+    url: `http://127.0.0.1:${server.address().port}`,
+    async received(count) {
+      while (open.length < count) {
+        await new Promise((resolve) => { notify = resolve; });
+      }
+    },
+    close() {
+      server.close();
+      server.closeAllConnections();
+    },
+  };
+}
+const PING = { jsonrpc: '2.0', id: 1, method: 'ping', params: {} };
+function postThrough(through, token, rpc) {
+  const leaving = new AbortController();
+  const answer = fetch(`${through.url}/api/mcp`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', accept: 'application/json' },
+    body: JSON.stringify(rpc),
+    signal: leaving.signal,
+  });
+  answer.catch(() => {});
+  return { answer, leave: () => leaving.abort() };
+}
+const settle = () => new Promise((resolve) => { setTimeout(resolve, 100); });
+
+test('a request whose agent has left does not keep its body in memory', async () => {
+  v8.setFlagsFromString('--expose-gc');
+  const gc = vm.runInNewContext('gc');
+  const stub = await silentHa();
+  const short = await startCoreRelay({ coreOrigin: stub.url, haToken: 'ha-token-never-in-a-message', authProbeEveryMs: 0 });
+  const token = short.issue('run-held', { basenames: [] });
+  const padded = { ...PING, params: { padding: 'p'.repeat(256 * 1024) } };
+  try {
+    gc();
+    const buffersAtStart = process.memoryUsage().arrayBuffers;
+    for (let i = 0; i < 40; i += 1) {
+      const call = postThrough(short, token, padded);
+      await soon(stub.received(i + 1), 'the request');
+      call.leave();
+      await settle();
+    }
+    gc();
+    await settle();
+    gc();
+    const kept = process.memoryUsage().arrayBuffers - buffersAtStart;
+    assert.equal(stub.open.filter((r) => !r.destroyed).length, 40, 'every request stays open');
+    assert.ok(kept < 2 * MIB, `${(kept / MIB).toFixed(1)} MiB kept of 10 MiB sent`);
+  } finally {
+    short.revoke(token);
+    short.close();
+    stub.close();
+  }
+});
+
+test('past the bound new requests are refused by name, and what runs is never closed', async () => {
+  const stub = await silentHa();
+  const short = await startCoreRelay({
+    coreOrigin: stub.url, haToken: 'ha-token-never-in-a-message', authProbeEveryMs: 0, maxAbandonedRequests: 2, log: (l) => logged.push(l),
+  });
+  const token = short.issue('run-bound', { basenames: [] });
+  try {
+    for (let i = 0; i < 2; i += 1) {
+      const call = postThrough(short, token, PING);
+      await soon(stub.received(i + 1), 'the request');
+      call.leave();
+      await settle();
+    }
+    const refused = await soon(postThrough(short, token, PING).answer, 'the refusal');
+    assert.equal(refused.status, 503);
+    assert.match((await refused.json()).error, /still running after their agents left/);
+    assert.equal(stub.open.length, 2, 'the refused request went nowhere');
+    assert.ok(stub.open.every((r) => !r.destroyed), 'a running tool was closed');
+    assert.ok(logged.some((l) => l.includes('still running after their agents left')), logged.join('\n'));
+
+    // A request that an agent stays for is not counted, and one that ends frees its place.
+    sendJson(stub.open[0], { jsonrpc: '2.0', id: 1, result: {} });
+    await settle();
+    const next = postThrough(short, token, PING);
+    await soon(stub.received(3), 'the next request');
+    sendJson(stub.open[2], { jsonrpc: '2.0', id: 1, result: {} });
+    assert.equal((await soon(next.answer, 'the next answer')).status, 200);
+  } finally {
+    short.revoke(token);
+    short.close();
+    stub.close();
   }
 });
 
