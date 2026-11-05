@@ -840,3 +840,119 @@ test('a device lookup is refused when the answer says it did not succeed', async
     assert.match(lines[0], / \(lookup, no match\): /);
   }
 });
+
+// --- a tool Home Assistant cuts off -----------------------------------------
+
+// A Core that holds every tools/call until the test says, then gives up as Home
+// Assistant does: 504, no body.
+async function withCuttingCore() {
+  const lines = [];
+  const held = [];
+  const fake = http.createServer((req, res) => {
+    req.resume();
+    req.on('end', () => held.push(res));
+  });
+  await new Promise((r) => fake.listen(0, '127.0.0.1', r));
+  const here = await startCoreRelay({
+    coreOrigin: `http://127.0.0.1:${fake.address().port}`, haToken: HA_TOKEN, record: (line) => lines.push(line),
+  });
+  const until = async (fact) => {
+    for (let i = 0; i < 2000 && !fact(); i += 1) await new Promise((r) => setTimeout(r, 5));
+    assert.ok(fact(), `never happened; lines: ${lines.join(' | ')}`);
+  };
+  return {
+    lines,
+    relay: here,
+    until,
+    reached: () => until(() => held.length > 0),
+    async cut() {
+      await until(() => held.length > 0);
+      for (const res of held.splice(0)) { res.writeHead(504); res.end(); }
+    },
+    post(token, message, signal) {
+      return fetch(`${here.url}/api/mcp`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify(message),
+        signal,
+      });
+    },
+    done() { here.close(); fake.close(); fake.closeAllConnections(); },
+  };
+}
+const SLOW_CALL = { jsonrpc: '2.0', id: 41, method: 'tools/call', params: { name: 'HassTurnOn', arguments: {} } };
+
+test('a tool Home Assistant cuts off is named to the agent as a tool error', async () => {
+  const h = await withCuttingCore();
+  try {
+    const answer = h.post(h.relay.issue('run-cut', MAY), SLOW_CALL);
+    await h.cut();
+    const res = await answer;
+    assert.equal(res.status, 200);
+    const said = await res.json();
+    assert.equal(said.id, 41);
+    assert.equal(said.result.isError, true);
+    const { text } = said.result.content[0];
+    assert.match(text, /Home Assistant cut this tool off after \d+ s/);
+    assert.match(text, /may have stopped halfway/);
+    assert.equal(h.lines.length, 1, h.lines.join('\n'));
+    assert.match(h.lines[0], /\(failed\):/);
+  } finally {
+    h.done();
+  }
+});
+
+test('a batch that is cut off is answered as a batch', async () => {
+  const h = await withCuttingCore();
+  try {
+    const answer = h.post(h.relay.issue('run-cut', MAY), [SLOW_CALL, { ...SLOW_CALL, id: 42 }]);
+    await h.cut();
+    const said = await (await answer).json();
+    assert.deepEqual(said.map((m) => m.id), [41, 42]);
+    assert.ok(said.every((m) => m.result.isError === true));
+  } finally {
+    h.done();
+  }
+});
+
+test('a tool cut off after its agent left is recorded as failed', async () => {
+  const h = await withCuttingCore();
+  try {
+    const leaving = new AbortController();
+    h.post(h.relay.issue('run-cut', MAY), SLOW_CALL, leaving.signal).catch(() => {});
+    await h.reached();
+    leaving.abort();
+    await h.cut();
+    await h.until(() => h.lines.length > 0);
+    assert.match(h.lines[0], /\(failed\):/);
+  } finally {
+    h.done();
+  }
+});
+
+test('a tool cut off after its run ended corrects the record', async () => {
+  const h = await withCuttingCore();
+  try {
+    const token = h.relay.issue('run-cut', MAY);
+    const leaving = new AbortController();
+    h.post(token, SLOW_CALL, leaving.signal).catch(() => {});
+    await h.reached();
+    leaving.abort();
+    h.relay.revoke(token);
+    await h.cut();
+    await h.until(() => h.lines.some((l) => l.includes('(failed, after its run ended)')));
+  } finally {
+    h.done();
+  }
+});
+
+test('a 504 to anything but a tool call stays what it was', async () => {
+  const h = await withCuttingCore();
+  try {
+    const answer = h.post(h.relay.issue('run-cut', MAY), { jsonrpc: '2.0', id: 43, method: 'tools/list' });
+    await h.cut();
+    assert.equal((await answer).status, 504);
+  } finally {
+    h.done();
+  }
+});

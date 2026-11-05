@@ -4,6 +4,65 @@ All notable changes to this project are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses [Semantic Versioning](https://semver.org/).
 
+## [0.12.0] - 2026-11-05
+
+### Added
+
+- `GET /api/status` publishes `protect_secrets_level`, read from the
+  `PROTECT_SECRETS_LEVEL` environment variable, or `null` without one.
+- A run with Home Assistant tools gives its adapter `toolTimeoutSeconds`, 90. An adapter
+  must set its engine's timeout for a tool of that server to it.
+- The list of protected files is shipped by the core at
+  `/usr/share/agent-core/protected-paths.txt`. An add-on that carries its own copy
+  must drop it: the assembly refuses a path both sides claim.
+
+### Fixed
+
+- The audit now says how a tool ended when its agent had already left, including
+  `(answered after its run ended)` and `(failed, after its run ended)` for a tool that
+  outlived its run, which used to read only `(no answer)`.
+- A tool answered over an event stream is also not stopped by its agent leaving, as a
+  tool answered over JSON already was.
+- A tool past Home Assistant's limit for one call was cut off with an empty 504, and
+  all an agent could say was that its request failed. It now gets a tool error saying
+  the tool was cut off and may have stopped halfway, and the audit marks it `(failed)`.
+- What 0.11.5 said of a tool whose agent left was too broad. It finishes only inside
+  Home Assistant's limit of 60 seconds for one call (measured on 2026.10.4 and
+  2026.11.0): past that Home Assistant cancels it wherever it has got to, agent present
+  or gone. The hour is not how long a tool can run, only how long the relay waits for a
+  Home Assistant that never ends a request.
+- Only a tool call stays open for its tool and counts towards the 64 waiting for Home
+  Assistant. Anything else closes when its agent leaves and is never refused for that.
+- Stopping the relay closes the requests still open to Home Assistant at once and logs
+  how many, so they cannot hold up the process. A tool still running on one of them is
+  cancelled, as a script was when measured, and a device whose last step had not come
+  stays as it is.
+- Answers about many devices that were each very large could run the server out of
+  memory, because what a lookup remembered counted against nothing. It now has its own
+  budget of 16 MiB, and an answer that does not fit is asked for again.
+- A lookup refused at its deadline went on asking Home Assistant about every device it
+  had left, for an answer nobody waited for. It now stops there.
+- Someone asking through Assist for a device on an install past the size bound was
+  told to try again, which could not help. They are now told Home Assistant's answer
+  is too large, in every supported language, and the audit marks such a lookup
+  `(lookup, answer too large)`.
+- An event stream has the bounds a JSON answer has. An agent that does not read what
+  was written to it loses the stream after 60 seconds, and Home Assistant going
+  silent for 10 seconds in the middle of an event ends it. A stream with no event in
+  progress may stay silent for as long as a tool takes.
+- What was written to an agent and not yet taken by its socket now counts against the
+  budget. It stopped counting the moment an event was complete, so several streams
+  could each keep a large event in memory uncounted.
+- An agent holding its answer could get a device lookup or a confirmed action refused
+  as too large. The core's own answers now have a budget of their own.
+- A console page whose stylesheets or scripts did not arrive stayed unusable until
+  someone reloaded it, because its own script is what reconnects. It now loads again,
+  up to five times over about 30 seconds, whatever answered in place of the files,
+  and then says the console could not load.
+- The console's menus opened partly off the screen on a narrow window. They now stay
+  on it, and are never wider than the screen.
+- The alert loop's shell error no longer reaches the log when its state file cannot
+  be opened.
 ## [0.11.5] - 2026-11-05
 
 ### Fixed
@@ -15,6 +74,7 @@ uses [Semantic Versioning](https://semver.org/).
   running an hour after its agent left is given up on. With 64 requests waiting for
   Home Assistant to answer, new ones from agents are refused with an error that says
   why, and none of those waiting is closed for it. Affected version: 0.11.4.
+
 
 ## [0.11.4] - 2026-11-04
 

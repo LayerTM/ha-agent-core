@@ -55,7 +55,7 @@ function errorFor(id, code, message) {
  *
  * @param {string} text
  * @param {Set<string>|null} [basenames]
- * @returns {{ forward: true, calls: {id: unknown, answerable: boolean, name: string, args: unknown}[] }
+ * @returns {{ forward: true, batch: boolean, calls: {id: unknown, answerable: boolean, name: string, args: unknown}[] }
  *   | { forward: false, status: number, body: string, type?: string }}
  */
 function judgeClientBody(text, basenames = null) {
@@ -104,7 +104,7 @@ function judgeClientBody(text, basenames = null) {
         name: typeof m.params?.name === 'string' ? m.params.name : '',
         args: m.params?.arguments,
       }));
-    return { forward: true, calls };
+    return { forward: true, batch, calls };
   }
 
   // Nothing of a body with a refused message is forwarded. Every request in it is
@@ -166,6 +166,7 @@ function filterServerJson(text, observe = null) {
  */
 function createSseFilter(write, observe = null) {
   let pending = '';
+  let pendingBytes = 0;
   const flushEvent = (event) => {
     const data = event.split('\n')
       .filter((line) => line.startsWith('data:'))
@@ -175,18 +176,28 @@ function createSseFilter(write, observe = null) {
   };
   return {
     push(chunk) {
-      pending += chunk.replace(/\r\n/g, '\n');
+      const text = chunk.replace(/\r\n/g, '\n');
+      pending += text;
+      pendingBytes += Buffer.byteLength(text);
       let cut;
       while ((cut = pending.indexOf('\n\n')) !== -1) {
-        flushEvent(pending.slice(0, cut));
+        const event = pending.slice(0, cut);
+        flushEvent(event);
         pending = pending.slice(cut + 2);
+        pendingBytes -= Buffer.byteLength(event) + 2;
       }
     },
-    // What is waiting for the rest of its event.
-    held: () => pending.length,
+    // How many bytes are waiting for the rest of their event.
+    held: () => pendingBytes,
+    // Nobody is left to read the rest.
+    discard() {
+      pending = '';
+      pendingBytes = 0;
+    },
     end() {
       if (pending.trim() !== '') flushEvent(pending);
       pending = '';
+      pendingBytes = 0;
     },
   };
 }

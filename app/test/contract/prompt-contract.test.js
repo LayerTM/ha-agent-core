@@ -955,3 +955,22 @@ test('a streamed read that fails for another reason after deltas stays a recover
     srv.close();
   }
 });
+
+test('/api/status publishes the level of the secrets guard the service started at', async () => {
+  const read = async () => (await (await fetch(`${noMcpBase}/api/status`, { headers: { authorization: `Bearer ${TOKEN}` } })).json()).protect_secrets_level;
+  const started = process.env.PROTECT_SECRETS_LEVEL;
+  try {
+    for (const level of ['kernel', 'cli-only', 'off']) {
+      process.env.PROTECT_SECRETS_LEVEL = level;
+      // eslint-disable-next-line no-await-in-loop
+      assert.equal(await read(), level);
+    }
+    process.env.PROTECT_SECRETS_LEVEL = 'anything else';
+    assert.equal(await read(), null);
+    delete process.env.PROTECT_SECRETS_LEVEL;
+    assert.equal(await read(), null, 'an add-on without the guard has no level');
+  } finally {
+    if (started === undefined) delete process.env.PROTECT_SECRETS_LEVEL;
+    else process.env.PROTECT_SECRETS_LEVEL = started;
+  }
+});

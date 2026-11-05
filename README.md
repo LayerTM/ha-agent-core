@@ -135,7 +135,11 @@ A confirmed `write` runs no agent; see [Confirmed writes](#confirmed-writes).
 The adapter turns the run spec into a command line. Its `launch(spec, { env })`
 receives `mode` (always `"read"`), `read` (always `true`), `vision`, `imagePath`, `haAllowed` and
 `haDisallowed` (the tools the run may and may not call), `schema`,
-`systemPrompt`, `maxTurns`, `mcpConfigPath`, `settings`, `model`, `stream` and `web`.
+`systemPrompt`, `maxTurns`, `mcpConfigPath`, `toolTimeoutSeconds`, `settings`, `model`,
+`stream` and `web`.
+`toolTimeoutSeconds` comes with `mcpConfigPath`, and the adapter must set the engine's own
+timeout for a tool of that server to it: an engine that gives up at Home Assistant's limit
+of 60 seconds reports its own timeout, and the agent never reads that the tool was cut off.
 `web` is `null` except on a [web read](#web-reads), where it is
 `{ search, fetch, domains }`: the adapter offers web search only when `search`
 is true, and opens pages only when `fetch` is true and only on the sites in
@@ -243,6 +247,27 @@ keeps it within the tools the run's allowlist names.
 - Only `POST /api/mcp` carries a body to Home Assistant. A `GET` or `DELETE`
   (the event stream, the end of a session, a camera snapshot) is sent without
   one, and one that comes with a body is refused with 400.
+
+An agent that leaves does not stop a tool it called: Home Assistant cancels a tool
+whose request closes, wherever it has got to, so a `tools/call` stays open until Home
+Assistant ends it, and what still arrives is discarded. With 64
+tool calls waiting for Home Assistant, new ones from agents are refused with 503 and
+an error that says why. The count is shared: one agent can fill it for another, for as
+long as Home Assistant takes to answer. The core's own lookups and confirmed actions
+do not count.
+
+Two things do stop a running tool, wherever it has got to, and a device whose last step
+had not come stays as it is. Home Assistant gives one call 60 seconds (measured on
+2026.10.4 and 2026.11.0), whether its agent stayed or left: a script that takes longer
+is cancelled, the agent gets a tool error that says so and that the tool may have stopped
+halfway, and the audit marks it `(failed)`. And a tool still running when the add-on
+stops is cancelled, because the process closes its request; the log says how many
+requests were open.
+
+An answer from Home Assistant past what may be held is refused as too large, and that
+says nothing about what it answered: a confirmed action whose answer is too large may
+have happened, though it reads as `too large` and the audit marks it
+`(answer too large)`. This takes an answer of many MiB, or several at the same moment.
 
 From Home Assistant, answers and notifications pass, in JSON and in
 server-sent-event streams. A request the server makes of the agent (sampling,
@@ -488,6 +513,12 @@ warning, a "Login attempt failed" notification, and an IP ban once
 only by a run, a lookup, or the next start. A check that gets no answer never
 overwrites an answer a run got while it was in flight. A change is written to
 the add-on log; the token never is.
+
+`GET /api/status` publishes `protect_secrets_level`, how far the add-on's secrets
+guard reaches: `"kernel"`, `"cli-only"`, `"off"`, or `null` for an add-on without
+one. The core reads it from the `PROTECT_SECRETS_LEVEL` environment variable the
+guard starts the service with. The files the guard protects are listed once, in
+`rootfs/usr/share/agent-core/protected-paths.txt`.
 
 It identifies the core with `core_version` and `core_commit`: the release and the
 commit the running archive was packed from, as `app/server/core-version.json`

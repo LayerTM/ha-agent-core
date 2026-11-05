@@ -14,6 +14,53 @@
   <meta name="apple-mobile-web-app-title" content="{{productName}}">
   <link rel="preload" href="fonts/jetbrains-mono-400.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="fonts/jetbrains-mono-700.woff2" as="font" type="font/woff2" crossorigin>
+  <script id="load-retry">
+    // app.js is what reconnects, so a page whose files did not arrive cannot recover
+    // by itself: whatever answered in their place, it loads again, a bounded number
+    // of times. Before the stylesheets, so that it sees them fail.
+    (() => {
+      const KEY = 'console-load-retries';
+      const DELAYS_MS = [1000, 2000, 4000, 8000, 16000];
+      let failed = false;
+      const retries = () => {
+        try { return Number(sessionStorage.getItem(KEY)) || 0; } catch { return null; }
+      };
+      const counted = (count) => {
+        try { sessionStorage.setItem(KEY, String(count)); return true; } catch { return false; }
+      };
+      const giveUp = () => {
+        const note = document.createElement('p');
+        note.style.cssText = 'margin:24px;font:16px system-ui;color:#fff;background:#000;padding:12px';
+        note.textContent = 'The console could not load its files. Reload this page to try again.';
+        document.body.prepend(note);
+      };
+      const fail = () => {
+        if (failed) return;
+        failed = true;
+        const done = retries();
+        // Counted before it waits: a reload by hand still counts as one. What cannot be
+        // counted is not repeated: the next page would read the same number.
+        if (done === null || done >= DELAYS_MS.length || !counted(done + 1)) {
+          if (document.body) giveUp();
+          else document.addEventListener('DOMContentLoaded', giveUp);
+          return;
+        }
+        setTimeout(() => location.reload(), DELAYS_MS[done]);
+      };
+      // A failed load does not bubble, and is only seen on the way down.
+      document.addEventListener('error', ({ target }) => {
+        if (target.tagName === 'SCRIPT' || (target.tagName === 'LINK' && target.rel === 'stylesheet')) fail();
+      }, true);
+      // A file answered with a success that is not the file (the startup page answers
+      // every path) raises no such error: what it should have done did not happen.
+      window.addEventListener('load', () => {
+        const unstyled = [...document.querySelectorAll('link[rel="stylesheet"]')].some((link) => !link.sheet || link.sheet.cssRules.length === 0);
+        if (unstyled || !window.consoleScriptRan) fail();
+        if (failed) return;
+        try { sessionStorage.removeItem(KEY); } catch { /* nothing was counted */ }
+      });
+    })();
+  </script>
   <link rel="stylesheet" href="vendor/xterm.css">
   <link rel="stylesheet" href="styles.css">
 </head>

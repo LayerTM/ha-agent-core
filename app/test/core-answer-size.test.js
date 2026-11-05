@@ -8,10 +8,22 @@ const { test, before, after, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('node:http');
 const net = require('node:net');
+const { fork } = require('node:child_process');
 const v8 = require('node:v8');
 const vm = require('node:vm');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { useAdapter } = require('../server/adapter-contract');
+const { createNeutralAdapter } = require('./fixtures/neutral-adapter');
+
+const neutral = createNeutralAdapter();
+useAdapter(neutral.adapter, neutral.branding);
+
 const { startCoreRelay } = require('../server/prompt/core-relay');
 const { resolveAnswer } = require('../server/prompt/targets');
+const { createPromptApp } = require('../server/prompt/server');
+const { TARGET_TEXT } = require('../server/prompt/notices');
 
 const MIB = 1024 * 1024;
 const BOUND_MIB = 16;
@@ -332,10 +344,10 @@ for (const text of ['[,]', '[{},]', '[{}{}]', '[,{}]', '[{},,{}]']) {
 // --- An answer that breaks on the way to an agent ends what the agent is reading.
 
 // A connection opened by hand: `res` stays paused until the test reads it.
-function openAgent(rpc, headers = {}) {
-  const token = relay.issue('run-open', { basenames: ['GetLiveContext'] });
+function openAgent(rpc, headers = {}, through = relay) {
+  const token = through.issue('run-open', { basenames: ['GetLiveContext'] });
   const body = JSON.stringify(rpc);
-  const req = http.request(`${relay.url}/api/mcp`, {
+  const req = http.request(`${through.url}/api/mcp`, {
     method: 'POST',
     headers: {
       authorization: `Bearer ${token}`,
@@ -350,7 +362,7 @@ function openAgent(rpc, headers = {}) {
     req.once('error', reject);
   });
   req.end(body);
-  return { req, answered, done: () => relay.revoke(token) };
+  return { req, answered, done: () => through.revoke(token) };
 }
 
 const readAll = (res) => new Promise((resolve, reject) => {
@@ -409,7 +421,7 @@ test('an agent reading a refused answer sees it end when Home Assistant cuts it'
 const LARGE_SHARE = Math.ceil(HELD_MIB * 0.6);
 const shareBody = (id) => JSON.stringify(toolAnswer(id, 'z'.repeat(LARGE_SHARE * MIB)));
 
-test('answers at the same time share one budget, until the first is delivered', async () => {
+test('answers to agents share one budget until delivered; the core\'s own are not refused by them', async () => {
   const body = shareBody(5);
   answerRpc = (rpc, res) => (rpc.method === 'tools/list' ? defaultRpc(rpc, res) : sendJson(res, body));
   // The first answer is read from Home Assistant and waits on an agent that is
@@ -423,12 +435,12 @@ test('answers at the same time share one budget, until the first is delivered', 
     assert.equal(second.status, 502);
     assert.match(second.text, /too large/);
 
-    const acted = await soon(relay.act('run')('HassTurnOn', {}), 'an action');
-    assert.equal(acted.ok, false);
-    assert.match(acted.error, /too large/);
+    const acted = await soon(relay.act('run')('HassTurnOn', {}), 'an action', 20000);
+    assert.equal(acted.ok, true, acted.error);
 
     answerStates = (r) => sendJson(r, JSON.stringify([{ entity_id: 'sensor.big', attributes: { pad: 'z'.repeat(LARGE_SHARE * MIB) } }]));
-    await assert.rejects(soon(relay.lookup('run').states(), 'a states list'), /too large/);
+    const list = await soon(relay.lookup('run').states(), 'a states list', 20000);
+    assert.equal(list[0].entity_id, 'sensor.big');
 
     res.resume();
     assert.equal(await soon(readAll(res), 'the first answer, read', 20000), body);
@@ -565,6 +577,7 @@ async function silentHa() {
     },
   };
 }
+const TOOL_CALL = { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'HassTurnOn', arguments: {} } };
 const PING = { jsonrpc: '2.0', id: 1, method: 'ping', params: {} };
 function postThrough(through, token, rpc) {
   const leaving = new AbortController();
@@ -584,8 +597,8 @@ test('a request whose agent has left does not keep its body in memory', async ()
   const gc = vm.runInNewContext('gc');
   const stub = await silentHa();
   const short = await startCoreRelay({ coreOrigin: stub.url, haToken: 'ha-token-never-in-a-message', authProbeEveryMs: 0 });
-  const token = short.issue('run-held', { basenames: [] });
-  const padded = { ...PING, params: { padding: 'p'.repeat(256 * 1024) } };
+  const token = short.issue('run-held', { basenames: ['HassTurnOn'] });
+  const padded = { ...TOOL_CALL, params: { name: 'HassTurnOn', arguments: { padding: 'p'.repeat(256 * 1024) } } };
   try {
     gc();
     const buffersAtStart = process.memoryUsage().arrayBuffers;
@@ -613,17 +626,17 @@ test('past the bound new requests are refused by name, and what runs is never cl
   const short = await startCoreRelay({
     coreOrigin: stub.url, haToken: 'ha-token-never-in-a-message', authProbeEveryMs: 0, maxUnansweredRequests: 2, log: (l) => logged.push(l),
   });
-  const token = short.issue('run-bound', { basenames: [] });
+  const token = short.issue('run-bound', { basenames: ['HassTurnOn'] });
   try {
     // One agent left and one stays: both are waiting, and both count.
-    const left = postThrough(short, token, PING);
+    const left = postThrough(short, token, TOOL_CALL);
     await soon(stub.received(1), 'the first request');
     left.leave();
     await settle();
-    const stays = postThrough(short, token, PING);
+    const stays = postThrough(short, token, TOOL_CALL);
     await soon(stub.received(2), 'the second request');
 
-    const refused = await soon(postThrough(short, token, PING).answer, 'the refusal');
+    const refused = await soon(postThrough(short, token, TOOL_CALL).answer, 'the refusal');
     assert.equal(refused.status, 503);
     assert.match((await refused.json()).error, /too many requests are waiting for Home Assistant/);
     assert.equal(stub.open.length, 2, 'the refused request went nowhere');
@@ -634,7 +647,7 @@ test('past the bound new requests are refused by name, and what runs is never cl
     stub.open[1].writeHead(200, { 'content-type': 'text/event-stream' });
     stub.open[1].write(': working\n\n');
     await settle();
-    const next = postThrough(short, token, PING);
+    const next = postThrough(short, token, TOOL_CALL);
     await soon(stub.received(3), 'the next request');
     stub.open[1].end();
     assert.equal((await soon(stays.answer, 'the answer it stayed for')).status, 200);
@@ -652,19 +665,19 @@ test('an answer that starts for an agent that left keeps its place until it ends
   const short = await startCoreRelay({
     coreOrigin: stub.url, haToken: 'ha-token-never-in-a-message', authProbeEveryMs: 0, maxUnansweredRequests: 1,
   });
-  const token = short.issue('run-started', { basenames: [] });
+  const token = short.issue('run-started', { basenames: ['HassTurnOn'] });
   try {
-    const left = postThrough(short, token, PING);
+    const left = postThrough(short, token, TOOL_CALL);
     await soon(stub.received(1), 'the request');
     left.leave();
     await settle();
     stub.open[0].writeHead(200, { 'content-type': 'application/json' });
     stub.open[0].write('{');
     await settle();
-    assert.equal((await soon(postThrough(short, token, PING).answer, 'the refusal')).status, 503);
+    assert.equal((await soon(postThrough(short, token, TOOL_CALL).answer, 'the refusal')).status, 503);
     stub.open[0].end('}');
     await settle();
-    const next = postThrough(short, token, PING);
+    const next = postThrough(short, token, TOOL_CALL);
     await soon(stub.received(2), 'the next request');
     sendJson(stub.open[1], { jsonrpc: '2.0', id: 1, result: {} });
     assert.equal((await soon(next.answer, 'the next answer')).status, 200);
@@ -681,17 +694,17 @@ test('a request that ends without an answer frees its place, however its agent l
   const short = await startCoreRelay({
     coreOrigin: `http://127.0.0.1:${dropping.address().port}`, haToken: 'ha-token-never-in-a-message', authProbeEveryMs: 0, maxUnansweredRequests: 1,
   });
-  const token = short.issue('run-dropped', { basenames: [] });
+  const token = short.issue('run-dropped', { basenames: ['HassTurnOn'] });
   try {
     for (let i = 0; i < 40; i += 1) {
-      const call = postThrough(short, token, PING);
+      const call = postThrough(short, token, TOOL_CALL);
       // Around the moment the connection drops, so the two ends close in either order.
       setTimeout(() => call.leave(), i % 8);
       await call.answer.catch(() => {});
       await new Promise((resolve) => { setTimeout(resolve, 10); });
     }
     await settle();
-    const last = await soon(postThrough(short, token, PING).answer, 'the last call');
+    const last = await soon(postThrough(short, token, TOOL_CALL).answer, 'the last call');
     assert.equal(last.status, 502, 'it reached Home Assistant, which dropped it');
   } finally {
     short.revoke(token);
@@ -754,7 +767,7 @@ test('an agent gone while the answer arrives gives its share back on every order
 
 const sseCall = () => openAgent(CALL, { accept: 'application/json, text/event-stream' });
 
-test('an event past the budget ends the stream and closes the upstream', async () => {
+test('an event past the budget ends the stream, gives its share back and leaves the tool running', async () => {
   let closed;
   answerRpc = (rpc, res) => {
     closed = new Promise((resolve) => { res.once('close', resolve); });
@@ -774,7 +787,6 @@ test('an event past the budget ends the stream and closes the upstream', async (
       res.resume();
       return readAll(res);
     }), 'the end of the stream', 20000));
-    await soon(closed, 'upstream close');
     assert.equal(logged.filter((l) => l.includes('too large')).length, 1, logged.join('\n'));
   } finally {
     open.req.destroy();
@@ -806,7 +818,6 @@ test('an agent not reading a stream slows Home Assistant rather than filling mem
   open.req.destroy();
   open.done();
   res.destroy();
-  await soon(closed, 'upstream close');
 });
 
 // An agent that reads none of its answer, and either says nothing or keeps sending
@@ -872,4 +883,699 @@ test('an answer that stalls on its way to an agent is given up on', async () => 
   const body = shareBody(5);
   answerRpc = (rpc, res) => sendJson(res, body);
   assert.equal((await soon(agentCall(CALL), 'the next answer', 20000)).status, 200);
+});
+
+test('the core\'s own answers share a budget of their own', async () => {
+  let stalled = null;
+  answerRpc = (rpc, res) => {
+    if (rpc.method === 'tools/list') return defaultRpc(rpc, res);
+    if (stalled === null) {
+      stalled = res;
+      return writeAndStall(res, '{"jsonrpc":"2.0"', LARGE_SHARE);
+    }
+    return sendJson(res, shareBody(rpc.id));
+  };
+  const act = relay.act('run');
+  const first = act('HassTurnOn', {});
+  await new Promise((resolve) => { setTimeout(resolve, 500); });
+  const second = await soon(act('HassTurnOn', {}), 'the second action', 20000);
+  assert.equal(second.ok, false);
+  assert.match(second.error, /too large/);
+  stalled.destroy();
+  assert.equal((await soon(first, 'the first action')).ok, false);
+});
+
+// --- An event stream holds what it has not delivered, and not for ever.
+
+const SSE = { accept: 'application/json, text/event-stream' };
+const sseOf = (id, pad) => `data: ${JSON.stringify(toolAnswer(id, pad))}\n\n`;
+const shortRelay = (options) => startCoreRelay({
+  coreOrigin: `http://127.0.0.1:${ha.address().port}`,
+  haToken: 'ha-token-never-in-a-message',
+  log: (line) => logged.push(line),
+  ...options,
+});
+const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
+const streamHead = (res) => res.writeHead(200, { 'content-type': 'text/event-stream' });
+
+test('a whole event an agent has not read still counts against the budget', async () => {
+  const event = sseOf(5, 'z'.repeat(LARGE_SHARE * MIB));
+  answerRpc = (rpc, res) => { streamHead(res); res.end(event); };
+  const first = openAgent(CALL, SSE);
+  try {
+    const res = await soon(first.answered, 'the stream');
+    await sleep(500);
+    const body = shareBody(5);
+    answerRpc = (rpc, r) => sendJson(r, body);
+    const second = await soon(agentCall(CALL), 'the second answer', 20000);
+    assert.equal(second.status, 502);
+    assert.match(second.text, /too large/);
+    res.resume();
+    assert.equal(await soon(readAll(res), 'the stream, read', 20000), event);
+    // Delivered, it no longer counts.
+    assert.equal((await soon(agentCall(CALL), 'the third answer', 20000)).status, 200);
+  } finally {
+    first.req.destroy();
+    first.done();
+  }
+});
+
+test('an agent not reading an event loses the stream at the deadline, and its share', async () => {
+  const short = await shortRelay({ deliveryDeadlineMs: 1000 });
+  answerRpc = (rpc, res) => {
+    streamHead(res);
+    res.write(sseOf(5, 'z'.repeat(LARGE_SHARE * MIB)));
+  };
+  const open = openAgent(CALL, SSE, short);
+  try {
+    await soon(open.answered, 'the stream');
+    await sleep(1500);
+    const body = shareBody(5);
+    answerRpc = (rpc, r) => sendJson(r, body);
+    assert.equal((await soon(agentCall(CALL, short), 'the next answer', 20000)).status, 200);
+  } finally {
+    open.req.destroy();
+    open.done();
+    short.close();
+  }
+});
+
+test('an event Home Assistant stops halfway ends the stream and gives its share back', async () => {
+  const short = await shortRelay({ answerStallMs: 300 });
+  answerRpc = (rpc, res) => {
+    streamHead(res);
+    res.write(`data: ${'z'.repeat(LARGE_SHARE * MIB)}`);
+  };
+  const open = openAgent(CALL, SSE, short);
+  try {
+    // No event was complete, so the end may come before any header reached the agent.
+    await assert.rejects(soon(open.answered.then((res) => {
+      res.resume();
+      return readAll(res);
+    }), 'the end of the stream', 5000), /cut off|aborted|hang up/);
+    assert.ok(logged.some((l) => l.includes('stopped answering')), logged.join('\n'));
+    const body = shareBody(5);
+    answerRpc = (rpc, r) => sendJson(r, body);
+    assert.equal((await soon(agentCall(CALL, short), 'the next answer', 20000)).status, 200);
+  } finally {
+    open.req.destroy();
+    open.done();
+    short.close();
+  }
+});
+
+test('a stream with no event in progress may be silent for as long as a tool takes', async () => {
+  const short = await shortRelay({ answerStallMs: 200, deliveryDeadlineMs: 200 });
+  const start = sseOf(1, 'working');
+  const late = sseOf(5, 'done');
+  answerRpc = (rpc, res) => {
+    streamHead(res);
+    res.write(start);
+    setTimeout(() => res.end(late), 1000);
+  };
+  const open = openAgent(CALL, SSE, short);
+  try {
+    const res = await soon(open.answered, 'the stream');
+    res.resume();
+    assert.equal(await soon(readAll(res), 'the whole stream'), start + late);
+  } finally {
+    open.req.destroy();
+    open.done();
+    short.close();
+  }
+});
+
+test('an upstream paused for a slow agent is not taken for a stalled one', async () => {
+  const short = await shortRelay({ answerStallMs: 1000 });
+  const big = sseOf(1, 'z'.repeat(LARGE_SHARE * MIB));
+  answerRpc = (rpc, res) => {
+    streamHead(res);
+    res.write(`${big}data: {"jsonrpc":"2.0","id":5,`);
+    setTimeout(() => res.end('"result":{}}\n\n'), 2000);
+  };
+  const open = openAgent(CALL, SSE, short);
+  try {
+    const res = await soon(open.answered, 'the stream');
+    await sleep(1500);
+    res.resume();
+    const text = await soon(readAll(res), 'the whole stream', 20000);
+    assert.equal(text, `${big}data: {"jsonrpc":"2.0","id":5,"result":{}}\n\n`);
+  } finally {
+    open.req.destroy();
+    open.done();
+    short.close();
+  }
+});
+
+test('one event nearly the size of the budget reaches an agent, whole', async () => {
+  const event = sseOf(5, 'z'.repeat((BOUND_MIB - 1) * MIB));
+  answerRpc = (rpc, res) => { streamHead(res); res.end(event); };
+  const open = openAgent(CALL, SSE);
+  try {
+    const res = await soon(open.answered, 'the stream');
+    res.resume();
+    assert.equal(await soon(readAll(res), 'the event', 20000), event);
+  } finally {
+    open.req.destroy();
+    open.done();
+  }
+});
+
+// --- What the person asking is told.
+
+async function askThroughApi() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'answer-size-'));
+  const app = createPromptApp({
+    token: 'contract-token-0123456789abcdef',
+    claudeBin: path.join(dir, 'none'),
+    claudeSettings: 's',
+    usageBin: path.join(dir, 'none'),
+    haConfigured: true,
+    model: 'm',
+    workDir: dir,
+    addonVersion: 't',
+    redact: (text) => text,
+    audit: () => {},
+    lookupFor: (runId) => relay.lookup(runId),
+    runAgent: async () => ({
+      status: 'ok',
+      text: 'Turning it off?',
+      proposal: { summary: 'Off', intents: [{ intent: 'HassTurnOff', targets: ['Bedroom'], data: {}, risk: 'low' }] },
+      automation: null,
+      toolsUsed: [],
+      numTurns: 1,
+    }),
+  });
+  const server = await new Promise((resolve) => { const s = app.listen(0, '127.0.0.1', () => resolve(s)); });
+  try {
+    const res = await fetch(`http://127.0.0.1:${server.address().port}/api/prompt`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: 'Bearer contract-token-0123456789abcdef' },
+      body: JSON.stringify({ prompt: 'turn off the bedroom', mode: 'read', language: 'en' }),
+    });
+    return await res.json();
+  } finally {
+    server.closeAllConnections();
+    server.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+const OVER_BOUND = {
+  'the tool catalog': () => {
+    answerRpc = (rpc, res) => writeOverBound(res, '{"jsonrpc":"2.0"');
+  },
+  'the live context': () => {
+    answerRpc = (rpc, res) => (rpc.method === 'tools/list' ? defaultRpc(rpc, res) : writeOverBound(res, '{"jsonrpc":"2.0"'));
+  },
+  'the states list': () => {
+    answerStates = (res) => writeOverBound(res, '[', STATES_BOUND_MIB);
+  },
+};
+for (const [what, arrange] of Object.entries(OVER_BOUND)) {
+  test(`someone asking past the bound of ${what} is told it is too large, not to try again`, async () => {
+    arrange();
+    const body = await soon(askThroughApi(), 'the answer', 30000);
+    assert.equal(body.proposal, null, JSON.stringify(body));
+    assert.match(body.text, /too large/);
+    assert.doesNotMatch(body.text, /try again/i);
+  });
+}
+
+test('a lookup past the bound is recorded as that, not as a failure', async () => {
+  answerRpc = (rpc, res) => (rpc.method === 'tools/list' ? defaultRpc(rpc, res) : writeOverBound(res, '{"jsonrpc":"2.0"'));
+  await assert.rejects(soon(relay.lookup('run').live('Bedroom'), 'the lookup', 30000), /too large/);
+  assert.ok(recorded.some((l) => l.includes('(lookup, answer too large)')), recorded.join('\n'));
+});
+
+test('every language says too large without asking to try again', () => {
+  for (const [lang, table] of Object.entries(TARGET_TEXT)) {
+    assert.equal(typeof table.too_large, 'function', lang);
+    const said = table.too_large();
+    const retry = table.unavailable().split('. ').pop();
+    assert.ok(!said.includes(retry), `${lang}: ${said}`);
+    assert.ok(said.includes('Home Assistant'), `${lang}: ${said}`);
+  }
+});
+
+// --- A tool that outlives its agent, and the relay.
+
+test('an answer to an agent that left settles its call while the run is live', async () => {
+  const stub = await silentHa();
+  const lines = [];
+  const short = await startCoreRelay({ coreOrigin: stub.url, haToken: 'ha-token-never-in-a-message', record: (l) => lines.push(l) });
+  const token = short.issue('run-live', { basenames: ['HassTurnOn'] });
+  const call = { jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'HassTurnOn', arguments: {} } };
+  try {
+    const left = postThrough(short, token, call);
+    await soon(stub.received(1), 'the request');
+    left.leave();
+    await settle();
+    sendJson(stub.open[0], { jsonrpc: '2.0', id: 7, result: { content: [], isError: true } });
+    await settle();
+    assert.ok(lines.some((l) => l.includes('HassTurnOn') && l.includes('(failed)')), lines.join('\n'));
+    short.revoke(token);
+    assert.ok(!lines.some((l) => l.includes('(no answer)')), lines.join('\n'));
+  } finally {
+    short.close();
+    stub.close();
+  }
+});
+
+test('an answer after the run ended corrects the record, and nothing else does', async () => {
+  const stub = await silentHa();
+  const lines = [];
+  const short = await startCoreRelay({ coreOrigin: stub.url, haToken: 'ha-token-never-in-a-message', record: (l) => lines.push(l) });
+  const token = short.issue('run-over', { basenames: ['HassTurnOn'] });
+  const callOf = (id) => ({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'HassTurnOn', arguments: {} } });
+  try {
+    for (const id of [7, 8]) {
+      const left = postThrough(short, token, callOf(id));
+      await soon(stub.received(id - 6), 'the request');
+      left.leave();
+      await settle();
+    }
+    short.revoke(token);
+    assert.equal(lines.filter((l) => l.includes('(no answer)')).length, 2, lines.join('\n'));
+    sendJson(stub.open[0], { jsonrpc: '2.0', id: 7, result: { content: [] } });
+    sendJson(stub.open[1], { jsonrpc: '2.0', id: 8, error: { code: 1, message: 'no' } });
+    await settle();
+    assert.equal(lines.filter((l) => l.includes('(answered after its run ended)')).length, 1, lines.join('\n'));
+    assert.equal(lines.filter((l) => l.includes('(failed, after its run ended)')).length, 1, lines.join('\n'));
+  } finally {
+    short.close();
+    stub.close();
+  }
+});
+
+test('a tool whose answer is an event stream finishes when its agent leaves', async () => {
+  const stub = await silentHa();
+  const short = await startCoreRelay({ coreOrigin: stub.url, haToken: 'ha-token-never-in-a-message', maxUnansweredRequests: 1 });
+  const token = short.issue('run-sse', { basenames: ['HassTurnOn'] });
+  try {
+    const left = postThrough(short, token, TOOL_CALL);
+    await soon(stub.received(1), 'the request');
+    stub.open[0].writeHead(200, { 'content-type': 'text/event-stream' });
+    stub.open[0].write(': working\n\n');
+    await soon(left.answer, 'the stream starting');
+    left.leave();
+    await settle();
+    assert.equal(stub.open[0].destroyed, false, 'the request closed, which cancels the tool');
+    // Nobody is left to read it to its end, so it holds a place again.
+    assert.equal((await soon(postThrough(short, token, TOOL_CALL).answer, 'the refusal')).status, 503);
+    stub.open[0].end();
+    await settle();
+    const next = postThrough(short, token, TOOL_CALL);
+    await soon(stub.received(2), 'the next request');
+    sendJson(stub.open[1], { jsonrpc: '2.0', id: 1, result: {} });
+    assert.equal((await soon(next.answer, 'the next answer')).status, 200);
+  } finally {
+    short.revoke(token);
+    short.close();
+    stub.close();
+  }
+});
+
+test('closing the relay closes what is still open, and says how many', async () => {
+  const stub = await silentHa();
+  const lines = [];
+  const short = await startCoreRelay({ coreOrigin: stub.url, haToken: 'ha-token-never-in-a-message', log: (l) => lines.push(l) });
+  const token = short.issue('run-close', { basenames: ['HassTurnOn'] });
+  try {
+    const left = postThrough(short, token, TOOL_CALL);
+    await soon(stub.received(1), 'the request');
+    left.leave();
+    await settle();
+    const closed = new Promise((resolve) => { stub.open[0].once('close', resolve); });
+    short.close();
+    await soon(closed, 'the request closing');
+    assert.ok(lines.some((l) => l.includes('1 requests to Home Assistant still open')), lines.join('\n'));
+  } finally {
+    stub.close();
+  }
+});
+
+test('a request whose run has ended keeps none of a tool call\'s arguments in memory', async () => {
+  v8.setFlagsFromString('--expose-gc');
+  const gc = vm.runInNewContext('gc');
+  const stub = await silentHa();
+  const short = await startCoreRelay({ coreOrigin: stub.url, haToken: 'ha-token-never-in-a-message' });
+  const token = short.issue('run-args', { basenames: ['HassTurnOn'] });
+  const padded = { jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'HassTurnOn', arguments: { pad: 'p'.repeat(256 * 1024) } } };
+  try {
+    gc();
+    const heapAtStart = process.memoryUsage().heapUsed;
+    for (let i = 0; i < 40; i += 1) {
+      const left = postThrough(short, token, { ...padded, id: i + 1 });
+      await soon(stub.received(i + 1), 'the request');
+      left.leave();
+      await settle();
+    }
+    short.revoke(token);
+    await settle();
+    gc();
+    const kept = process.memoryUsage().heapUsed - heapAtStart;
+    assert.equal(stub.open.filter((r) => !r.destroyed).length, 40, 'every request stays open');
+    assert.ok(kept < 4 * MIB, `${(kept / MIB).toFixed(1)} MiB kept of 10 MiB sent`);
+  } finally {
+    short.close();
+    stub.close();
+  }
+});
+
+test('a POST with no tool in it closes when its agent leaves, and is never refused for the count', async () => {
+  const stub = await silentHa();
+  const short = await startCoreRelay({ coreOrigin: stub.url, haToken: 'ha-token-never-in-a-message', maxUnansweredRequests: 1 });
+  const token = short.issue('run-ping', { basenames: ['HassTurnOn'] });
+  try {
+    const running = postThrough(short, token, TOOL_CALL);
+    await soon(stub.received(1), 'the tool call');
+    const ping = postThrough(short, token, PING);
+    await soon(stub.received(2), 'the ping');
+    const closed = new Promise((resolve) => { stub.open[1].once('close', resolve); });
+    ping.leave();
+    await soon(closed, 'the ping closing');
+    running.leave();
+    await settle();
+    assert.equal(stub.open[0].destroyed, false, 'the tool call closed');
+  } finally {
+    short.revoke(token);
+    short.close();
+    stub.close();
+  }
+});
+
+test('a partial event of a stream its agent left is not kept in memory', async () => {
+  v8.setFlagsFromString('--expose-gc');
+  const gc = vm.runInNewContext('gc');
+  const stub = await silentHa();
+  const short = await startCoreRelay({ coreOrigin: stub.url, haToken: 'ha-token-never-in-a-message' });
+  const token = short.issue('run-partial', { basenames: ['HassTurnOn'] });
+  const pad = Buffer.alloc(4 * MIB, 0x7a);
+  try {
+    gc();
+    const heapAtStart = process.memoryUsage().heapUsed;
+    for (let i = 0; i < 8; i += 1) {
+      const left = postThrough(short, token, TOOL_CALL);
+      await soon(stub.received(i + 1), 'the request');
+      stub.open[i].writeHead(200, { 'content-type': 'text/event-stream' });
+      stub.open[i].write(': start\n\n');
+      await soon(left.answer, 'the stream');
+      stub.open[i].write('data: ');
+      stub.open[i].write(pad);
+      await sleep(200);
+      left.leave();
+      await settle();
+    }
+    gc();
+    const kept = process.memoryUsage().heapUsed - heapAtStart;
+    assert.equal(stub.open.filter((r) => !r.destroyed).length, 8, 'every request stays open');
+    assert.ok(kept < 8 * MIB, `${(kept / MIB).toFixed(1)} MiB kept of 32 MiB`);
+  } finally {
+    short.revoke(token);
+    short.close();
+    stub.close();
+  }
+});
+
+test('an answer to an agent that left draws on the agents\' budget, and may not stall', async () => {
+  const stub = await silentHa();
+  const short = await startCoreRelay({ coreOrigin: stub.url, haToken: 'ha-token-never-in-a-message', answerStallMs: 500 });
+  const token = short.issue('run-late', { basenames: ['HassTurnOn', 'GetLiveContext'] });
+  try {
+    const left = postThrough(short, token, TOOL_CALL);
+    await soon(stub.received(1), 'the request');
+    left.leave();
+    await settle();
+    const closed = new Promise((resolve) => { stub.open[0].once('close', resolve); });
+    stub.open[0].writeHead(200, { 'content-type': 'application/json' });
+    stub.open[0].write('{"pad":"');
+    stub.open[0].write(Buffer.alloc(LARGE_SHARE * MIB, 0x7a));
+    await settle();
+
+    // The core's own answer of the same size has its own budget.
+    const own = short.lookup('run-late').states();
+    await soon(stub.received(2), 'the lookup');
+    sendJson(stub.open[1], JSON.stringify([{ entity_id: 'sensor.big', attributes: { pad: 'z'.repeat(LARGE_SHARE * MIB) } }]));
+    assert.equal((await soon(own, 'the lookup', 20000))[0].entity_id, 'sensor.big');
+    // An agent's has not, until the stall gives it back.
+    const next = postThrough(short, token, CALL);
+    await soon(stub.received(3), 'the next call');
+    sendJson(stub.open[2], shareBody(5));
+    assert.equal((await soon(next.answer, 'the refusal', 20000)).status, 502);
+    await soon(closed, 'the stalled answer closing');
+    const later = postThrough(short, token, CALL);
+    await soon(stub.received(4), 'the call after it');
+    sendJson(stub.open[3], shareBody(5));
+    assert.equal((await soon(later.answer, 'the call after it', 20000)).status, 200);
+  } finally {
+    short.revoke(token);
+    short.close();
+    stub.close();
+  }
+});
+
+// --- Everything held is counted in the bytes Home Assistant sent.
+
+const WIDE = '界';  // three bytes on the wire, one unit of a string
+const wideEvent = (mib) => `data: {"jsonrpc":"2.0","id":7,"result":{"text":"${WIDE.repeat((mib * MIB) / 3)}`;
+
+test('a partial event of wide characters past the budget ends the stream', async () => {
+  answerRpc = (rpc, res) => { streamHead(res); res.write(wideEvent(BOUND_MIB + 2)); };
+  const open = openAgent(CALL, SSE);
+  try {
+    await assert.rejects(soon(open.answered.then((res) => {
+      res.resume();
+      return readAll(res);
+    }), 'the end of the stream', 20000));
+    assert.equal(logged.filter((l) => l.includes('too large')).length, 1, logged.join('\n'));
+  } finally {
+    open.req.destroy();
+    open.done();
+  }
+});
+
+test('streams of wide characters and a JSON answer share one budget, in bytes', async () => {
+  const stalled = [];
+  answerRpc = (rpc, res) => {
+    stalled.push(res);
+    streamHead(res);
+    res.write(wideEvent(6));
+  };
+  const first = openAgent(CALL, SSE);
+  const second = openAgent(CALL, SSE);
+  first.answered.catch(() => {});
+  second.answered.catch(() => {});
+  try {
+    await sleep(500);
+    assert.equal(stalled.length, 2);
+    // 12 MiB held: there is no room for 6 more, though they are only 2 MiB of units each.
+    const body = shareBody(5);
+    answerRpc = (rpc, res) => sendJson(res, body);
+    const third = await soon(agentCall(CALL), 'a JSON answer', 20000);
+    assert.equal(third.status, 502);
+    assert.match(third.text, /too large/);
+  } finally {
+    first.req.destroy();
+    first.done();
+    second.req.destroy();
+    second.done();
+  }
+  await settle();
+  const body = shareBody(5);
+  answerRpc = (rpc, res) => sendJson(res, body);
+  assert.equal((await soon(agentCall(CALL), 'the next answer', 20000)).status, 200);
+});
+
+// --- What the audit may say of an answer nobody read.
+
+async function leftThenAnswered(answer, { revoke }) {
+  const stub = await silentHa();
+  const lines = [];
+  const short = await startCoreRelay({ coreOrigin: stub.url, haToken: 'ha-token-never-in-a-message', record: (l) => lines.push(l) });
+  const token = short.issue('run-audit', { basenames: ['HassTurnOn'] });
+  try {
+    const left = postThrough(short, token, { ...TOOL_CALL, id: 7 });
+    await soon(stub.received(1), 'the request');
+    left.leave();
+    await settle();
+    if (revoke) short.revoke(token);
+    sendJson(stub.open[0], JSON.stringify(answer));
+    await settle();
+    if (!revoke) short.revoke(token);
+    return lines;
+  } finally {
+    short.close();
+    stub.close();
+  }
+}
+const said = (lines, mark) => lines.filter((l) => l.includes(mark)).length;
+const RESULT = { jsonrpc: '2.0', id: 7, result: { content: [] } };
+const FAILURE = { jsonrpc: '2.0', id: 7, error: { code: 1, message: 'no' } };
+
+test('after its run ended a call is settled once, by the first answer', async () => {
+  const lines = await leftThenAnswered([RESULT, FAILURE], { revoke: true });
+  assert.equal(said(lines, '(no answer)'), 1, lines.join('\n'));
+  assert.equal(said(lines, 'after its run ended'), 1, lines.join('\n'));
+  assert.equal(said(lines, '(answered after its run ended)'), 1, lines.join('\n'));
+});
+
+test('while its run is live a call is settled once, and never as after the run', async () => {
+  const lines = await leftThenAnswered([RESULT, RESULT], { revoke: false });
+  assert.equal(said(lines, 'after its run ended'), 0, lines.join('\n'));
+  assert.equal(said(lines, '(no answer)'), 0, lines.join('\n'));
+  assert.equal(lines.filter((l) => l.includes('HassTurnOn')).length, 1, lines.join('\n'));
+});
+
+for (const [what, message] of [
+  ['a request from the server', { jsonrpc: '2.0', id: 7, method: 'sampling/createMessage', params: {} }],
+  ['a message with neither result nor error', { jsonrpc: '2.0', id: 7 }],
+  ['a message with both a method and a result', { jsonrpc: '2.0', id: 7, method: 'x', result: {} }],
+]) {
+  test(`${what} says nothing about how a tool ended`, async () => {
+    const lines = await leftThenAnswered(message, { revoke: true });
+    assert.equal(said(lines, '(no answer)'), 1, lines.join('\n'));
+    assert.equal(said(lines, 'after its run ended'), 0, lines.join('\n'));
+  });
+}
+
+test('the end of a run is a fact of that run, not a call missing from the record', async () => {
+  // Two requests with one id: the first answer settles the call, and the second must
+  // not read that as the run having ended.
+  const stub = await silentHa();
+  const lines = [];
+  const short = await startCoreRelay({ coreOrigin: stub.url, haToken: 'ha-token-never-in-a-message', record: (l) => lines.push(l) });
+  const token = short.issue('run-same-id', { basenames: ['HassTurnOn'] });
+  try {
+    for (let i = 0; i < 2; i += 1) {
+      const left = postThrough(short, token, { ...TOOL_CALL, id: 7 });
+      await soon(stub.received(i + 1), 'the request');
+      left.leave();
+      await settle();
+    }
+    sendJson(stub.open[0], RESULT);
+    sendJson(stub.open[1], RESULT);
+    await settle();
+    assert.equal(said(lines, 'after its run ended'), 0, lines.join('\n'));
+  } finally {
+    short.revoke(token);
+    short.close();
+    stub.close();
+  }
+});
+
+// --- What a resolution remembers of Home Assistant's answers is held too.
+
+// A home of `count` devices, each its own domain, in which every lookup's answer
+// carries `mib` MiB more than the device.
+function largeLookups(count, mib) {
+  const pad = '#'.repeat(mib * MIB);
+  const device = (i) => `- names: Device ${i}\n  domain: d${i}\n  state: on\n# ${pad}\n`;
+  const asked = { lookups: 0 };
+  const statesOf = JSON.stringify(Array.from({ length: count }, (_, i) => ({ entity_id: `light.device_${i}`, attributes: { friendly_name: `Device ${i}` } })));
+  const handle = (req, res, rpc) => {
+    if (req.url === '/api/states') return sendJson(res, statesOf);
+    if (rpc.method === 'tools/list') return defaultRpc(rpc, res);
+    asked.lookups += 1;
+    const { name, domain } = rpc.params.arguments;
+    const i = Number(/(\d+)$/.exec(name || domain)[1]);
+    return sendJson(res, liveAnswer(rpc.id, device(i)));
+  };
+  return { asked, handle };
+}
+const serving = (handle) => http.createServer((req, res) => {
+  const chunks = [];
+  req.on('data', (c) => chunks.push(c));
+  req.on('end', () => handle(req, res, chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : null));
+});
+
+test('a resolution past what may be remembered still resolves', async () => {
+  const home = largeLookups(6, 4);
+  const stub = serving(home.handle);
+  await new Promise((resolve) => { stub.listen(0, '127.0.0.1', resolve); });
+  const short = await startCoreRelay({ coreOrigin: `http://127.0.0.1:${stub.address().port}`, haToken: 'ha-token-never-in-a-message' });
+  try {
+    const targets = Array.from({ length: 6 }, (_, i) => `Device ${i}`);
+    const intents = [{ intent: 'HassTurnOff', targets, data: {}, risk: 'low' }];
+    const out = await soon(resolveAnswer({ proposal: { summary: 'Off', intents }, automation: null }, short.lookup('run')), 'the resolution', 60000);
+    assert.deepEqual(out.problems, []);
+    assert.deepEqual(out.proposal.intents[0].targets, Array.from({ length: 6 }, (_, i) => `light.device_${i}`));
+    assert.equal(home.asked.lookups, 18, 'three questions about each device');
+  } finally {
+    short.close();
+    stub.close();
+    stub.closeAllConnections();
+  }
+});
+
+test('what a resolution remembers is given back when it ends', async () => {
+  const home = largeLookups(3, 5);
+  const stub = serving(home.handle);
+  await new Promise((resolve) => { stub.listen(0, '127.0.0.1', resolve); });
+  const short = await startCoreRelay({ coreOrigin: `http://127.0.0.1:${stub.address().port}`, haToken: 'ha-token-never-in-a-message' });
+  try {
+    const ask = () => {
+      const lookup = short.lookup('run');
+      const hold = lookup.memoryHold();
+      const room = hold.take(16 * MIB);
+      hold.release();
+      return room;
+    };
+    const intents = [0, 1, 2].map((i) => ({ intent: 'HassTurnOff', targets: [`Device ${i}`], data: {}, risk: 'low' }));
+    await soon(resolveAnswer({ proposal: { summary: 'Off', intents }, automation: null }, short.lookup('run')), 'the resolution', 60000);
+    assert.equal(ask(), true, 'bytes were left charged');
+  } finally {
+    short.close();
+    stub.close();
+    stub.closeAllConnections();
+  }
+});
+
+test('an answer arriving after the deadline refused the resolution charges nothing', async () => {
+  const home = largeLookups(1, 5);
+  let answerNow;
+  const held = new Promise((resolve) => { answerNow = resolve; });
+  const stub = serving((req, res, rpc) => held.then(() => home.handle(req, res, rpc)));
+  await new Promise((resolve) => { stub.listen(0, '127.0.0.1', resolve); });
+  const short = await startCoreRelay({ coreOrigin: `http://127.0.0.1:${stub.address().port}`, haToken: 'ha-token-never-in-a-message' });
+  try {
+    const lookup = short.lookup('run');
+    let answered;
+    const late = new Promise((resolve) => { answered = resolve; });
+    const watched = { ...lookup, live: (name) => lookup.live(name).finally(answered) };
+    const intents = [{ intent: 'HassTurnOff', targets: ['Device 0'], data: {}, risk: 'low' }];
+    const out = await resolveAnswer({ proposal: { summary: 'Off', intents }, automation: null }, watched, { deadlineMs: 50 });
+    assert.equal(out.problems[0].problem, 'unavailable');
+    answerNow();
+    await soon(late, 'the late answer', 30000);
+    await new Promise(setImmediate);
+    const hold = lookup.memoryHold();
+    const room = hold.take(16 * MIB);
+    hold.release();
+    assert.equal(room, true, 'bytes were left charged');
+  } finally {
+    short.close();
+    stub.close();
+    stub.closeAllConnections();
+  }
+});
+
+test('sixty names answered with 4 MiB each do not take the process down', async () => {
+  const home = largeLookups(60, 4);
+  const stub = serving(home.handle);
+  await new Promise((resolve) => { stub.listen(0, '127.0.0.1', resolve); });
+  try {
+    const child = fork(path.join(__dirname, 'fixtures', 'resolve-on-small-heap.js'), [`http://127.0.0.1:${stub.address().port}`], {
+      execArgv: ['--max-old-space-size=256'], silent: true,
+    });
+    let out = '';
+    child.stdout.on('data', (d) => { out += d; });
+    child.stderr.resume();
+    const ended = await soon(new Promise((resolve) => { child.once('exit', (code, signal) => resolve({ code, signal })); }), 'the resolution', 150000);
+    assert.deepEqual(ended, { code: 0, signal: null }, 'the process died');
+    assert.deepEqual(JSON.parse(out).targets, Array.from({ length: 60 }, (_, i) => `light.device_${i}`));
+  } finally {
+    stub.close();
+    stub.closeAllConnections();
+  }
 });

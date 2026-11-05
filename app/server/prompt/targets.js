@@ -23,7 +23,8 @@
 //   ambiguous    it finds several, or the device it found is not unique;
 //   unpinned     it finds one, and no candidate is it (an alias, most likely);
 //   unavailable  a lookup failed, or the answer names more devices, or takes
-//                longer, than one answer may.
+//                longer, than one answer may;
+//   too_large    Home Assistant's answer to a lookup is past what may be read.
 //
 // Nothing here ever returns an id Home Assistant did not match.
 
@@ -77,21 +78,34 @@ const RESOLVE_DEADLINE_MS = 30000;
  * @param {{ live(name: string): Promise<{ok: boolean, text: string}>,
  *           liveDomain(domain: string): Promise<{ok: boolean, text: string}>,
  *           states(): Promise<Array<{entity_id: string, attributes?: object}>> }} lookup
+ * @param {{ take(bytes: number): boolean }} memory  what may be remembered
+ * @param {AbortSignal} signal  aborted once nobody waits for this resolver: it asks nothing more
  */
-function createResolver(lookup) {
-  const liveMemo = new Map();
-  const live = (name) => {
-    if (!liveMemo.has(name)) liveMemo.set(name, lookup.live(name));
-    return liveMemo.get(name);
+function createResolver(lookup, memory, signal) {
+  // An answer remembered is an answer not asked for again, and that is all it is: one
+  // that does not fit is forgotten, and asked for again when it next comes up. While
+  // it is on its way it is shared, so a name wanted twice at once goes out once.
+  const remembering = (ask) => {
+    const remembered = new Map();
+    return (key) => {
+      if (remembered.has(key)) return remembered.get(key);
+      signal.throwIfAborted();
+      const asking = ask(key).then((answer) => {
+        if (!memory.take(Buffer.byteLength(answer.text))) remembered.delete(key);
+        return answer;
+      });
+      remembered.set(key, asking);
+      return asking;
+    };
   };
-  const domainMemo = new Map();
-  const liveDomain = (domain) => {
-    if (!domainMemo.has(domain)) domainMemo.set(domain, lookup.liveDomain(domain));
-    return domainMemo.get(domain);
-  };
+  const live = remembering((name) => lookup.live(name));
+  const liveDomain = remembering((domain) => lookup.liveDomain(domain));
   let statesMemo = null;
   const states = () => {
-    if (statesMemo === null) statesMemo = lookup.states();
+    if (statesMemo === null) {
+      signal.throwIfAborted();
+      statesMemo = lookup.states();
+    }
     return statesMemo;
   };
 
@@ -154,10 +168,16 @@ async function resolveAnswer(answer, lookup, { known = [], deadlineMs = RESOLVE_
   if (distinctRefs(answer, knownIds).size > MAX_REFS) return refused;
   let timer;
   const deadline = new Promise((resolve) => { timer = setTimeout(() => resolve(refused), deadlineMs); });
+  const memory = lookup.memoryHold();
+  // A refused resolution stops here, or it would go on asking Home Assistant for an
+  // answer nobody waits for, holding what it remembered after giving back the charge.
+  const nobodyWaits = new AbortController();
   try {
-    return await Promise.race([resolveAll(answer, lookup, knownIds), deadline]);
+    return await Promise.race([resolveAll(answer, lookup, knownIds, memory, nobodyWaits.signal), deadline]);
   } finally {
     clearTimeout(timer);
+    nobodyWaits.abort();
+    memory.release();
   }
 }
 
@@ -175,8 +195,8 @@ function distinctRefs({ proposal, automation }, knownIds) {
   return refs;
 }
 
-async function resolveAll({ proposal, automation }, lookup, knownIds) {
-  const resolver = createResolver(lookup);
+async function resolveAll({ proposal, automation }, lookup, knownIds, memory, signal) {
+  const resolver = createResolver(lookup, memory, signal);
   const problems = [];
   const cache = new Map();
   // `known` ids are the edited automation's own: they stand in ITS slots only.

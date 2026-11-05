@@ -52,7 +52,8 @@ function makeApp(web) {
     // read that reaches it says so instead of proposing.
     lookupFor: () => {
       const ask = (kind) => async (name) => { lookups.push(`${kind}:${name}`); throw new Error('no lookup here'); };
-      return { live: ask('live'), liveDomain: ask('domain'), states: ask('states') };
+      const memoryHold = () => ({ take: () => true, release: () => {} });
+      return { memoryHold, live: ask('live'), liveDomain: ask('domain'), states: ask('states') };
     },
     actFor: () => async () => ({ ok: true }),
     web,

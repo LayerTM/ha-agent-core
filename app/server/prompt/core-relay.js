@@ -67,11 +67,15 @@ const LOOKUP_TIMEOUT_MS = 10000;
 // of anything.
 //
 // MAX_ANSWERS_HELD_BYTES is one budget for the whole process, shared by every
-// answer being read or delivered at the same moment, so that two runs cannot
-// multiply it. An answer that would pass it is refused as too large, at once. A
-// JSON answer costs up to about seven times its bytes while it is parsed (the
-// bytes, their text, what that parses to), so this keeps the relay near 160 MiB at
-// its worst on a small host. A tool answer carries only what is exposed to Assist.
+// answer being read or delivered to an agent at the same moment, so that two runs
+// cannot multiply it. An answer that would pass it is refused as too large, at once.
+// The core's own answers (a lookup, an action) draw on a second budget of the same
+// size: an agent may keep its share for as long as the delivery deadline, and that
+// must not refuse the core a question of its own. What a resolution remembers of the
+// lookups it has read draws on a third, or a full memory would refuse the next read:
+// what does not fit is asked for again (targets.js). A JSON answer costs up to about
+// seven times its bytes while it is parsed (the bytes, their text, what that parses
+// to). A tool answer carries only what is exposed to Assist.
 //
 // MAX_STATES_BYTES is how much of one states list is read at all. The list is not
 // held (state-names.js), so it can pass the budget's size. /api/states carries
@@ -84,37 +88,48 @@ const MAX_STATES_BYTES = 64 * MIB;
 // socket looks. Over loopback the largest answer takes well under a second.
 const DELIVERY_DEADLINE_MS = 60000;
 // How long a request stays open once its agent has left, for a tool still running.
+// Home Assistant ends a call itself long before this: it is for one that never does.
 const ABANDONED_REQUEST_MS = 60 * 60 * 1000;
 // How many POSTs may wait for Home Assistant to start answering before new ones are
 // refused, whether their agents stayed or left; the ones waiting are never closed for
 // it. Home Assistant gives up on a request after 60 seconds and the core runs at most
 // two agents at once: this is room for 32 parallel calls from each of them.
 const MAX_UNANSWERED_REQUESTS = 64;
+// How long Home Assistant may go silent in the middle of an answer that holds a share.
+const ANSWER_STALL_MS = 10000;
 const answerTooLarge = (what) => `Home Assistant's answer to ${what} is too large (over ${MAX_ANSWERS_HELD_BYTES / MIB} MiB, counting answers being read at the same time)`;
 const statesTooLarge = () => `Home Assistant's states list is too large (over ${MAX_STATES_BYTES / MIB} MiB)`;
+// A refusal the caller can tell from an answer that failed.
+const tooLargeError = (message) => Object.assign(new Error(message), { tooLarge: true });
 
-let answerBytesHeld = 0;
-// One answer's share of the budget. `take` is false when there is no room for that
-// many more bytes, and then nothing is taken; `release` gives back all of it, may
-// be called any number of times, and is final: a released share takes nothing more,
-// so no order of events can leave bytes charged with nobody left to give them back.
-function answerHold() {
-  let mine = 0;
-  let released = false;
-  return {
-    take(bytes) {
-      if (released || answerBytesHeld + bytes > MAX_ANSWERS_HELD_BYTES) return false;
-      answerBytesHeld += bytes;
-      mine += bytes;
-      return true;
-    },
-    release() {
-      released = true;
-      answerBytesHeld -= mine;
-      mine = 0;
-    },
+// A budget, and how to open one answer's share of it. `take` is false when there is
+// no room for that many more bytes, and then nothing is taken; a negative count gives
+// bytes back. `release` gives back all of it, may be called any number of times, and
+// is final: a released share takes nothing more, so no order of events can leave
+// bytes charged with nobody left to give them back.
+function answerBudget() {
+  let held = 0;
+  return () => {
+    let mine = 0;
+    let released = false;
+    return {
+      take(bytes) {
+        if (released || held + bytes > MAX_ANSWERS_HELD_BYTES) return false;
+        held += bytes;
+        mine += bytes;
+        return true;
+      },
+      release() {
+        released = true;
+        held -= mine;
+        mine = 0;
+      },
+    };
   };
 }
+const agentAnswerHold = answerBudget();
+const ownAnswerHold = answerBudget();
+const rememberedAnswerHold = answerBudget();
 
 // Calls `onStall` when `stream` has delivered nothing for `ms`, until it closes or
 // ends. A timer of its own, not the socket's: that socket goes back to the pool.
@@ -295,8 +310,7 @@ function readBody(stream, limit, done) {
 // A JSON answer from Home Assistant, as coreRequest gives it. It holds its share
 // until it is parsed; one that passes the budget, or breaks, gives it back as its
 // connection closes.
-function readJsonAnswer(stream, done) {
-  const hold = answerHold();
+function readJsonAnswer(stream, done, hold = ownAnswerHold()) {
   stream.once('close', hold.release);
   readAdmitted(stream, hold.take, (raw) => {
     let json;
@@ -310,7 +324,7 @@ function readJsonAnswer(stream, done) {
 // The states list the same way, reduced to what a lookup reads as it arrives.
 function readStatesAnswer(stream, done) {
   const names = createStateNames();
-  const hold = answerHold();
+  const hold = ownAnswerHold();
   stream.once('close', hold.release);
   let size = 0;
   let settled = false;
@@ -339,6 +353,29 @@ function readStatesAnswer(stream, done) {
   });
 }
 
+// Whether a message is a JSON-RPC response to a call: an id and an outcome, and no
+// method, which would make it a request of the server's own.
+function isResponse(message) {
+  return Boolean(message) && typeof message === 'object'
+    && message.id !== undefined && message.id !== null && message.method === undefined
+    && (message.result !== undefined || message.error !== undefined);
+}
+
+// Whether a JSON-RPC answer says its call failed.
+function answerFailed(message) {
+  return message.error !== undefined
+    || Boolean(message.result && typeof message.result === 'object' && message.result.isError === true);
+}
+
+// What an agent is told of a tool Home Assistant gave up on (504, with no body). As an
+// answer to its call, or all it can say is that the request failed.
+function toolCutOff(id, seconds) {
+  const text = `Home Assistant cut this tool off after ${seconds} s, at its limit for one call. `
+    + 'It may have stopped halfway: steps already done stay done, the rest did not happen. '
+    + 'Check the state of the devices before calling it again.';
+  return { jsonrpc: '2.0', id, result: { isError: true, content: [{ type: 'text', text }] } };
+}
+
 // Whether a request says it has a body. Only POST /api/mcp may, and that body
 // is read and judged; any other request with one is refused.
 function hasBody(req) {
@@ -365,6 +402,7 @@ function deny(res, status, message) {
  * @param {number} [opts.deliveryDeadlineMs]  How long an agent has to read one answer.
  * @param {number} [opts.abandonedRequestMs]  How long a tool may outlive the agent that called it.
  * @param {number} [opts.maxUnansweredRequests]  How many POSTs may wait for Home Assistant to answer.
+ * @param {number} [opts.answerStallMs]  How long Home Assistant may go silent mid-answer.
  * @returns {Promise<{
  *   url: string, port: number, issue: (runId: string) => string,
  *   revoke: (token: string) => void, close: () => void,
@@ -372,6 +410,7 @@ function deny(res, status, message) {
  *   probeAuth: () => Promise<null|'ok'|'unauthorized'|'unreachable'>,
  *   tokenRefusal: (runId: string) => null|number,
  *   lookup: (runId: string) => {
+ *     memoryHold: () => { take: (bytes: number) => boolean, release: () => void },
  *     live: (name: string) => Promise<{ok: boolean, text: string}>,
  *     liveDomain: (domain: string) => Promise<{ok: boolean, text: string}>,
  *     states: () => Promise<Array<{entity_id: string, attributes?: object}>>,
@@ -390,6 +429,7 @@ async function startCoreRelay({
   deliveryDeadlineMs = DELIVERY_DEADLINE_MS,
   abandonedRequestMs = ABANDONED_REQUEST_MS,
   maxUnansweredRequests = MAX_UNANSWERED_REQUESTS,
+  answerStallMs = ANSWER_STALL_MS,
 }) {
   // Whether Home Assistant accepts the add-on's token on the MCP path, from the
   // latest answer that said so: 'ok', 'unauthorized', 'unreachable' (a probe got
@@ -426,7 +466,7 @@ async function startCoreRelay({
   // request names at most one). Both are given when the bearer is minted, so
   // there is no moment in which a live bearer means less than it will mean later.
   // An entry with an empty set may call nothing and read nothing: unset refuses.
-  /** @type {Map<string, {runId: string, basenames: Set<string>, cameras: Set<string>}>} */
+  /** @type {Map<string, {runId: string, basenames: Set<string>, cameras: Set<string>, ended: boolean}>} */
   const runs = new Map();
   // Calls a run has sent and Home Assistant has not answered yet, per run rather
   // than per request: the answer may come back on this POST or on the run's own
@@ -434,6 +474,7 @@ async function startCoreRelay({
   /** @type {Map<string, Map<string, {id: unknown, name: string, args: unknown, runId: string}>>} */
   const awaiting = new Map();
   let unansweredRequests = 0;
+  const openUpstreams = new Set();
 
   // The end of a run's life settles the calls it never got an answer to. A call
   // Home Assistant never answered is still something the run asked for, and
@@ -460,10 +501,33 @@ async function startCoreRelay({
       const call = pending && pending.get(String(message.id));
       if (!call) return;
       pending.delete(String(message.id));
-      const failed = message.error !== undefined
-        || (message.result && typeof message.result === 'object' && message.result.isError === true);
-      record(describeCall(call, isDryRun(call, message) ? ' (dry-run)' : (failed ? ' (failed)' : '')));
+      record(describeCall(call, isDryRun(call, message) ? ' (dry-run)' : (answerFailed(message) ? ' (failed)' : '')));
     };
+  }
+
+  // What is left to say of a request's calls once its run may have ended: the lines
+  // for each outcome, because the calls themselves carry their whole arguments and
+  // this lasts for as long as the tool runs.
+  function lateLines(calls, runId) {
+    return new Map(calls.map((call) => [String(call.id), {
+      answered: describeCall({ ...call, runId }, ' (answered after its run ended)'),
+      failed: describeCall({ ...call, runId }, ' (failed, after its run ended)'),
+    }]));
+  }
+
+  // An answer nobody is left to read still says how the tool ended. While the run is
+  // live its call is settled as usual; once the run has ended the call is already
+  // recorded as unanswered, and this is the line that corrects it. Each call once, by
+  // the first real answer to it; anything else in the body says nothing about it.
+  function recordUnread(json, run, observe, late) {
+    for (const message of Array.isArray(json) ? json : [json]) {
+      const lines = isResponse(message) ? late.get(String(message.id)) : undefined;
+      if (lines) {
+        late.delete(String(message.id));
+        if (run.ended) record(answerFailed(message) ? lines.failed : lines.answered);
+        else observe(message);
+      }
+    }
   }
   const target = new URL(coreOrigin);
   const secure = target.protocol === 'https:';
@@ -518,8 +582,10 @@ async function startCoreRelay({
         }
         const verdict = judgeClientBody(body.toString('utf8'), entry.basenames);
         if (verdict.forward === true) {
-          // Before anything is recorded as sent: this one goes nowhere.
-          if (unansweredRequests >= maxUnansweredRequests) {
+          // Before anything is recorded as sent: this one goes nowhere. Only a call of a
+          // tool: the rest cannot pile up, and an agent still needs them to start.
+          const callsTool = (verdict.calls || []).length > 0;
+          if (callsTool && unansweredRequests >= maxUnansweredRequests) {
             const why = `too many requests are waiting for Home Assistant to answer (${unansweredRequests})`;
             log(`relay refused ${req.method} ${pathname}: ${why}`);
             deny(res, 503, why);
@@ -538,7 +604,8 @@ async function startCoreRelay({
             if (!pending) { pending = new Map(); awaiting.set(runId, pending); }
             pending.set(String(call.id), { ...call, runId });
           }
-          forward(req, res, pathname, body, observerFor(runId), runId);
+          const answerable = (verdict.calls || []).filter((call) => call.answerable);
+          forward(req, res, pathname, body, observerFor(runId), runId, { mayRunTool: callsTool, late: lateLines(answerable, runId), run: entry, callIds: answerable.map((call) => call.id), batch: verdict.batch });
           return;
         }
         res.writeHead(verdict.status, verdict.type ? { 'content-type': verdict.type } : {});
@@ -552,7 +619,7 @@ async function startCoreRelay({
       return;
     }
     req.resume();
-    forward(req, res, pathname, null, observerFor(runId), runId);
+    forward(req, res, pathname, null, observerFor(runId), runId, { mayRunTool: false, late: new Map(), run: entry, callIds: [], batch: false });
   });
 
   // The request to Core, with the Home Assistant token in place of the relay's.
@@ -562,16 +629,16 @@ async function startCoreRelay({
     record(capBytes(`camera run=${runId}${mark}: ${pathname.slice(CAMERA_PREFIX.length)}`, LINE_CAP));
   }
 
-  function forward(req, res, pathname, body, observe, runId) {
+  function forward(req, res, pathname, body, observe, runId, { mayRunTool, late, run, callIds, batch }) {
     // The agent left while its request was being read; nothing was sent for it.
     if (res.destroyed) return;
     // What this answer holds of the budget. The response owns it: every way an
     // answer ends, delivered, refused, broken or abandoned, closes the response, and
     // the listener is in place before anything can be read or anyone can leave.
-    const share = answerHold();
-    let answered = false;
-    // Not the body: this outlives its sending, and the handler below must not keep it.
-    const mayRunTool = body !== null;
+    const share = agentAnswerHold();
+    const asked = Date.now();
+    let answerStream = null;
+    let upstreamOpen = true;
     // Counted until an agent starts reading its answer or the request ends.
     let waiting = mayRunTool;
     if (waiting) unansweredRequests += 1;
@@ -599,13 +666,26 @@ async function startCoreRelay({
         ...(secure ? { rejectUnauthorized: false } : {}),
       },
       (upRes) => {
-        answered = true;
+        answerStream = upRes;
         if (pathname === MCP_PATH) observeMcpAnswer(upRes.statusCode, `${req.method} ${pathname}`);
         // Only while the run is still live: an answer that lands after its bearer
         // was revoked would leave a mark nothing ever clears.
         if (authFromStatus(upRes.statusCode) === 'unauthorized'
           && [...runs.values()].some((entry) => entry.runId === runId)) {
           refusedRuns.set(runId, upRes.statusCode);
+        }
+        if (upRes.statusCode === 504 && callIds.length > 0) {
+          upRes.resume();
+          stopWaiting();
+          const seconds = Math.round((Date.now() - asked) / 1000);
+          const answers = callIds.map((id) => toolCutOff(id, seconds));
+          log(`relay upstream: Home Assistant cut off ${answers.length} tool call(s) after ${seconds} s (504)`);
+          recordUnread(answers, run, observe, late);
+          if (!res.destroyed) {
+            res.writeHead(200, { 'content-type': 'application/json' });
+            res.end(JSON.stringify(batch ? answers : answers[0]));
+          }
+          return;
         }
         const redirected = upRes.statusCode >= 300 && upRes.statusCode < 400;
         if (CAMERA_PATH_RE.test(pathname)) {
@@ -618,9 +698,19 @@ async function startCoreRelay({
           recordCamera(runId, pathname, ok ? '' : (redirected ? ' (no answer)' : ' (failed)'));
         }
         // Nobody is left to read it: what it says about the token and the camera read
-        // is noted above, and the rest goes nowhere.
+        // is noted above, what it says about the tool is recorded, and the rest goes
+        // nowhere. An event stream is not read for that: it has no end to wait for.
         if (res.destroyed) {
-          upRes.resume();
+          const isJson = String(upRes.headers['content-type'] || '').startsWith('application/json');
+          if (pathname === MCP_PATH && late.size > 0 && isJson) {
+            // An agent's answer on the agents' budget, and not for longer than any other.
+            watchStall(upRes, answerStallMs, () => upRes.destroy());
+            readJsonAnswer(upRes, ({ json }) => {
+              if (json !== null) recordUnread(json, run, observe, late);
+            }, agentAnswerHold());
+          } else {
+            upRes.resume();
+          }
           return;
         }
         stopWaiting();
@@ -672,24 +762,78 @@ async function startCoreRelay({
           res.writeHead(upRes.statusCode, out);
           upRes.setEncoding('utf8');
           // Home Assistant waits for an agent that is not reading, so what piles up
-          // here is only the event still being read, and that counts as held.
-          const sse = createSseFilter((chunk) => { if (!res.write(chunk)) upRes.pause(); }, observe);
-          res.on('drain', () => upRes.resume());
+          // here is the event still being read and what the socket has not taken yet.
+          // Both count as held, and neither side may stall for long while holding
+          // them. A stream with nothing held may be silent for as long as a tool takes.
+          let unflushed = 0;
+          let charged = 0;
+          let deliveryTimer = null;
+          let stallTimer = null;
+          const settle = () => {
+            const now = sse.held() + unflushed;
+            const room = share.take(now - charged);
+            if (room) charged = now;
+            return room;
+          };
+          // The deadline runs from the moment the socket is behind until it has
+          // caught up: only then does `unflushed` reach zero, however busy it looks.
+          const write = (chunk) => {
+            const bytes = Buffer.byteLength(chunk);
+            if (unflushed === 0) {
+              deliveryTimer = setTimeout(() => res.destroy(), deliveryDeadlineMs);
+              deliveryTimer.unref();
+            }
+            unflushed += bytes;
+            const room = res.write(chunk, () => {
+              unflushed -= bytes;
+              if (unflushed === 0) clearTimeout(deliveryTimer);
+              settle();
+            });
+            if (!room) upRes.pause();
+          };
+          // Paused, Home Assistant is waiting for the agent, not silent.
+          const watchHeldEvent = () => {
+            clearTimeout(stallTimer);
+            if (sse.held() === 0 || upRes.isPaused()) return;
+            stallTimer = setTimeout(() => {
+              stopped();
+              upRes.off('error', stopped);
+              upRes.destroy();
+            }, answerStallMs);
+            stallTimer.unref();
+          };
+          const sse = createSseFilter(write, observe);
+          res.on('drain', () => {
+            upRes.resume();
+            watchHeldEvent();
+          });
+          res.once('close', () => {
+            clearTimeout(deliveryTimer);
+            clearTimeout(stallTimer);
+            // The stream can stay open after this, and its share has gone back.
+            sse.discard();
+          });
           upRes.on('data', (chunk) => {
             if (res.destroyed) return;
-            const before = sse.held();
             sse.push(chunk);
-            if (share.take(sse.held() - before)) return;
+            if (settle()) {
+              watchHeldEvent();
+              return;
+            }
             log(`relay upstream: ${answerTooLarge(`${req.method} ${pathname}`)}`);
             res.destroy();
           });
-          upRes.on('end', () => { sse.end(); res.end(); });
+          upRes.on('end', () => {
+            clearTimeout(stallTimer);
+            sse.end();
+            res.end();
+          });
         } else if (type.startsWith('application/json')) {
           // Its share is held until the agent has the answer: a slow reader keeps the
           // bytes here. So neither side may stall for long while holding it, or one
           // connection could keep every other answer refused. No limit runs before
           // the headers: nothing is held yet, and a tool may rightly take its time.
-          watchStall(upRes, LOOKUP_TIMEOUT_MS, () => {
+          watchStall(upRes, answerStallMs, () => {
             stopped();
             upRes.off('error', stopped);
             upRes.destroy();
@@ -738,23 +882,37 @@ async function startCoreRelay({
     );
 
     // An agent that leaves has no use for the rest of an answer, so Home Assistant is
-    // not kept sending it. Only a POST can be running a tool, and before its answer
-    // starts it stays open: Home Assistant cancels a tool whose request closes,
-    // wherever it has got to, and a script stopped halfway can leave a device on.
-    // Same tick as the request: nothing can have closed in between.
+    // not kept sending it. But Home Assistant cancels a tool whose request closes,
+    // wherever it has got to, and a script stopped halfway can leave a device on, so
+    // a POST whose tool may still be running stays open: one with no answer yet, or
+    // answered by an event stream, which can start before the tool is done. What still
+    // arrives is discarded, and it counts as waiting again, because nobody will read it
+    // to its end. Same tick as the request: nothing can have closed in between.
     res.once('close', () => {
       share.release();
-      if (res.writableFinished) return;
-      if (answered || !mayRunTool) {
+      if (res.writableFinished || !upstreamOpen) return;
+      const toolDone = answerStream !== null
+        && !String(answerStream.headers['content-type'] || '').startsWith('text/event-stream');
+      if (!mayRunTool || toolDone) {
         upstream.destroy();
         return;
+      }
+      if (answerStream !== null) answerStream.resume();
+      if (!waiting) {
+        waiting = true;
+        unansweredRequests += 1;
       }
       const limit = setTimeout(() => upstream.destroy(), abandonedRequestMs);
       limit.unref();
       upstream.once('close', () => clearTimeout(limit));
     });
 
-    upstream.once('close', stopWaiting);
+    openUpstreams.add(upstream);
+    upstream.once('close', () => {
+      upstreamOpen = false;
+      openUpstreams.delete(upstream);
+      stopWaiting();
+    });
     upstream.on('error', (err) => {
       if (!res.destroyed) log(`relay upstream error: ${err.message}`);
       // The read never reached Home Assistant, or its answer never came back.
@@ -841,7 +999,7 @@ async function startCoreRelay({
     }
     async function rpc(method, params) {
       const { status, json, tooLarge } = await request(method, params);
-      if (tooLarge) throw new Error(answerTooLarge(method));
+      if (tooLarge) throw tooLargeError(answerTooLarge(method));
       if (status !== 200 || !json || json.error || !json.result) {
         throw new Error(`Home Assistant answered ${method} with ${status}`);
       }
@@ -927,6 +1085,7 @@ async function startCoreRelay({
         runId,
         basenames: new Set([...basenames].map(haBasename)),
         cameras: new Set(cameras),
+        ended: false,
       });
       return token;
     },
@@ -934,6 +1093,7 @@ async function startCoreRelay({
       const entry = runs.get(token);
       runs.delete(token);
       if (entry === undefined) return;
+      entry.ended = true;
       refusedRuns.delete(entry.runId);
       settleUnanswered(entry.runId);
     },
@@ -948,7 +1108,7 @@ async function startCoreRelay({
         try {
           result = await ha.callTool(call.name, args);
         } catch (err) {
-          record(describeCall(call, ' (lookup, failed)'));
+          record(describeCall(call, err.tooLarge ? ' (lookup, answer too large)' : ' (lookup, failed)'));
           throw err;
         }
         const text = toolText(result);
@@ -963,12 +1123,13 @@ async function startCoreRelay({
         return { ok, text: ok ? answer.result : '' };
       }
       return {
+        memoryHold: rememberedAnswerHold,
         live: (name) => callLive({ name }),
         liveDomain: (domain) => callLive({ domain }),
         async states() {
           const { status, json, tooLarge, why } = await coreRequest('GET', '/api/states', undefined, readStatesAnswer);
           if (status !== 200) throw new Error(`Home Assistant answered the states list with ${status}`);
-          if (tooLarge) throw new Error(why());
+          if (tooLarge) throw tooLargeError(why());
           if (json === null) throw new Error("Home Assistant's states list is not a list");
           return json;
         },
@@ -1019,6 +1180,10 @@ async function startCoreRelay({
       refusedRuns.clear();
       server.close();
       server.closeAllConnections();
+      // Nothing outlives the relay: left open they would hold the process up. Home
+      // Assistant cancels any tool still running on one of these, and says nothing.
+      if (openUpstreams.size > 0) log(`relay closing: ${openUpstreams.size} requests to Home Assistant still open are closed, which cancels any tool still running on them`);
+      for (const upstream of openUpstreams) upstream.destroy();
     },
   };
 }
