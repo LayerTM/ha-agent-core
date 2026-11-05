@@ -8,6 +8,8 @@ const { test, before, after, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('node:http');
 const net = require('node:net');
+const v8 = require('node:v8');
+const vm = require('node:vm');
 const { startCoreRelay } = require('../server/prompt/core-relay');
 const { resolveAnswer } = require('../server/prompt/targets');
 
@@ -484,7 +486,7 @@ test('a states list that stalls is given up on, and gives its share back', async
   assert.equal((await soon(agentCall(CALL), 'the next answer', 20000)).status, 200);
 });
 
-test('an agent gone before Home Assistant answers aborts the request and takes no share', async () => {
+test('an agent gone before Home Assistant answers leaves the tool running and takes no share', async () => {
   const body = shareBody(5);
   // Twice, because one lost share would still leave room for one more answer.
   for (let round = 0; round < 2; round += 1) {
@@ -494,14 +496,241 @@ test('an agent gone before Home Assistant answers aborts the request and takes n
     const gone = openAgent(CALL);
     gone.answered.catch(() => {});
     const held = await soon(asked, 'the stub');
-    const closed = new Promise((resolve) => { held.once('close', resolve); });
+    let closedEarly = false;
+    held.once('close', () => { closedEarly = !held.writableFinished; });
     gone.req.destroy();
     gone.done();
-    await soon(closed, 'the request aborted');
-    sendJson(held, body);
+    await new Promise((resolve) => { setTimeout(resolve, 300); });
+    assert.equal(closedEarly, false, 'the request closed, which cancels the tool');
+    await new Promise((resolve) => { held.once('finish', resolve); sendJson(held, body); });
   }
   answerRpc = (rpc, res) => sendJson(res, body);
   assert.equal((await soon(agentCall(CALL), 'the next answer', 20000)).status, 200);
+});
+
+test('a request with no tool behind it closes when its agent leaves', async () => {
+  const rawHa = http.createServer();
+  let closed;
+  let arrived;
+  const asked = new Promise((resolve) => { arrived = resolve; });
+  rawHa.on('request', (req, res) => {
+    closed = new Promise((resolve) => { res.once('close', resolve); });
+    arrived();
+  });
+  await new Promise((resolve) => { rawHa.listen(0, '127.0.0.1', resolve); });
+  const short = await startCoreRelay({ coreOrigin: `http://127.0.0.1:${rawHa.address().port}`, haToken: 'ha-token-never-in-a-message' });
+  const token = short.issue('run-get', { basenames: [] });
+  const leaving = new AbortController();
+  const call = fetch(`${short.url}/api/mcp`, {
+    headers: { authorization: `Bearer ${token}`, accept: 'text/event-stream' },
+    signal: leaving.signal,
+  }).catch(() => {});
+  try {
+    await soon(asked, 'the stub');
+    leaving.abort();
+    await call;
+    await soon(closed, 'the request closing');
+  } finally {
+    short.revoke(token);
+    short.close();
+    rawHa.close();
+    rawHa.closeAllConnections();
+  }
+});
+
+// A Home Assistant that reads each request and has not answered it yet, keeping
+// nothing of it: what stays in this process is what the relay keeps.
+async function silentHa() {
+  const open = [];
+  let notify = () => {};
+  const server = http.createServer((req, res) => {
+    req.resume();
+    req.once('end', () => {
+      open.push(res);
+      notify();
+    });
+  });
+  await new Promise((resolve) => { server.listen(0, '127.0.0.1', resolve); });
+  return {
+    open,
+    url: `http://127.0.0.1:${server.address().port}`,
+    async received(count) {
+      while (open.length < count) {
+        await new Promise((resolve) => { notify = resolve; });
+      }
+    },
+    close() {
+      server.close();
+      server.closeAllConnections();
+    },
+  };
+}
+const PING = { jsonrpc: '2.0', id: 1, method: 'ping', params: {} };
+function postThrough(through, token, rpc) {
+  const leaving = new AbortController();
+  const answer = fetch(`${through.url}/api/mcp`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', accept: 'application/json' },
+    body: JSON.stringify(rpc),
+    signal: leaving.signal,
+  });
+  answer.catch(() => {});
+  return { answer, leave: () => leaving.abort() };
+}
+const settle = () => new Promise((resolve) => { setTimeout(resolve, 100); });
+
+test('a request whose agent has left does not keep its body in memory', async () => {
+  v8.setFlagsFromString('--expose-gc');
+  const gc = vm.runInNewContext('gc');
+  const stub = await silentHa();
+  const short = await startCoreRelay({ coreOrigin: stub.url, haToken: 'ha-token-never-in-a-message', authProbeEveryMs: 0 });
+  const token = short.issue('run-held', { basenames: [] });
+  const padded = { ...PING, params: { padding: 'p'.repeat(256 * 1024) } };
+  try {
+    gc();
+    const buffersAtStart = process.memoryUsage().arrayBuffers;
+    for (let i = 0; i < 40; i += 1) {
+      const call = postThrough(short, token, padded);
+      await soon(stub.received(i + 1), 'the request');
+      call.leave();
+      await settle();
+    }
+    gc();
+    await settle();
+    gc();
+    const kept = process.memoryUsage().arrayBuffers - buffersAtStart;
+    assert.equal(stub.open.filter((r) => !r.destroyed).length, 40, 'every request stays open');
+    assert.ok(kept < 2 * MIB, `${(kept / MIB).toFixed(1)} MiB kept of 10 MiB sent`);
+  } finally {
+    short.revoke(token);
+    short.close();
+    stub.close();
+  }
+});
+
+test('past the bound new requests are refused by name, and what runs is never closed', async () => {
+  const stub = await silentHa();
+  const short = await startCoreRelay({
+    coreOrigin: stub.url, haToken: 'ha-token-never-in-a-message', authProbeEveryMs: 0, maxUnansweredRequests: 2, log: (l) => logged.push(l),
+  });
+  const token = short.issue('run-bound', { basenames: [] });
+  try {
+    // One agent left and one stays: both are waiting, and both count.
+    const left = postThrough(short, token, PING);
+    await soon(stub.received(1), 'the first request');
+    left.leave();
+    await settle();
+    const stays = postThrough(short, token, PING);
+    await soon(stub.received(2), 'the second request');
+
+    const refused = await soon(postThrough(short, token, PING).answer, 'the refusal');
+    assert.equal(refused.status, 503);
+    assert.match((await refused.json()).error, /too many requests are waiting for Home Assistant/);
+    assert.equal(stub.open.length, 2, 'the refused request went nowhere');
+    assert.ok(stub.open.every((r) => !r.destroyed), 'a running tool was closed');
+    assert.ok(logged.some((l) => l.includes('too many requests are waiting')), logged.join('\n'));
+
+    // An answer that has started frees its place, though it has not finished.
+    stub.open[1].writeHead(200, { 'content-type': 'text/event-stream' });
+    stub.open[1].write(': working\n\n');
+    await settle();
+    const next = postThrough(short, token, PING);
+    await soon(stub.received(3), 'the next request');
+    stub.open[1].end();
+    assert.equal((await soon(stays.answer, 'the answer it stayed for')).status, 200);
+    sendJson(stub.open[2], { jsonrpc: '2.0', id: 1, result: {} });
+    assert.equal((await soon(next.answer, 'the next answer')).status, 200);
+  } finally {
+    short.revoke(token);
+    short.close();
+    stub.close();
+  }
+});
+
+test('an answer that starts for an agent that left keeps its place until it ends', async () => {
+  const stub = await silentHa();
+  const short = await startCoreRelay({
+    coreOrigin: stub.url, haToken: 'ha-token-never-in-a-message', authProbeEveryMs: 0, maxUnansweredRequests: 1,
+  });
+  const token = short.issue('run-started', { basenames: [] });
+  try {
+    const left = postThrough(short, token, PING);
+    await soon(stub.received(1), 'the request');
+    left.leave();
+    await settle();
+    stub.open[0].writeHead(200, { 'content-type': 'application/json' });
+    stub.open[0].write('{');
+    await settle();
+    assert.equal((await soon(postThrough(short, token, PING).answer, 'the refusal')).status, 503);
+    stub.open[0].end('}');
+    await settle();
+    const next = postThrough(short, token, PING);
+    await soon(stub.received(2), 'the next request');
+    sendJson(stub.open[1], { jsonrpc: '2.0', id: 1, result: {} });
+    assert.equal((await soon(next.answer, 'the next answer')).status, 200);
+  } finally {
+    short.revoke(token);
+    short.close();
+    stub.close();
+  }
+});
+
+test('a request that ends without an answer frees its place, however its agent left', async () => {
+  const dropping = http.createServer((req) => { req.resume(); req.once('end', () => req.socket.destroy()); });
+  await new Promise((resolve) => { dropping.listen(0, '127.0.0.1', resolve); });
+  const short = await startCoreRelay({
+    coreOrigin: `http://127.0.0.1:${dropping.address().port}`, haToken: 'ha-token-never-in-a-message', authProbeEveryMs: 0, maxUnansweredRequests: 1,
+  });
+  const token = short.issue('run-dropped', { basenames: [] });
+  try {
+    for (let i = 0; i < 40; i += 1) {
+      const call = postThrough(short, token, PING);
+      // Around the moment the connection drops, so the two ends close in either order.
+      setTimeout(() => call.leave(), i % 8);
+      await call.answer.catch(() => {});
+      await new Promise((resolve) => { setTimeout(resolve, 10); });
+    }
+    await settle();
+    const last = await soon(postThrough(short, token, PING).answer, 'the last call');
+    assert.equal(last.status, 502, 'it reached Home Assistant, which dropped it');
+  } finally {
+    short.revoke(token);
+    short.close();
+    dropping.close();
+    dropping.closeAllConnections();
+  }
+});
+
+test('a tool that outlives its agent is not waited for without end', async () => {
+  const short = await startCoreRelay({
+    coreOrigin: `http://127.0.0.1:${ha.address().port}`,
+    haToken: 'ha-token-never-in-a-message',
+    abandonedRequestMs: 300,
+  });
+  const token = short.issue('run-gone', { basenames: ['GetLiveContext'] });
+  let closed;
+  let arrived;
+  const asked = new Promise((resolve) => { arrived = resolve; });
+  answerRpc = (rpc, res) => {
+    closed = new Promise((resolve) => { res.once('close', resolve); });
+    arrived();
+  };
+  const leaving = new AbortController();
+  const call = fetch(`${short.url}/api/mcp`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', accept: 'application/json' },
+    body: JSON.stringify(CALL),
+    signal: leaving.signal,
+  }).catch(() => {});
+  try {
+    await soon(asked, 'the stub');
+    leaving.abort();
+    await call;
+    await soon(closed, 'the request closing at the limit');
+  } finally {
+    short.revoke(token);
+    short.close();
+  }
 });
 
 test('an agent gone while the answer arrives gives its share back on every order', async () => {
