@@ -10,8 +10,19 @@ const http = require('node:http');
 const net = require('node:net');
 const v8 = require('node:v8');
 const vm = require('node:vm');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { useAdapter } = require('../server/adapter-contract');
+const { createNeutralAdapter } = require('./fixtures/neutral-adapter');
+
+const neutral = createNeutralAdapter();
+useAdapter(neutral.adapter, neutral.branding);
+
 const { startCoreRelay } = require('../server/prompt/core-relay');
 const { resolveAnswer } = require('../server/prompt/targets');
+const { createPromptApp } = require('../server/prompt/server');
+const { TARGET_TEXT } = require('../server/prompt/notices');
 
 const MIB = 1024 * 1024;
 const BOUND_MIB = 16;
@@ -332,10 +343,10 @@ for (const text of ['[,]', '[{},]', '[{}{}]', '[,{}]', '[{},,{}]']) {
 // --- An answer that breaks on the way to an agent ends what the agent is reading.
 
 // A connection opened by hand: `res` stays paused until the test reads it.
-function openAgent(rpc, headers = {}) {
-  const token = relay.issue('run-open', { basenames: ['GetLiveContext'] });
+function openAgent(rpc, headers = {}, through = relay) {
+  const token = through.issue('run-open', { basenames: ['GetLiveContext'] });
   const body = JSON.stringify(rpc);
-  const req = http.request(`${relay.url}/api/mcp`, {
+  const req = http.request(`${through.url}/api/mcp`, {
     method: 'POST',
     headers: {
       authorization: `Bearer ${token}`,
@@ -350,7 +361,7 @@ function openAgent(rpc, headers = {}) {
     req.once('error', reject);
   });
   req.end(body);
-  return { req, answered, done: () => relay.revoke(token) };
+  return { req, answered, done: () => through.revoke(token) };
 }
 
 const readAll = (res) => new Promise((resolve, reject) => {
@@ -409,7 +420,7 @@ test('an agent reading a refused answer sees it end when Home Assistant cuts it'
 const LARGE_SHARE = Math.ceil(HELD_MIB * 0.6);
 const shareBody = (id) => JSON.stringify(toolAnswer(id, 'z'.repeat(LARGE_SHARE * MIB)));
 
-test('answers at the same time share one budget, until the first is delivered', async () => {
+test('answers to agents share one budget until delivered; the core\'s own are not refused by them', async () => {
   const body = shareBody(5);
   answerRpc = (rpc, res) => (rpc.method === 'tools/list' ? defaultRpc(rpc, res) : sendJson(res, body));
   // The first answer is read from Home Assistant and waits on an agent that is
@@ -423,12 +434,12 @@ test('answers at the same time share one budget, until the first is delivered', 
     assert.equal(second.status, 502);
     assert.match(second.text, /too large/);
 
-    const acted = await soon(relay.act('run')('HassTurnOn', {}), 'an action');
-    assert.equal(acted.ok, false);
-    assert.match(acted.error, /too large/);
+    const acted = await soon(relay.act('run')('HassTurnOn', {}), 'an action', 20000);
+    assert.equal(acted.ok, true, acted.error);
 
     answerStates = (r) => sendJson(r, JSON.stringify([{ entity_id: 'sensor.big', attributes: { pad: 'z'.repeat(LARGE_SHARE * MIB) } }]));
-    await assert.rejects(soon(relay.lookup('run').states(), 'a states list'), /too large/);
+    const list = await soon(relay.lookup('run').states(), 'a states list', 20000);
+    assert.equal(list[0].entity_id, 'sensor.big');
 
     res.resume();
     assert.equal(await soon(readAll(res), 'the first answer, read', 20000), body);
@@ -872,4 +883,239 @@ test('an answer that stalls on its way to an agent is given up on', async () => 
   const body = shareBody(5);
   answerRpc = (rpc, res) => sendJson(res, body);
   assert.equal((await soon(agentCall(CALL), 'the next answer', 20000)).status, 200);
+});
+
+test('the core\'s own answers share a budget of their own', async () => {
+  let stalled = null;
+  answerRpc = (rpc, res) => {
+    if (rpc.method === 'tools/list') return defaultRpc(rpc, res);
+    if (stalled === null) {
+      stalled = res;
+      return writeAndStall(res, '{"jsonrpc":"2.0"', LARGE_SHARE);
+    }
+    return sendJson(res, shareBody(rpc.id));
+  };
+  const act = relay.act('run');
+  const first = act('HassTurnOn', {});
+  await new Promise((resolve) => { setTimeout(resolve, 500); });
+  const second = await soon(act('HassTurnOn', {}), 'the second action', 20000);
+  assert.equal(second.ok, false);
+  assert.match(second.error, /too large/);
+  stalled.destroy();
+  assert.equal((await soon(first, 'the first action')).ok, false);
+});
+
+// --- An event stream holds what it has not delivered, and not for ever.
+
+const SSE = { accept: 'application/json, text/event-stream' };
+const sseOf = (id, pad) => `data: ${JSON.stringify(toolAnswer(id, pad))}\n\n`;
+const shortRelay = (options) => startCoreRelay({
+  coreOrigin: `http://127.0.0.1:${ha.address().port}`,
+  haToken: 'ha-token-never-in-a-message',
+  log: (line) => logged.push(line),
+  ...options,
+});
+const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
+const streamHead = (res) => res.writeHead(200, { 'content-type': 'text/event-stream' });
+
+test('a whole event an agent has not read still counts against the budget', async () => {
+  const event = sseOf(5, 'z'.repeat(LARGE_SHARE * MIB));
+  answerRpc = (rpc, res) => { streamHead(res); res.end(event); };
+  const first = openAgent(CALL, SSE);
+  try {
+    const res = await soon(first.answered, 'the stream');
+    await sleep(500);
+    const body = shareBody(5);
+    answerRpc = (rpc, r) => sendJson(r, body);
+    const second = await soon(agentCall(CALL), 'the second answer', 20000);
+    assert.equal(second.status, 502);
+    assert.match(second.text, /too large/);
+    res.resume();
+    assert.equal(await soon(readAll(res), 'the stream, read', 20000), event);
+    // Delivered, it no longer counts.
+    assert.equal((await soon(agentCall(CALL), 'the third answer', 20000)).status, 200);
+  } finally {
+    first.req.destroy();
+    first.done();
+  }
+});
+
+test('an agent not reading an event loses the stream at the deadline, and its share', async () => {
+  const short = await shortRelay({ deliveryDeadlineMs: 1000 });
+  let closed;
+  answerRpc = (rpc, res) => {
+    closed = new Promise((resolve) => { res.once('close', resolve); });
+    streamHead(res);
+    res.write(sseOf(5, 'z'.repeat(LARGE_SHARE * MIB)));
+  };
+  const open = openAgent(CALL, SSE, short);
+  try {
+    await soon(open.answered, 'the stream');
+    await soon(closed, 'the upstream closing at the deadline', 5000);
+    const body = shareBody(5);
+    answerRpc = (rpc, r) => sendJson(r, body);
+    assert.equal((await soon(agentCall(CALL, short), 'the next answer', 20000)).status, 200);
+  } finally {
+    open.req.destroy();
+    open.done();
+    short.close();
+  }
+});
+
+test('an event Home Assistant stops halfway ends the stream and gives its share back', async () => {
+  const short = await shortRelay({ answerStallMs: 300 });
+  answerRpc = (rpc, res) => {
+    streamHead(res);
+    res.write(`data: ${'z'.repeat(LARGE_SHARE * MIB)}`);
+  };
+  const open = openAgent(CALL, SSE, short);
+  try {
+    // No event was complete, so the end may come before any header reached the agent.
+    await assert.rejects(soon(open.answered.then((res) => {
+      res.resume();
+      return readAll(res);
+    }), 'the end of the stream', 5000), /cut off|aborted|hang up/);
+    assert.ok(logged.some((l) => l.includes('stopped answering')), logged.join('\n'));
+    const body = shareBody(5);
+    answerRpc = (rpc, r) => sendJson(r, body);
+    assert.equal((await soon(agentCall(CALL, short), 'the next answer', 20000)).status, 200);
+  } finally {
+    open.req.destroy();
+    open.done();
+    short.close();
+  }
+});
+
+test('a stream with no event in progress may be silent for as long as a tool takes', async () => {
+  const short = await shortRelay({ answerStallMs: 200, deliveryDeadlineMs: 200 });
+  const start = sseOf(1, 'working');
+  const late = sseOf(5, 'done');
+  answerRpc = (rpc, res) => {
+    streamHead(res);
+    res.write(start);
+    setTimeout(() => res.end(late), 1000);
+  };
+  const open = openAgent(CALL, SSE, short);
+  try {
+    const res = await soon(open.answered, 'the stream');
+    res.resume();
+    assert.equal(await soon(readAll(res), 'the whole stream'), start + late);
+  } finally {
+    open.req.destroy();
+    open.done();
+    short.close();
+  }
+});
+
+test('an upstream paused for a slow agent is not taken for a stalled one', async () => {
+  const short = await shortRelay({ answerStallMs: 1000 });
+  const big = sseOf(1, 'z'.repeat(LARGE_SHARE * MIB));
+  answerRpc = (rpc, res) => {
+    streamHead(res);
+    res.write(`${big}data: {"jsonrpc":"2.0","id":5,`);
+    setTimeout(() => res.end('"result":{}}\n\n'), 2000);
+  };
+  const open = openAgent(CALL, SSE, short);
+  try {
+    const res = await soon(open.answered, 'the stream');
+    await sleep(1500);
+    res.resume();
+    const text = await soon(readAll(res), 'the whole stream', 20000);
+    assert.equal(text, `${big}data: {"jsonrpc":"2.0","id":5,"result":{}}\n\n`);
+  } finally {
+    open.req.destroy();
+    open.done();
+    short.close();
+  }
+});
+
+test('one event nearly the size of the budget reaches an agent, whole', async () => {
+  const event = sseOf(5, 'z'.repeat((BOUND_MIB - 1) * MIB));
+  answerRpc = (rpc, res) => { streamHead(res); res.end(event); };
+  const open = openAgent(CALL, SSE);
+  try {
+    const res = await soon(open.answered, 'the stream');
+    res.resume();
+    assert.equal(await soon(readAll(res), 'the event', 20000), event);
+  } finally {
+    open.req.destroy();
+    open.done();
+  }
+});
+
+// --- What the person asking is told.
+
+async function askThroughApi() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'answer-size-'));
+  const app = createPromptApp({
+    token: 'contract-token-0123456789abcdef',
+    claudeBin: path.join(dir, 'none'),
+    claudeSettings: 's',
+    usageBin: path.join(dir, 'none'),
+    haConfigured: true,
+    model: 'm',
+    workDir: dir,
+    addonVersion: 't',
+    redact: (text) => text,
+    audit: () => {},
+    lookupFor: (runId) => relay.lookup(runId),
+    runAgent: async () => ({
+      status: 'ok',
+      text: 'Turning it off?',
+      proposal: { summary: 'Off', intents: [{ intent: 'HassTurnOff', targets: ['Bedroom'], data: {}, risk: 'low' }] },
+      automation: null,
+      toolsUsed: [],
+      numTurns: 1,
+    }),
+  });
+  const server = await new Promise((resolve) => { const s = app.listen(0, '127.0.0.1', () => resolve(s)); });
+  try {
+    const res = await fetch(`http://127.0.0.1:${server.address().port}/api/prompt`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: 'Bearer contract-token-0123456789abcdef' },
+      body: JSON.stringify({ prompt: 'turn off the bedroom', mode: 'read', language: 'en' }),
+    });
+    return await res.json();
+  } finally {
+    server.closeAllConnections();
+    server.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+const OVER_BOUND = {
+  'the tool catalog': () => {
+    answerRpc = (rpc, res) => writeOverBound(res, '{"jsonrpc":"2.0"');
+  },
+  'the live context': () => {
+    answerRpc = (rpc, res) => (rpc.method === 'tools/list' ? defaultRpc(rpc, res) : writeOverBound(res, '{"jsonrpc":"2.0"'));
+  },
+  'the states list': () => {
+    answerStates = (res) => writeOverBound(res, '[', STATES_BOUND_MIB);
+  },
+};
+for (const [what, arrange] of Object.entries(OVER_BOUND)) {
+  test(`someone asking past the bound of ${what} is told it is too large, not to try again`, async () => {
+    arrange();
+    const body = await soon(askThroughApi(), 'the answer', 30000);
+    assert.equal(body.proposal, null, JSON.stringify(body));
+    assert.match(body.text, /too large/);
+    assert.doesNotMatch(body.text, /try again/i);
+  });
+}
+
+test('a lookup past the bound is recorded as that, not as a failure', async () => {
+  answerRpc = (rpc, res) => (rpc.method === 'tools/list' ? defaultRpc(rpc, res) : writeOverBound(res, '{"jsonrpc":"2.0"'));
+  await assert.rejects(soon(relay.lookup('run').live('Bedroom'), 'the lookup', 30000), /too large/);
+  assert.ok(recorded.some((l) => l.includes('(lookup, answer too large)')), recorded.join('\n'));
+});
+
+test('every language says too large without asking to try again', () => {
+  for (const [lang, table] of Object.entries(TARGET_TEXT)) {
+    assert.equal(typeof table.too_large, 'function', lang);
+    const said = table.too_large();
+    const retry = table.unavailable().split('. ').pop();
+    assert.ok(!said.includes(retry), `${lang}: ${said}`);
+    assert.ok(said.includes('Home Assistant'), `${lang}: ${said}`);
+  }
 });

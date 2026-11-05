@@ -642,16 +642,24 @@
     document.querySelectorAll('.menu').forEach((menu) => menu.classList.add('hidden'));
   }
 
+  // Puts a visible menu at a point, moved as far as it takes to stay on the screen.
+  function placeMenu(menu, left, top) {
+    const w = menu.offsetWidth || 210;
+    const h = menu.offsetHeight || 80;
+    menu.style.right = 'auto';
+    menu.style.left = `${Math.max(4, Math.min(left, window.innerWidth - w - 4))}px`;
+    menu.style.top = `${Math.max(4, Math.min(top, window.innerHeight - h - 4))}px`;
+  }
+
   // Menus are position:fixed (the scrollable toolbar would clip absolute
-  // children) and anchored to their button on open.
+  // children) and open under their button, right edges together.
   function toggleMenu(menu, anchor) {
     const wasHidden = menu.classList.contains('hidden');
     closeMenus();
     if (wasHidden) {
-      const rect = anchor.getBoundingClientRect();
-      menu.style.top = `${rect.bottom + 4}px`;
-      menu.style.right = `${Math.max(4, window.innerWidth - rect.right)}px`;
       menu.classList.remove('hidden');
+      const rect = anchor.getBoundingClientRect();
+      placeMenu(menu, rect.right - menu.offsetWidth, rect.bottom + 4);
     }
   }
 
@@ -848,17 +856,11 @@
 
   /* ---------------- right-click menu ---------------- */
 
-  // Anchor the shared `.menu` component at a point (the cursor) and keep it on
-  // screen. Unlike the toolbar menus it is positioned by left/top, not right.
+  // The shared `.menu` component at a point (the cursor).
   function openContextMenu(x, y) {
     closeMenus();
-    const m = els.ctxMenu;
-    m.classList.remove('hidden');
-    const w = m.offsetWidth || 210;
-    const h = m.offsetHeight || 80;
-    m.style.right = 'auto';
-    m.style.left = `${Math.max(4, Math.min(x, window.innerWidth - w - 4))}px`;
-    m.style.top = `${Math.max(4, Math.min(y, window.innerHeight - h - 4))}px`;
+    els.ctxMenu.classList.remove('hidden');
+    placeMenu(els.ctxMenu, x, y);
   }
 
   els.terminal.addEventListener('contextmenu', (e) => {
@@ -1318,4 +1320,6 @@
   refreshAlertsBadge();
   setInterval(refreshAlertsBadge, 60000);
   connect();
+  // The page's load check (index.html): this script got as far as its last line.
+  window.consoleScriptRan = true;
 })();

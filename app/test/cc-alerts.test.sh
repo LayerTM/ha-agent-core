@@ -316,6 +316,27 @@ case "${e}" in *"${note}"*) fail "offline alert off must stay silent (got: ${e})
 e="$(stderr_of '{"proactive_alerts": false, "alert_offline": true, "alert_offline_entities": []}')"
 case "${e}" in *"${note}"*) fail "master switch off must stay silent (got: ${e})";; *) pass "master switch off stays silent";; esac
 
+# A state file that cannot be opened loses that cycle's memory and says nothing:
+# the shell's own error must not reach the log. (bash opens redirections left to
+# right, so stderr is silenced before the file is opened.)
+printf '{"proactive_alerts": true}\n' > "${work}/options.json"
+: > "${work}/alerts-state.json"
+# The script sets its own PATH, so an exported function stands in for mktemp.
+out="$(
+    mktemp() { printf '%s\n' "${work}/no-such-directory/state"; }
+    export -f mktemp
+    run alerts-anomalies.json "23:30" 2>&1
+)"
+case "${out}" in *"unexpected stderr"*) fail "state file that cannot be opened: ${out}";; *) pass "state file that cannot be opened stays out of the log";; esac
+
+: > "${work}/alerts-state.json"
+out="$(
+    mktemp() { echo 'mktemp: failed' >&2; return 1; }
+    export -f mktemp
+    run alerts-anomalies.json "23:30" 2>&1
+)"
+case "${out}" in *"unexpected stderr"*) fail "no temporary file to be had: ${out}";; *) pass "no temporary file to be had stays out of the log";; esac
+
 echo
 if [ "${fails}" -eq 0 ]; then
     echo "PASS: all cc-alerts checks passed"

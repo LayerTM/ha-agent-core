@@ -84,6 +84,8 @@ function sendError(res, code, { message, ...extra } = {}) {
   return res.status(status).json({ error: message ?? fixed, code, ...extra });
 }
 
+const PROTECT_SECRETS_LEVELS = new Set(['kernel', 'cli-only', 'off']);
+
 const BODY_KEYS = new Set([
   'prompt', 'mode', 'conversation_id', 'intents', 'confirmation', 'image_entity', 'stream', 'language',
   'surface', 'edit_automation', 'memory', 'web',
@@ -909,6 +911,10 @@ function createPromptApp({
       // from the start rather than from the first chat; null without Home
       // Assistant or before the first answer.
       ha_mcp_auth: haConfigured ? haMcpAuth() : null,
+      // How far the add-on's secrets guard reaches, as the start of this service
+      // found it; null for an add-on without one.
+      protect_secrets_level: PROTECT_SECRETS_LEVELS.has(process.env.PROTECT_SECRETS_LEVEL)
+        ? process.env.PROTECT_SECRETS_LEVEL : null,
       // Is what a run does to the home still being recorded? Published rather
       // than inferred: while this is false a write is refused, and the errno
       // says whose problem it is (EROFS/EACCES a configuration, ENOSPC a disk).
@@ -1460,7 +1466,7 @@ function createPromptApp({
         } catch (err) {
           console.error(`[prompt] device lookup failed (${caller}): ${redact(err.message)}`);
           resolved = { proposal: null, automation: null };
-          problems = [{ problem: 'unavailable', ref: '', candidates: [] }];
+          problems = [{ problem: err.tooLarge ? 'too_large' : 'unavailable', ref: '', candidates: [] }];
         }
         if (problems.length > 0) answerText = targetNotice(language, problems);
       }

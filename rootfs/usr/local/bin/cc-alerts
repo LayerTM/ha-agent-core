@@ -229,8 +229,9 @@ run_cycle() {
 
     # Persist the new active set (0600 — no secrets, but keep it tidy/private).
     local tmp
-    tmp="$(mktemp)"
-    if printf '%s\n' "${result}" | jq -c '{active: .active, items: .items}' > "${tmp}" 2>/dev/null; then
+    tmp="$(mktemp 2>/dev/null)"
+    # stderr first: bash applies redirections left to right, and the file may not open.
+    if printf '%s\n' "${result}" | jq -c '{active: .active, items: .items}' 2>/dev/null > "${tmp}"; then
         chmod 600 "${tmp}"
         mv "${tmp}" "${STATE}"
     else

@@ -67,11 +67,13 @@ const LOOKUP_TIMEOUT_MS = 10000;
 // of anything.
 //
 // MAX_ANSWERS_HELD_BYTES is one budget for the whole process, shared by every
-// answer being read or delivered at the same moment, so that two runs cannot
-// multiply it. An answer that would pass it is refused as too large, at once. A
-// JSON answer costs up to about seven times its bytes while it is parsed (the
-// bytes, their text, what that parses to), so this keeps the relay near 160 MiB at
-// its worst on a small host. A tool answer carries only what is exposed to Assist.
+// answer being read or delivered to an agent at the same moment, so that two runs
+// cannot multiply it. An answer that would pass it is refused as too large, at once.
+// The core's own answers (a lookup, an action) draw on a second budget of the same
+// size: an agent may keep its share for as long as the delivery deadline, and that
+// must not refuse the core a question of its own. A JSON answer costs up to about
+// seven times its bytes while it is parsed (the bytes, their text, what that parses
+// to). A tool answer carries only what is exposed to Assist.
 //
 // MAX_STATES_BYTES is how much of one states list is read at all. The list is not
 // held (state-names.js), so it can pass the budget's size. /api/states carries
@@ -90,31 +92,40 @@ const ABANDONED_REQUEST_MS = 60 * 60 * 1000;
 // it. Home Assistant gives up on a request after 60 seconds and the core runs at most
 // two agents at once: this is room for 32 parallel calls from each of them.
 const MAX_UNANSWERED_REQUESTS = 64;
+// How long Home Assistant may go silent in the middle of an answer that holds a share.
+const ANSWER_STALL_MS = 10000;
 const answerTooLarge = (what) => `Home Assistant's answer to ${what} is too large (over ${MAX_ANSWERS_HELD_BYTES / MIB} MiB, counting answers being read at the same time)`;
 const statesTooLarge = () => `Home Assistant's states list is too large (over ${MAX_STATES_BYTES / MIB} MiB)`;
+// A refusal the caller can tell from an answer that failed.
+const tooLargeError = (message) => Object.assign(new Error(message), { tooLarge: true });
 
-let answerBytesHeld = 0;
-// One answer's share of the budget. `take` is false when there is no room for that
-// many more bytes, and then nothing is taken; `release` gives back all of it, may
-// be called any number of times, and is final: a released share takes nothing more,
-// so no order of events can leave bytes charged with nobody left to give them back.
-function answerHold() {
-  let mine = 0;
-  let released = false;
-  return {
-    take(bytes) {
-      if (released || answerBytesHeld + bytes > MAX_ANSWERS_HELD_BYTES) return false;
-      answerBytesHeld += bytes;
-      mine += bytes;
-      return true;
-    },
-    release() {
-      released = true;
-      answerBytesHeld -= mine;
-      mine = 0;
-    },
+// A budget, and how to open one answer's share of it. `take` is false when there is
+// no room for that many more bytes, and then nothing is taken; a negative count gives
+// bytes back. `release` gives back all of it, may be called any number of times, and
+// is final: a released share takes nothing more, so no order of events can leave
+// bytes charged with nobody left to give them back.
+function answerBudget() {
+  let held = 0;
+  return () => {
+    let mine = 0;
+    let released = false;
+    return {
+      take(bytes) {
+        if (released || held + bytes > MAX_ANSWERS_HELD_BYTES) return false;
+        held += bytes;
+        mine += bytes;
+        return true;
+      },
+      release() {
+        released = true;
+        held -= mine;
+        mine = 0;
+      },
+    };
   };
 }
+const agentAnswerHold = answerBudget();
+const ownAnswerHold = answerBudget();
 
 // Calls `onStall` when `stream` has delivered nothing for `ms`, until it closes or
 // ends. A timer of its own, not the socket's: that socket goes back to the pool.
@@ -296,7 +307,7 @@ function readBody(stream, limit, done) {
 // until it is parsed; one that passes the budget, or breaks, gives it back as its
 // connection closes.
 function readJsonAnswer(stream, done) {
-  const hold = answerHold();
+  const hold = ownAnswerHold();
   stream.once('close', hold.release);
   readAdmitted(stream, hold.take, (raw) => {
     let json;
@@ -310,7 +321,7 @@ function readJsonAnswer(stream, done) {
 // The states list the same way, reduced to what a lookup reads as it arrives.
 function readStatesAnswer(stream, done) {
   const names = createStateNames();
-  const hold = answerHold();
+  const hold = ownAnswerHold();
   stream.once('close', hold.release);
   let size = 0;
   let settled = false;
@@ -365,6 +376,7 @@ function deny(res, status, message) {
  * @param {number} [opts.deliveryDeadlineMs]  How long an agent has to read one answer.
  * @param {number} [opts.abandonedRequestMs]  How long a tool may outlive the agent that called it.
  * @param {number} [opts.maxUnansweredRequests]  How many POSTs may wait for Home Assistant to answer.
+ * @param {number} [opts.answerStallMs]  How long Home Assistant may go silent mid-answer.
  * @returns {Promise<{
  *   url: string, port: number, issue: (runId: string) => string,
  *   revoke: (token: string) => void, close: () => void,
@@ -390,6 +402,7 @@ async function startCoreRelay({
   deliveryDeadlineMs = DELIVERY_DEADLINE_MS,
   abandonedRequestMs = ABANDONED_REQUEST_MS,
   maxUnansweredRequests = MAX_UNANSWERED_REQUESTS,
+  answerStallMs = ANSWER_STALL_MS,
 }) {
   // Whether Home Assistant accepts the add-on's token on the MCP path, from the
   // latest answer that said so: 'ok', 'unauthorized', 'unreachable' (a probe got
@@ -568,7 +581,7 @@ async function startCoreRelay({
     // What this answer holds of the budget. The response owns it: every way an
     // answer ends, delivered, refused, broken or abandoned, closes the response, and
     // the listener is in place before anything can be read or anyone can leave.
-    const share = answerHold();
+    const share = agentAnswerHold();
     let answered = false;
     // Not the body: this outlives its sending, and the handler below must not keep it.
     const mayRunTool = body !== null;
@@ -672,24 +685,76 @@ async function startCoreRelay({
           res.writeHead(upRes.statusCode, out);
           upRes.setEncoding('utf8');
           // Home Assistant waits for an agent that is not reading, so what piles up
-          // here is only the event still being read, and that counts as held.
-          const sse = createSseFilter((chunk) => { if (!res.write(chunk)) upRes.pause(); }, observe);
-          res.on('drain', () => upRes.resume());
+          // here is the event still being read and what the socket has not taken yet.
+          // Both count as held, and neither side may stall for long while holding
+          // them. A stream with nothing held may be silent for as long as a tool takes.
+          let unflushed = 0;
+          let charged = 0;
+          let deliveryTimer = null;
+          let stallTimer = null;
+          const settle = () => {
+            const now = sse.held() + unflushed;
+            const room = share.take(now - charged);
+            if (room) charged = now;
+            return room;
+          };
+          // The deadline runs from the moment the socket is behind until it has
+          // caught up: only then does `unflushed` reach zero, however busy it looks.
+          const write = (chunk) => {
+            const bytes = Buffer.byteLength(chunk);
+            if (unflushed === 0) {
+              deliveryTimer = setTimeout(() => res.destroy(), deliveryDeadlineMs);
+              deliveryTimer.unref();
+            }
+            unflushed += bytes;
+            const room = res.write(chunk, () => {
+              unflushed -= bytes;
+              if (unflushed === 0) clearTimeout(deliveryTimer);
+              settle();
+            });
+            if (!room) upRes.pause();
+          };
+          // Paused, Home Assistant is waiting for the agent, not silent.
+          const watchHeldEvent = () => {
+            clearTimeout(stallTimer);
+            if (sse.held() === 0 || upRes.isPaused()) return;
+            stallTimer = setTimeout(() => {
+              stopped();
+              upRes.off('error', stopped);
+              upRes.destroy();
+            }, answerStallMs);
+            stallTimer.unref();
+          };
+          const sse = createSseFilter(write, observe);
+          res.on('drain', () => {
+            upRes.resume();
+            watchHeldEvent();
+          });
+          res.once('close', () => {
+            clearTimeout(deliveryTimer);
+            clearTimeout(stallTimer);
+          });
           upRes.on('data', (chunk) => {
             if (res.destroyed) return;
-            const before = sse.held();
             sse.push(chunk);
-            if (share.take(sse.held() - before)) return;
+            if (settle()) {
+              watchHeldEvent();
+              return;
+            }
             log(`relay upstream: ${answerTooLarge(`${req.method} ${pathname}`)}`);
             res.destroy();
           });
-          upRes.on('end', () => { sse.end(); res.end(); });
+          upRes.on('end', () => {
+            clearTimeout(stallTimer);
+            sse.end();
+            res.end();
+          });
         } else if (type.startsWith('application/json')) {
           // Its share is held until the agent has the answer: a slow reader keeps the
           // bytes here. So neither side may stall for long while holding it, or one
           // connection could keep every other answer refused. No limit runs before
           // the headers: nothing is held yet, and a tool may rightly take its time.
-          watchStall(upRes, LOOKUP_TIMEOUT_MS, () => {
+          watchStall(upRes, answerStallMs, () => {
             stopped();
             upRes.off('error', stopped);
             upRes.destroy();
@@ -841,7 +906,7 @@ async function startCoreRelay({
     }
     async function rpc(method, params) {
       const { status, json, tooLarge } = await request(method, params);
-      if (tooLarge) throw new Error(answerTooLarge(method));
+      if (tooLarge) throw tooLargeError(answerTooLarge(method));
       if (status !== 200 || !json || json.error || !json.result) {
         throw new Error(`Home Assistant answered ${method} with ${status}`);
       }
@@ -948,7 +1013,7 @@ async function startCoreRelay({
         try {
           result = await ha.callTool(call.name, args);
         } catch (err) {
-          record(describeCall(call, ' (lookup, failed)'));
+          record(describeCall(call, err.tooLarge ? ' (lookup, answer too large)' : ' (lookup, failed)'));
           throw err;
         }
         const text = toolText(result);
@@ -968,7 +1033,7 @@ async function startCoreRelay({
         async states() {
           const { status, json, tooLarge, why } = await coreRequest('GET', '/api/states', undefined, readStatesAnswer);
           if (status !== 200) throw new Error(`Home Assistant answered the states list with ${status}`);
-          if (tooLarge) throw new Error(why());
+          if (tooLarge) throw tooLargeError(why());
           if (json === null) throw new Error("Home Assistant's states list is not a list");
           return json;
         },

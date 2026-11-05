@@ -489,6 +489,12 @@ only by a run, a lookup, or the next start. A check that gets no answer never
 overwrites an answer a run got while it was in flight. A change is written to
 the add-on log; the token never is.
 
+`GET /api/status` publishes `protect_secrets_level`, how far the add-on's secrets
+guard reaches: `"kernel"`, `"cli-only"`, `"off"`, or `null` for an add-on without
+one. The core reads it from the `PROTECT_SECRETS_LEVEL` environment variable the
+guard starts the service with. The files the guard protects are listed once, in
+`rootfs/usr/share/agent-core/protected-paths.txt`.
+
 It identifies the core with `core_version` and `core_commit`: the release and the
 commit the running archive was packed from, as `app/server/core-version.json`
 states them — the file the packer writes into the archive, since an add-on keeps

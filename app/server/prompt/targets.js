@@ -23,7 +23,8 @@
 //   ambiguous    it finds several, or the device it found is not unique;
 //   unpinned     it finds one, and no candidate is it (an alias, most likely);
 //   unavailable  a lookup failed, or the answer names more devices, or takes
-//                longer, than one answer may.
+//                longer, than one answer may;
+//   too_large    Home Assistant's answer to a lookup is past what may be read.
 //
 // Nothing here ever returns an id Home Assistant did not match.
 
