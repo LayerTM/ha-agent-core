@@ -3,11 +3,13 @@ name: Dependabot auto-merge
 # Merges a Dependabot pull request for a non-major update once all required
 # checks pass, but only when the install code it would bring is the reviewed one.
 #
-# Safe use of pull_request_target: the job checks out the BASE branch only and
-# runs the base branch's tools/check-install-scripts.js with the base branch's
-# install-scripts.json records. From the pull request it reads nothing but the
-# manifests and lockfiles, fetched as data through the API; none of its code is
-# checked out or run.
+# Trigger: pull_request. A run started by Dependabot gets a read-only token and
+# no ordinary secrets unless the workflow raises the token's scopes with the
+# permissions block below, which it does for exactly what it needs. The job
+# checks out the BASE commit only and runs that commit's
+# tools/check-install-scripts.js with its install-scripts.json records. From the
+# pull request it reads nothing but the manifests and lockfiles, fetched as data
+# through the API; none of its code is checked out or run.
 #
 # Every event on a Dependabot pull request, whoever caused it, first turns
 # auto-merge off; nothing before that can fail. Only then is the new head judged
@@ -25,7 +27,7 @@ name: Dependabot auto-merge
 # what measures a bot merge.
 
 on:
-  pull_request_target:
+  pull_request:
     types: [opened, synchronize, reopened]
 
 permissions:
@@ -60,9 +62,9 @@ jobs:
       - name: Fetch Dependabot metadata
         id: metadata
         if: ${{ github.actor == 'dependabot[bot]' }}
-        # Pinned to an immutable commit SHA (this job runs with write scope in a
-        # pull_request_target context). The version comment lets Dependabot's
-        # github-actions updater keep the pin current.
+        # Pinned to an immutable commit SHA (this job runs with write scope). The
+        # version comment lets Dependabot's github-actions updater keep the pin
+        # current.
         uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
 
       - name: Check out the base branch
