@@ -256,13 +256,14 @@ an error that says why. The count is shared: one agent can fill it for another, 
 long as Home Assistant takes to answer. The core's own lookups and confirmed actions
 do not count.
 
-Two things do stop a running tool, wherever it has got to, and a device whose last step
-had not come stays as it is. Home Assistant gives one call 60 seconds (measured on
-2026.10.4 and 2026.11.0), whether its agent stayed or left: a script that takes longer
-is cancelled, the agent gets a tool error that says so and that the tool may have stopped
-halfway, and the audit marks it `(failed)`. And a tool still running when the add-on
-stops is cancelled, because the process closes its request; the log says how many
-requests were open.
+Home Assistant gives one call 60 seconds (measured on 2026.10.4 and 2026.11.0),
+whether its agent stayed or left: a script that takes longer is cancelled wherever it
+has got to, the agent gets a tool error that says so and that the tool may have stopped
+halfway, and the audit marks it `(failed)`; a device whose last step had not come stays
+as it is. Stopping the add-on does not stop a script that a confirmed action or a console
+service call started: those return at once or complete in Home Assistant, and the script
+runs on (measured on 2026.10.4). When the add-on stops, the core closes its requests
+still open to Home Assistant and the log says how many.
 
 An answer from Home Assistant past what may be held is refused as too large, and that
 says nothing about what it answered: a confirmed action whose answer is too large may
