@@ -34,9 +34,9 @@ uses [Semantic Versioning](https://semver.org/).
 - Only a tool call stays open for its tool and counts towards the 64 waiting for Home
   Assistant. Anything else closes when its agent leaves and is never refused for that.
 - Stopping the relay closes the requests still open to Home Assistant at once and logs
-  how many, so they cannot hold up the process. A tool still running on one of them is
-  cancelled, as a script was when measured, and a device whose last step had not come
-  stays as it is.
+  how many, so they cannot hold up the process. Stopping the add-on does not stop a
+  script started by a confirmed action or a console service call: those return at once
+  or complete in Home Assistant, and the script runs on (measured on 2026.10.4).
 - Answers about many devices that were each very large could run the server out of
   memory, because what a lookup remembered counted against nothing. It now has its own
   budget of 16 MiB, and an answer that does not fit is asked for again.
