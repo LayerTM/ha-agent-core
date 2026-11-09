@@ -40,6 +40,12 @@ function stateName(state) {
 }
 const normalize = (name) => name.trim().toLowerCase();
 
+// The lines of a live-context answer that say something. Home Assistant's YAML
+// ends with a newline, so the last device of an answer is followed by an empty
+// line and every other device is not: a blank line, or blanks at the end of one,
+// says where a block sits in the answer, never which device it is.
+const contentLines = (text) => text.split('\n').map((line) => line.trimEnd()).filter((line) => line !== '');
+
 // What identifies a device in the live context: its names, domain and areas.
 // Its state and attributes are left out, because they may change between two
 // questions about the same device.
@@ -47,7 +53,7 @@ const IDENTITY_KEYS = new Set(['names', 'domain', 'areas']);
 function identity(text) {
   const kept = [];
   let key = null;
-  for (const line of text.split('\n')) {
+  for (const line of contentLines(text)) {
     const top = /^(?:- | {2})([A-Za-z_]+):/.exec(line);
     if (top) key = top[1];
     else if (/^\S/.test(line)) key = null;
@@ -58,7 +64,7 @@ function identity(text) {
 // The live context's device blocks, one text per device.
 function deviceBlocks(text) {
   const blocks = [];
-  for (const line of text.split('\n')) {
+  for (const line of contentLines(text)) {
     if (line.startsWith('- ')) blocks.push([line]);
     else if (blocks.length > 0) blocks[blocks.length - 1].push(line);
   }
@@ -66,7 +72,7 @@ function deviceBlocks(text) {
 }
 const deviceCount = (text) => deviceBlocks(text).length;
 const domainOf = (text) => {
-  const m = /^(?:- | {2})domain: (\S+)$/m.exec(text);
+  const m = /^(?:- | {2})domain: (\S+)$/m.exec(contentLines(text).join('\n'));
   return m ? m[1] : null;
 };
 

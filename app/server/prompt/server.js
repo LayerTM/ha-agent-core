@@ -99,6 +99,17 @@ const VERSION_RE = /^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$/;
 // The terminal `done` line always carries the fully-redacted authoritative text.
 const STREAM_SAFETY_WINDOW = 96;
 
+// What a streamed answer says in full. Deltas only grow and the client builds the
+// answer from them, so the answer is what already went out plus what follows it:
+// the rest of the text when the text continues what went out, or the core's own
+// words after it when they take the model's place (a device that was not found).
+// The `done` line carries exactly this, so it never says what the client was not told.
+function streamedAnswer(text, emitted) {
+  if (text.startsWith(emitted)) return text;
+  if (emitted.startsWith(text)) return emitted;
+  return `${emitted}\n\n${text}`;
+}
+
 // Camera vision: only a well-formed `camera.<object_id>` may be snapshotted, the
 // image is capped, and the integration must only pass cameras exposed to Assist.
 const CAMERA_ENTITY_RE = /^camera\.[a-z0-9_]{1,120}$/;
@@ -1240,6 +1251,7 @@ function createPromptApp({
       // redacted before any of it ships; the terminal `done` line is
       // authoritative. If no deltas arrive (older CLI / no streamable text), the
       // client simply gets the final `done` line — no breakage.
+      let emitted = '';
       let emittedLen = 0;
       let onText;
       if (streaming) {
@@ -1259,6 +1271,7 @@ function createPromptApp({
           const safeLen = wholeCharEnd(redacted, Math.max(0, redacted.length - STREAM_SAFETY_WINDOW));
           if (safeLen > emittedLen) {
             const chunk = redacted.slice(emittedLen, safeLen);
+            emitted += chunk;
             emittedLen = safeLen;
             try { res.write(`${JSON.stringify({ type: 'delta', text: chunk })}\n`); } catch { /* client gone */ }
           }
@@ -1471,7 +1484,7 @@ function createPromptApp({
         if (problems.length > 0) answerText = targetNotice(language, problems);
       }
 
-      const text = redact(answerText);
+      const text = streamedAnswer(redact(answerText), emitted);
       // Remember this read turn (redacted text only) so the next turn in the same
       // conversation has context. Never a web-granted turn: its text came from
       // pages nobody vetted, and the next turn may propose.

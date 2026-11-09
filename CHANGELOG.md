@@ -4,6 +4,20 @@ All notable changes to this project are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses [Semantic Versioning](https://semver.org/).
 
+## [0.12.1] - 2026-11-10
+
+### Fixed
+
+- A device whose live-context entry ends with its areas (a light that is off, a switch
+  or a button in an area) was refused as matching more than one device, with itself as
+  the only candidate, and no action was proposed. Its entry is now compared without the
+  blank line Home Assistant ends its answer with, so it no longer depends on where the
+  device sits in an answer. The same difference could also single out one of two devices
+  that print the same, instead of refusing both; they are refused again.
+- A streamed answer whose text the core replaces, such as a device that was not found,
+  now streams that text after what already went out, and the final line says the same.
+  The streamed part used to end mid-sentence, or run into the end of the replacement.
+
 ## [0.12.0] - 2026-11-05
 
 ### Added
