@@ -255,17 +255,20 @@ function wholeCharEnd(text, end) {
 }
 
 // How much of a growing, already redacted answer may stream. A secret of a shape
-// the redactor knows is one run of non-blank characters, after `Bearer` or `Token`
-// and blanks when it is a header value; until that run has ended it may still
-// become one, so none of it goes out, nor the word that would make it a header.
+// the redactor knows is one run of key characters (letters and digits of ASCII and
+// `._~+/=-`), after `Bearer` or `Token` and blanks when it is a header value; until
+// that run has ended it may still become one, so none of it goes out, nor the word
+// that would make it a header. Any other character ends a run, so text written
+// without blanks (Japanese, Chinese, Thai) still streams.
 // A secret given by value may hold blanks: the redactor says where one may still be
 // starting (`pending`), and `window` more characters stay behind for any other
 // shape it knows.
 const HEADER_WORDS = ['Bearer', 'Token'];
 const BLANK_RE = /\s/;
+const KEY_CHAR_RE = /[A-Za-z0-9_.~+/=-]/;
 function streamableEnd(text, window, redact) {
   let open = text.length;
-  while (open > 0 && !BLANK_RE.test(text[open - 1])) open -= 1;
+  while (open > 0 && KEY_CHAR_RE.test(text[open - 1])) open -= 1;
   let gap = open;
   while (gap > 0 && BLANK_RE.test(text[gap - 1])) gap -= 1;
   if (gap < open) {

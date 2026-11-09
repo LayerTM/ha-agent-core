@@ -20,8 +20,9 @@ uses [Semantic Versioning](https://semver.org/).
   be lost. The final line and the conversation keep the replacement alone.
 - A secret longer than the stream's hold-back window, such as a long-lived access token,
   could stream in part before the rest of it arrived and was redacted. Text that may
-  still become a secret now stays back until it is complete: a word that has not ended,
-  `Bearer` or `Token` before it, and the start of a configured secret value.
+  still become a secret now stays back until it is complete: a run of key characters
+  that has not ended, `Bearer` or `Token` before it, and the start of a configured
+  secret value. Text written without blanks still streams.
 
 ## [0.12.0] - 2026-11-05
 

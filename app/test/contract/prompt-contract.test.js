@@ -419,6 +419,11 @@ test('the stream holds back a word that has not ended, and a header word before 
     }
   }
   assert.equal(streamableEnd(`${lead}NotBearer abc`, 0), lead.length + 10, 'only the word itself');
+  const ja = 'トークンの値は表示できません。'.repeat(20);
+  assert.equal(streamableEnd(ja, 96), ja.length - 96, 'text without blanks streams up to the window');
+  const jwt = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiI0ZjM2YjQ1';
+  const glued = `${'説明します。'.repeat(30)}トークン${jwt}`;
+  assert.equal(streamableEnd(glued, 0), glued.length - jwt.length, 'a key run glued to other text is held whole');
   assert.equal(streamableEnd(`${lead}abc def`, 96), lead.length + 7 - 96, 'the window stays behind');
   assert.equal(streamableEnd(`${lead}a\uD83D\uDE00 `, 2), lead.length + 1, 'a character stays whole');
   const value = 'pass phrase '.repeat(12);
