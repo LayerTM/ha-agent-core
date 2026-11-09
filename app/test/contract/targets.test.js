@@ -346,17 +346,19 @@ test('the prompt API says which device it could not find, and proposes nothing',
   assert.match(body.text, /“Desk Lamp” matches more than one device \(Desk Lamp: light\.desk_lamp, Desk Lamp: light\.desk_lamp_2\)/);
 });
 
-test('a streamed answer that a notice replaces still streams exactly what its done line says', async () => {
+test('a streamed answer a notice replaces ends with the notice, after what already went out', async () => {
   const streamed = `I will turn off the Desk Lamp now. ${'It is the one by the window. '.repeat(6)}Done in a moment.`;
+  const notice = '“Desk Lamp” matches more than one device (Desk Lamp: light.desk_lamp, Desk Lamp: light.desk_lamp_2) — which one do you mean?';
   const lines = await ask((runId) => relay.lookup(runId), proposalOf(intent(['Desk Lamp'])), { stream: true, streamed });
   const done = lines.pop();
   assert.equal(done.type, 'done');
   assert.equal(done.proposal, null);
-  assert.ok(lines.every((l) => l.type === 'delta'));
+  assert.equal(done.text, notice, 'what the turn keeps is the notice alone');
+  assert.ok(lines.length >= 2 && lines.every((l) => l.type === 'delta'));
   const deltas = lines.map((l) => l.text).join('');
-  assert.equal(deltas, done.text, 'what was streamed is the answer');
-  assert.ok(streamed.startsWith(lines[0].text), 'what went out before the lookup is the model\'s text');
-  assert.match(done.text, /“Desk Lamp” matches more than one device \(Desk Lamp: light\.desk_lamp, Desk Lamp: light\.desk_lamp_2\) — which one do you mean\?$/);
+  const went = lines.slice(0, -1).map((l) => l.text).join('');
+  assert.ok(went.length > 0 && streamed.startsWith(went), 'what went out before the lookup is the model\'s text');
+  assert.equal(deltas, `${went}\n\n${notice}`, 'the notice follows it whole');
 
   const plain = await ask((runId) => relay.lookup(runId), proposalOf(intent(['Sandbox Test Lamp'])), { stream: true, streamed });
   const plainDone = plain.pop();

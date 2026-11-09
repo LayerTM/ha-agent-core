@@ -15,8 +15,13 @@ uses [Semantic Versioning](https://semver.org/).
   device sits in an answer. The same difference could also single out one of two devices
   that print the same, instead of refusing both; they are refused again.
 - A streamed answer whose text the core replaces, such as a device that was not found,
-  now streams that text after what already went out, and the final line says the same.
-  The streamed part used to end mid-sentence, or run into the end of the replacement.
+  now streams the replacement whole after what already went out. The streamed part used
+  to end mid-sentence, or run into the end of the replacement, and the replacement could
+  be lost. The final line and the conversation keep the replacement alone.
+- A secret longer than the stream's hold-back window, such as a long-lived access token,
+  could stream in part before the rest of it arrived and was redacted. Text that may
+  still become a secret now stays back until it is complete: a word that has not ended,
+  `Bearer` or `Token` before it, and the start of a configured secret value.
 
 ## [0.12.0] - 2026-11-05
 

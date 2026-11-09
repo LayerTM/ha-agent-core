@@ -168,10 +168,10 @@ function escapeRegExp(s) {
 // format left to an adapter that forgets it would leak. `enginePatterns` (global
 // regular expressions from the adapter) only add to them.
 function buildRedactor(secretValues, enginePatterns = []) {
-  const exact = (secretValues || [])
+  const values = (secretValues || [])
     .filter((v) => typeof v === 'string' && v.length >= 8)
-    .sort((a, b) => b.length - a.length)
-    .map((v) => new RegExp(escapeRegExp(v), 'g'));
+    .sort((a, b) => b.length - a.length);
+  const exact = values.map((v) => new RegExp(escapeRegExp(v), 'g'));
   const shapes = [
     ...enginePatterns,
     /\bsk-ant-[A-Za-z0-9_-]{8,}/g, // Anthropic API keys
@@ -179,13 +179,25 @@ function buildRedactor(secretValues, enginePatterns = []) {
     /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\b/g, // JWT / HA LLAT
     /\b(?:Bearer|Token)\s+[A-Za-z0-9._~+/=-]{20,}/g, // auth header values
   ];
-  return (text) => {
+  const redact = (text) => {
     if (typeof text !== 'string' || !text) return text;
     let out = text;
     for (const re of exact) out = out.replace(re, '[REDACTED]');
     for (const re of shapes) out = out.replace(re, '[REDACTED]');
     return out;
   };
+  // Where the end of a growing text may still become a secret given by value: the
+  // start of its longest tail, longer than `shortest`, that begins one of them.
+  redact.pending = (text, shortest = 0) => {
+    let from = text.length;
+    for (const v of values) {
+      for (let k = Math.min(v.length - 1, text.length); k > shortest && text.length - k < from; k -= 1) {
+        if (text.endsWith(v.slice(0, k))) { from = text.length - k; break; }
+      }
+    }
+    return from;
+  };
+  return redact;
 }
 
 // Redact every string of a JSON-ish value by serializing and running the string
@@ -240,6 +252,34 @@ function wholeCharEnd(text, end) {
   if (!(end > 0) || end >= text.length) return Math.max(0, Math.min(end, text.length));
   const code = text.charCodeAt(end - 1);
   return code >= 0xD800 && code <= 0xDBFF ? end - 1 : end;
+}
+
+// How much of a growing, already redacted answer may stream. A secret of a shape
+// the redactor knows is one run of non-blank characters, after `Bearer` or `Token`
+// and blanks when it is a header value; until that run has ended it may still
+// become one, so none of it goes out, nor the word that would make it a header.
+// A secret given by value may hold blanks: the redactor says where one may still be
+// starting (`pending`), and `window` more characters stay behind for any other
+// shape it knows.
+const HEADER_WORDS = ['Bearer', 'Token'];
+const BLANK_RE = /\s/;
+function streamableEnd(text, window, redact) {
+  let open = text.length;
+  while (open > 0 && !BLANK_RE.test(text[open - 1])) open -= 1;
+  let gap = open;
+  while (gap > 0 && BLANK_RE.test(text[gap - 1])) gap -= 1;
+  if (gap < open) {
+    for (const word of HEADER_WORDS) {
+      const start = gap - word.length;
+      if (start >= 0 && text.slice(start, gap) === word && (start === 0 || !/\w/.test(text[start - 1]))) {
+        open = start;
+        break;
+      }
+    }
+  }
+  const kept = Math.max(0, text.length - window);
+  const value = redact && typeof redact.pending === 'function' ? redact.pending(text, window) : text.length;
+  return wholeCharEnd(text, Math.min(open, kept, value));
 }
 
 // Facts the user chose to keep (read requests): the client stores them and
@@ -336,4 +376,5 @@ module.exports = {
   redactDeep,
   sha12,
   wholeCharEnd,
+  streamableEnd,
 };
