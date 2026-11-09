@@ -103,7 +103,8 @@ const STREAM_SAFETY_WINDOW = 96;
 // answer from them, so the answer is what already went out plus what follows it:
 // the rest of the text when the text continues what went out, or the core's own
 // words after it when they take the model's place (a device that was not found).
-// The `done` line carries exactly this, so it never says what the client was not told.
+// The `done` line carries this, so it never says what the client was not told.
+// `text` is the redacted answer; `emitted` is what the deltas already carried.
 function streamedAnswer(text, emitted) {
   if (text.startsWith(emitted)) return text;
   if (emitted.startsWith(text)) return emitted;
@@ -1484,7 +1485,11 @@ function createPromptApp({
         if (problems.length > 0) answerText = targetNotice(language, problems);
       }
 
-      const text = streamedAnswer(redact(answerText), emitted);
+      // What streams is what went out plus the rest; what is kept and sent as final
+      // is that same answer redacted whole, so a secret the window let through in
+      // part is never remembered or repeated.
+      const answered = streamedAnswer(redact(answerText), emitted);
+      const text = redact(answered);
       // Remember this read turn (redacted text only) so the next turn in the same
       // conversation has context. Never a web-granted turn: its text came from
       // pages nobody vetted, and the next turn may propose.
@@ -1538,8 +1543,8 @@ function createPromptApp({
         // line carrying the authoritative payload (full redacted text + proposal).
         // The deltas already reconstruct `text`; it is repeated in `done` for
         // resilience, and the client treats `done` as truth.
-        if (text.length > emittedLen) {
-          res.write(`${JSON.stringify({ type: 'delta', text: text.slice(emittedLen) })}\n`);
+        if (answered.length > emittedLen) {
+          res.write(`${JSON.stringify({ type: 'delta', text: answered.slice(emittedLen) })}\n`);
         }
         res.write(`${JSON.stringify({ type: 'done', ...responseBody })}\n`);
         return res.end();
