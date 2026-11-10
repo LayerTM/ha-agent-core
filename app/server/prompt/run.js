@@ -789,6 +789,10 @@ function run({
     let lineBuffer = '';
     let stderrBuf = '';
     let result = null;
+    // Set at the agent's `result`: the run is over there, whether or not the
+    // agent has exited yet. Anything it writes after that is not this run's.
+    let answered = false;
+    let lateNoted = false;
     let mcpFailed = false;
     // A RELIABLE ha-MCP-reachability signal for `/api/status.ha_mcp_connected`,
     // separate from the init snapshot (which is often stale right after a
@@ -914,13 +918,30 @@ function run({
           break;
         case 'result':
           result = ev;
+          answered = true;
+          // The answer exists; waiting for the agent to exit only adds its
+          // teardown to every request. `conclude` applies the same rules the
+          // exit would, and `finish` ends the agent's group.
+          conclude(null);
           break;
         default:
           break;
       }
     };
 
+    // What arrives after the result is dropped: never streamed, never counted
+    // as this run's tools. Logged once, without its content, which may hold anything.
+    const dropLate = (text) => {
+      if (lateNoted || !/\S/.test(text)) return;
+      lateNoted = true;
+      console.error(`[prompt] ${engine} wrote after its result; dropped`);
+    };
+
     child.stdout.on('data', (chunk) => {
+      if (answered) {
+        dropLate(decoder.write(chunk));
+        return;
+      }
       streamBytes += chunk.length;
       if (streamBytes > STREAM_CAP_BYTES) {
         killGroup(child);
@@ -944,8 +965,18 @@ function run({
         } catch {
           continue; // an event the adapter cannot read is not an event
         }
-        for (const ev of Array.isArray(events) ? events : []) {
-          if (ev && typeof ev === 'object') handle(ev);
+        const list = Array.isArray(events) ? events : [];
+        for (let i = 0; i < list.length; i += 1) {
+          if (answered) {
+            dropLate('event');
+            break;
+          }
+          if (list[i] && typeof list[i] === 'object') handle(list[i]);
+        }
+        if (answered) {
+          dropLate(lineBuffer);
+          lineBuffer = '';
+          return;
         }
       }
     });
@@ -962,7 +993,10 @@ function run({
 
     const number = (v) => (Number.isFinite(v) ? v : null);
 
-    child.on('close', (code) => {
+    // The outcome, from what the run saw. Reached at the agent's result, or at
+    // its exit when no result came first; whichever is first decides.
+    const conclude = (code) => {
+      if (settled) return;
       // Checked FIRST: we killed this child ourselves at init, so every later
       // branch (no result, non-zero exit) would only misreport why.
       if (toolNameMismatch) {
@@ -1113,7 +1147,9 @@ function run({
         // the latest (and by THIS request, via the tool-name-mismatch retry).
         haTools: publishedHaTools,
       });
-    });
+    };
+
+    child.on('close', (code) => conclude(code));
   });
 }
 

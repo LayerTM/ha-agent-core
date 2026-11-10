@@ -159,7 +159,7 @@ Its decoder reports these events:
 | `tool-use` | `id`, `name` | the model called a tool |
 | `tool-result` | `id`, `isError` | that call's result |
 | `fragment-start`, `fragment` | `json` | streamed pieces of the structured answer |
-| `result` | `isError`, `deterministic`, `authExpired?`, `structured`, `text`, `numTurns?`, `costUsd?`, `tokens?` | the run ended; `authExpired: true` on an error the engine reports as its sign-in being refused |
+| `result` | `isError`, `deterministic`, `authExpired?`, `structured`, `text`, `numTurns?`, `costUsd?`, `tokens?` | the run ended; `authExpired: true` on an error the engine reports as its sign-in being refused. The core answers at this event, without waiting for the agent to exit: it ends the agent's process group, and drops what the agent writes after it |
 
 A missing optional field never widens what a run may do:
 - no tool list means no renamed-tool detection;

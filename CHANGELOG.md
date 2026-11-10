@@ -4,6 +4,17 @@ All notable changes to this project are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- Every answer, including a voice command through Assist, arrives sooner: a read now
+  answers as soon as the agent reports its result, instead of after the agent has
+  finished shutting down, which added most of a second to each request. The answer is
+  decided by the same rules as before. Anything the agent writes after its result is
+  dropped: it is not streamed and its tool calls are not counted, and the add-on log
+  notes it once per request, without the content.
+
 ## [0.12.1] - 2026-11-10
 
 ### Fixed
