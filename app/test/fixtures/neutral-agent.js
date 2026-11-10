@@ -4,6 +4,7 @@
 // then plays the tape in the file named by its only argument (a JSON array of
 // steps; a file, because one argument is limited to 128 KiB on Linux):
 //   { emit: <object> }          one JSON line on stdout
+//   { lines: [<object>, ...] }  several JSON lines in ONE stdout write
 //   { raw: <string> }           a raw stdout line (not JSON)
 //   { stdout: <bytes> }         that many bytes of stdout without a newline
 //   { stderr: <string> }        text on stderr
@@ -15,6 +16,8 @@
 //   { descendant: <file> }      start a long-running process in the agent's
 //                               group, detached from its output, and write its
 //                               pid to <file>
+//   { pid: <file> }             write the agent's own pid to <file>
+//   { mark: <file> }            write the current time (ms) to <file>
 
 const tape = JSON.parse(require('node:fs').readFileSync(process.argv[2], 'utf8'));
 
@@ -25,6 +28,9 @@ function write(line) {
 async function play(input) {
   for (const step of tape) {
     if (step.emit) await write(JSON.stringify(step.emit));
+    else if (Array.isArray(step.lines)) await write(step.lines.map((l) => JSON.stringify(l)).join('\n'));
+    else if (step.pid) require('node:fs').writeFileSync(step.pid, String(process.pid));
+    else if (step.mark) require('node:fs').writeFileSync(step.mark, String(Date.now()));
     else if (typeof step.raw === 'string') await write(step.raw);
     else if (step.stdout) await new Promise((r) => process.stdout.write('x'.repeat(step.stdout), r));
     else if (typeof step.stderr === 'string') process.stderr.write(step.stderr);

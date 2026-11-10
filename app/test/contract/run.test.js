@@ -338,6 +338,69 @@ test('nothing the agent started outlives the run, however it ends', async () => 
   assert.equal(await gone(Number(fs.readFileSync(pidFile, 'utf8'))), true, 'abort');
 });
 
+// --- a run ends at its result ----------------------------------------------------
+
+test('a run ends at its result, not when the agent gets round to exiting', async () => {
+  const agentPid = path.join(TMP, 'agent-pid-linger');
+  const descendant = path.join(TMP, 'descendant-linger');
+  const mark = path.join(TMP, 'mark-linger');
+  const started = Date.now();
+  const outcome = await runWith([
+    { pid: agentPid }, { descendant }, { mark }, result(answer('done')), { sleep: 5000 },
+  ]);
+  const ended = Date.now();
+  assert.equal(outcome.status, 'ok');
+  assert.equal(outcome.text, 'done');
+  const answered = Number(fs.readFileSync(mark, 'utf8'));
+  assert.ok(answered >= started, 'the mark was written by this run');
+  assert.ok(ended - answered < 200, `resolved ${ended - answered} ms after the result`);
+  // The run is over, so nothing it started is left: not the agent that was
+  // still lingering, and not what the agent started in its group.
+  assert.equal(await gone(Number(fs.readFileSync(agentPid, 'utf8'))), true, 'the agent is still running');
+  assert.equal(await gone(Number(fs.readFileSync(descendant, 'utf8'))), true, 'its descendant is still running');
+});
+
+test('what the agent writes after its result is dropped, logged once, and changes nothing', async () => {
+  const logged = [];
+  const original = console.error;
+  console.error = (...args) => { logged.push(args.join(' ')); };
+  const seen = [];
+  let outcome;
+  try {
+    // One write, so the late lines arrive in the same chunk as the result.
+    outcome = await runWith([{
+      lines: [
+        { type: 'fragment-start' },
+        { type: 'fragment', json: '{"text":"fin' },
+        { type: 'result', structured: answer('final') },
+        { type: 'fragment-start' },
+        { type: 'fragment', json: '{"text":"LATE-SECRET-131' },
+        { type: 'tool-use', id: 'late', name: 'ha.GetLiveContext' },
+      ],
+    }, { raw: 'late diagnostics' }, { sleep: 2000 }], { onText: (t) => seen.push(t) });
+  } finally {
+    console.error = original;
+  }
+  assert.equal(outcome.status, 'ok');
+  assert.equal(outcome.text, 'final');
+  assert.deepEqual(outcome.toolsUsed, [], 'a tool use after the result is not this run\'s');
+  assert.deepEqual(seen, ['fin'], 'nothing after the result streamed');
+  const late = logged.filter((l) => /after its result/.test(l));
+  assert.equal(late.length, 1, `logged ${late.length} times: ${JSON.stringify(logged)}`);
+  assert.doesNotMatch(late[0], /LATE-SECRET-131/, 'the log names no content');
+});
+
+test('a result the run does not accept still ends the run at the result', async () => {
+  const mark = path.join(TMP, 'mark-error');
+  const outcome = await runWith([
+    { mark }, { emit: { type: 'result', isError: true, text: 'bad' } }, { sleep: 5000 },
+  ]);
+  const ended = Date.now();
+  assert.equal(outcome.status, 'error');
+  assert.equal(outcome.reason, 'model-error');
+  assert.ok(ended - Number(fs.readFileSync(mark, 'utf8')) < 200, 'waited for the exit');
+});
+
 // --- the end of a run, as the adapter is told it ----------------------------------
 
 test('the adapter is told a run ended exactly once, whatever ended it', async () => {
