@@ -6,6 +6,8 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-11-10
+
 ### Fixed
 
 - With `prompt_keep_warm` on, a read after Home Assistant refused the token was
