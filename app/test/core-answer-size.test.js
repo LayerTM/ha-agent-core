@@ -67,6 +67,15 @@ let answerRpc;     // (rpc, res) => writes the answer to POST /api/mcp
 let relay;
 let logged;
 let recorded;
+let onRecord = () => {};
+
+// Resolves once `count` audit lines match `pattern`: the relay writes one only when it
+// has read an answer through, which is the moment that answer's share is given back.
+async function recordedLines(pattern, count) {
+  while (recorded.filter((line) => pattern.test(line)).length < count) {
+    await new Promise((resolve) => { onRecord = resolve; });
+  }
+}
 
 const sendJson = (res, value) => {
   res.writeHead(200, { 'content-type': 'application/json' });
@@ -106,7 +115,10 @@ before(async () => {
     coreOrigin: `http://127.0.0.1:${ha.address().port}`,
     haToken: 'ha-token-never-in-a-message',
     log: (line) => logged.push(line),
-    record: (line) => recorded.push(line),
+    record: (line) => {
+      recorded.push(line);
+      onRecord();
+    },
   });
 });
 
@@ -514,7 +526,10 @@ test('an agent gone before Home Assistant answers leaves the tool running and ta
     gone.done();
     await new Promise((resolve) => { setTimeout(resolve, 300); });
     assert.equal(closedEarly, false, 'the request closed, which cancels the tool');
-    await new Promise((resolve) => { held.once('finish', resolve); sendJson(held, body); });
+    // Written is not read: the relay holds a share for this answer until it has
+    // read it to its end, and only then says how the tool ended.
+    sendJson(held, body);
+    await soon(recordedLines(/answered after its run ended/, round + 1), 'the late answer, read', 20000);
   }
   answerRpc = (rpc, res) => sendJson(res, body);
   assert.equal((await soon(agentCall(CALL), 'the next answer', 20000)).status, 200);
