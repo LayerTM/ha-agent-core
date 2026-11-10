@@ -35,7 +35,9 @@ function parseExtraReadTools(text) {
 }
 
 function extraReadMatcher(patterns) {
-  const list = Array.isArray(patterns) ? patterns.filter((p) => typeof p === 'string' && p !== '') : [];
+  const list = Array.isArray(patterns)
+    ? patterns.filter((p) => typeof p === 'string').map((p) => p.trim()).filter((p) => p !== '')
+    : [];
   if (list.length === 0) return null;
   const expressions = list.map((p) => new RegExp(
     `^${p.split('*').map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*')}$`,
