@@ -13,6 +13,9 @@ uses [Semantic Versioning](https://semver.org/).
   the notice and the degraded outcome a fresh read gives. A warm session is now
   neither served nor kept while Home Assistant does not accept the connection
   (refused or unreachable): the read runs fresh and is judged like any fresh read.
+  Because a warm turn makes no request that could show a change, the server asks
+  Home Assistant about the token (one request) before it offers a read to a warm
+  session; a token already known to be refused is not asked about again.
 - A streamed answer that a notice replaces (a device that matches more than one,
   or none) used to stop mid-word where the stream's hold-back ended, and the
   notice followed. The model's text now goes out whole before the notice.

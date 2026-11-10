@@ -632,6 +632,10 @@ function createPromptApp({
   // relay's `mcpAuth`): 'ok', 'unauthorized', 'unreachable', or null when
   // nothing has answered yet.
   haMcpAuth = () => null,
+  // Asks Home Assistant now whether it accepts the token (the relay's own probe)
+  // and resolves to the same answer as `haMcpAuth`. A warm session's turn makes no
+  // request that could show a change, so a read is offered to one only after this.
+  probeHa = async () => null,
   // The status Home Assistant refused a run's token with, or null (asked while
   // the run's bearer is still live, i.e. before endRun).
   tokenRefusal = (_runId) => null,
@@ -1300,6 +1304,13 @@ function createPromptApp({
         //    logical request holds the one concurrency slot across its attempts.
         for (;;) {
           attempts += 1;
+          const warmRead = Boolean(sessionPool) && attempts === 1 && !imageEntity && !grant && body.edit_automation === undefined;
+          // The cached answer is as old as the last request to Home Assistant. A
+          // refused token is never asked about again here (each refusal counts as
+          // a failed login there); a fresh read finds out by itself.
+          if (warmRead && haConfigured && haMcpAuth() !== 'unauthorized') {
+            try { await probeHa(); } catch { /* the pool then judges by the last answer */ }
+          }
           // eslint-disable-next-line no-await-in-loop
           outcome = await runAgent({
             bin: claudeBin,
@@ -1338,7 +1349,7 @@ function createPromptApp({
             // A warm session serves a plain read only: never a camera question (its
             // snapshot is a per-run file), a web-granted read, an automation edit,
             // or a retry.
-            warm: sessionPool && attempts === 1 && !imageEntity && !grant && body.edit_automation === undefined
+            warm: warmRead
               ? { pool: sessionPool, caller, runToken: runHandle ? runHandle.token : '' } : null,
           });
           if (outcome.warm) servedWarm = true;
