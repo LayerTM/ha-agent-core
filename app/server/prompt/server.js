@@ -627,6 +627,9 @@ function createPromptApp({
   // How the core carries out a confirmed action in Home Assistant, for one run
   // (the relay's `act`); null without Home Assistant, and then nothing is written.
   actFor = null,
+  // Home Assistant tools a read may call beyond the live context, as name patterns
+  // the operator opted in (ha-tool-names.js: parseExtraReadTools); [] by default.
+  extraReadTools = [],
   // Whether Home Assistant accepts the add-on's token on the MCP path (the
   // relay's `mcpAuth`): 'ok', 'unauthorized', 'unreachable', or null when
   // nothing has answered yet.
@@ -1226,6 +1229,7 @@ function createPromptApp({
         // do nothing in Home Assistant, so no bearer is minted for it at all.
         runHandle = grant ? null : await beginRun(runId, {
           basenames: READ_HA_BASENAMES,
+          extraReadTools,
           cameras: imageEntity ? [imageEntity] : [],
         });
         // Fetch the requested camera snapshot (if any) before running Claude; a
@@ -1325,6 +1329,8 @@ function createPromptApp({
             memory,
             // Live `ha` tool names, so a run allowlists what HA actually publishes.
             haTools: haToolCatalog,
+            // The operator's opt-in beyond the live context (same list the bearer carries).
+            extraReadTools,
             // The web this read was granted; the run is then house-blind.
             web: grant,
             // First attempt gets the full ceiling; a retry gets only what's LEFT of

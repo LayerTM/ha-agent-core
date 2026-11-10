@@ -6,6 +6,15 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `CLAUDE_PROMPT_EXTRA_READ_TOOLS`: an operator may let a read call Home Assistant
+  tools beyond the live context, by name pattern (`script__*` for every exposed
+  script, `ha_*` for a forwarded MCP client, or an exact name). The list is minted into
+  the run's bearer and named in its system prompt; a listed script runs when called,
+  everything else listed should only read. Empty by default: nothing changes for an
+  add-on that does not set it.
+
 ### Changed
 
 - Every answer, including a voice command through Assist, arrives sooner: a read now

@@ -19,6 +19,7 @@ const { StringDecoder } = require('node:string_decoder');
 const {
   validateProposal, validateAutomationDraft, validateMemoryChange, oneLine, wholeCharEnd,
 } = require('./security');
+const { extraReadMatcher } = require('./ha-tool-names');
 const { adapter } = require('../adapter-contract');
 
 // Wall-clock ceiling per run; tunable for slow hardware via the add-on's
@@ -570,9 +571,19 @@ const READ_HA_BASENAMES = Object.freeze([LIVE_CONTEXT_BASENAME]);
 // The Home Assistant tools one run may call, and the published ones it may not
 // (taken out of the model's context). Built from the published catalog only, so
 // a first run (no catalog yet) keeps the bare names and discovery can only narrow.
-function haToolPlan({ mcpConfigPath, haTools }) {
+function haToolPlan({ mcpConfigPath, haTools, extraReadTools = [] }) {
   if (!mcpConfigPath) return { allowed: [], disallowed: [] };
-  const allowed = [...new Set(READ_HA_BASENAMES.flatMap((b) => resolveHaTools(b, haTools)))];
+  // The operator's opt-in is matched against the name Home Assistant published,
+  // which the engine spells with its own prefix (runner.toolName); the relay
+  // applies the same rule to the same name (ha-tool-names.js), so what is allowed
+  // here is exactly what passes there.
+  const extra = extraReadMatcher(extraReadTools);
+  const prefix = adapter().runner.toolName('');
+  const extraAllowed = extra
+    ? (Array.isArray(haTools) ? haTools : []).filter((n) => haToolBasename(n) !== null
+        && extra(n.startsWith(prefix) ? n.slice(prefix.length) : n))
+    : [];
+  const allowed = [...new Set([...READ_HA_BASENAMES.flatMap((b) => resolveHaTools(b, haTools)), ...extraAllowed])];
   const disallowed = (Array.isArray(haTools) ? haTools : [])
     .filter((n) => haToolBasename(n) !== null && !allowed.includes(n));
   return { allowed, disallowed };
@@ -590,8 +601,22 @@ function haToolPlan({ mcpConfigPath, haTools }) {
  *   web: { search: boolean, fetch: boolean, domains: readonly string[] } | null,
  * }}
  */
+// What a read may do beyond the live context when the operator opted extra tools
+// in: said here, or the model reports a permissions problem instead of using them.
+// An exposed script the operator listed is the one thing a read may change: it
+// runs when called, as the operator chose by listing it.
+function extraToolsDirective(patterns) {
+  if (!Array.isArray(patterns) || patterns.length === 0) return '';
+  return ` ADDITIONAL TOOLS the operator allowed for this session: Home Assistant tools whose name matches ${patterns.join(', ')}.`
+    + ' A tool whose name starts with "script__" runs an exposed Home Assistant script immediately when called:'
+    + ' when the user asks for what its description says, call it directly and report the result; do not propose it.'
+    + ' Every other allowed tool only reads (history, logs, entity attributes, searches): use it when the live'
+    + ' context does not answer the question, keep calls few, and never repeat a call that already answered.';
+}
+
 function launchSpec({
   mcpConfigPath, model, imagePath, language, surface, editAutomation, memory, haTools, stream, settings, web,
+  extraReadTools = [],
 }) {
   if (web) {
     return {
@@ -613,7 +638,7 @@ function launchSpec({
     };
   }
   const vision = Boolean(imagePath);
-  const plan = haToolPlan({ mcpConfigPath, haTools });
+  const plan = haToolPlan({ mcpConfigPath, haTools, extraReadTools });
   return {
     mode: 'read',
     read: true,
@@ -623,6 +648,7 @@ function launchSpec({
     haDisallowed: plan.disallowed,
     schema: engineSchema(),
     systemPrompt: READ_SYSTEM_PROMPT
+      + (mcpConfigPath ? extraToolsDirective(extraReadTools) : '')
       + languageDirective(language)
       + voiceDirective(surface)
       + editDirective(editAutomation)
@@ -714,6 +740,7 @@ function shutdown() {
 function run({
   bin, settings, prompt, mcpConfigPath: mcpConfig, model, cwd, signal, history: earlier, imagePath: image,
   onText, timeoutMs, language, surface, editAutomation: edit, memory: facts, haTools, web = null,
+  extraReadTools = [],
 }) {
   // A web-granted run is house-blind (web.js): whatever else the caller passed,
   // nothing of the home reaches it — no Home Assistant tools, no facts, no
@@ -765,6 +792,7 @@ function run({
       engine = adapter().descriptor.engine;
       spec = launchSpec({
         mcpConfigPath, model, imagePath, language, surface, editAutomation, memory, haTools, settings, web,
+        extraReadTools,
         stream: Boolean(onText),
       });
       const command = launch(spec, process.env);

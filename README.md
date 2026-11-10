@@ -200,6 +200,16 @@ loopback relay (`app/server/prompt/core-relay.js`):
 - the relay decides which JSON-RPC methods pass (`app/server/prompt/mcp-filter.js`);
 - the relay records what each run asked Home Assistant to do (below).
 
+An operator may widen what a read may call, by name pattern, with
+`CLAUDE_PROMPT_EXTRA_READ_TOOLS` (comma-separated, matched against the name Home
+Assistant publishes, `*` standing for anything): `script__*` lets a read run every
+script exposed to Assist, `ha_*` the tools of an MCP client Home Assistant forwards,
+`history__get_history` one exact tool. The same list is minted into the run's bearer
+and named in the run's system prompt, so the agent is told what it may use; it is
+read from the environment once, at start, and is empty by default. A listed script
+runs when called — that is the one way a read changes state, chosen by the operator
+by listing it — everything else listed should be a tool that only reads.
+
 From the agent, only these pass:
 - `initialize`, `ping`, `notifications/*`;
 - `tools/list`, `tools/call`.

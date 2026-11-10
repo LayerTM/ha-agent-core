@@ -39,7 +39,7 @@ const https = require('node:https');
 const {
   MAX_BODY_BYTES, judgeClientBody, filterServerJson, createSseFilter,
 } = require('./mcp-filter');
-const { haBasename } = require('./ha-tool-names');
+const { haBasename, extraReadMatcher } = require('./ha-tool-names');
 const { createStateNames } = require('./state-names');
 
 // Exactly what the add-on needs, and nothing else.
@@ -580,7 +580,7 @@ async function startCoreRelay({
           deny(res, 413, 'request body too large');
           return;
         }
-        const verdict = judgeClientBody(body.toString('utf8'), entry.basenames);
+        const verdict = judgeClientBody(body.toString('utf8'), entry.basenames, entry.extra);
         if (verdict.forward === true) {
           // Before anything is recorded as sent: this one goes nowhere. Only a call of a
           // tool: the rest cannot pile up, and an agent still needs them to start.
@@ -1079,11 +1079,14 @@ async function startCoreRelay({
     // may legitimately carry `__` (`INTENT_RE` in security.js allows `_`), and
     // storing it verbatim would refuse every call of that run while the adapter
     // allowed it: fail-closed, silent, and impossible to see from either side.
-    issue(runId, { basenames = [], cameras = [] } = {}) {
+    issue(runId, { basenames = [], cameras = [], extraReadTools = [] } = {}) {
       const token = crypto.randomBytes(32).toString('base64url');
       runs.set(token, {
         runId,
         basenames: new Set([...basenames].map(haBasename)),
+        // The operator's opt-in (ha-tool-names.js), compiled once per run; null
+        // when nothing was opted in, and then the basenames are all a run may call.
+        extra: extraReadMatcher(extraReadTools),
         cameras: new Set(cameras),
         ended: false,
       });

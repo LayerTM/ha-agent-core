@@ -53,12 +53,17 @@ function errorFor(id, code, message) {
  * NOT gated — listing is not acting, and the run's own rename detector needs the
  * published catalog to be complete.
  *
+ * `extra`, when the run has one, is the operator's opt-in (ha-tool-names.js:
+ * extraReadMatcher): a tool whose published name it matches may be called too.
+ * It never widens a run that may call nothing.
+ *
  * @param {string} text
  * @param {Set<string>|null} [basenames]
+ * @param {((name: string) => boolean)|null} [extra]
  * @returns {{ forward: true, batch: boolean, calls: {id: unknown, answerable: boolean, name: string, args: unknown}[] }
  *   | { forward: false, status: number, body: string, type?: string }}
  */
-function judgeClientBody(text, basenames = null) {
+function judgeClientBody(text, basenames = null, extra = null) {
   let parsed;
   try {
     parsed = JSON.parse(text);
@@ -85,6 +90,7 @@ function judgeClientBody(text, basenames = null) {
     if (m.method !== 'tools/call') return null;
     const name = typeof m.params?.name === 'string' ? m.params.name : '';
     if (basenames && basenames.has(haBasename(name))) return null;
+    if (basenames && basenames.size > 0 && typeof extra === 'function' && extra(name)) return null;
     return {
       code: INVALID_PARAMS,
       message: 'Tool not allowed for this run',

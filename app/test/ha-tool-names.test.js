@@ -44,3 +44,41 @@ test('a name that is nothing but a prefix has an empty basename, and the gate ag
   assert.equal(allows('todo__', ''), true);
   assert.equal(allows('todo__', 'todo__'), false);
 });
+
+// --- the operator's opt-in -------------------------------------------------------
+
+const { parseExtraReadTools, extraReadMatcher } = require('../server/prompt/ha-tool-names');
+
+test('the opt-in list is read as comma-separated patterns, blanks dropped', () => {
+  assert.deepEqual(parseExtraReadTools(' script__* , ha_*,, history__get_history '), ['script__*', 'ha_*', 'history__get_history']);
+  assert.deepEqual(parseExtraReadTools(''), []);
+  assert.deepEqual(parseExtraReadTools(undefined), []);
+});
+
+test('a pattern matches the whole published name, with * standing for anything', () => {
+  const extra = extraReadMatcher(['script__*', 'ha_*', 'history__get_history']);
+  for (const name of ['script__display_music', 'script__x', 'ha_search', 'ha_call_read_tool', 'history__get_history']) {
+    assert.equal(extra(name), true, name);
+  }
+  // A prefix is not a match, a write tool is not matched by a read pattern, and the
+  // characters a name may carry are taken literally.
+  for (const name of ['intent__HassTurnOn', 'homeassistant__call_action', 'xscript__a', 'ha', 'history__get_history_2', 'h.story__get_history']) {
+    assert.equal(extra(name), false, name);
+  }
+  assert.equal(extraReadMatcher([]), null);
+  assert.equal(extraReadMatcher(['', ' ']), null);
+});
+
+test('an opted-in tool passes the gate, a write tool does not, and a run that may call nothing stays so', () => {
+  const extra = extraReadMatcher(['script__*', 'ha_*']);
+  const may = new Set(['GetLiveContext']);
+  const judged = (name, set) => judgeClientBody(call(name), set, extra).forward;
+  assert.equal(judged('script__display_music', may), true);
+  assert.equal(judged('ha_search', may), true);
+  assert.equal(judged('homeassistant__GetLiveContext', may), true);
+  assert.equal(judged('intent__HassTurnOn', may), false);
+  assert.equal(judged('homeassistant__call_action', may), false);
+  // Without a basename allowlist the opt-in widens nothing: such a run may call nothing.
+  assert.equal(judged('script__display_music', new Set()), false);
+  assert.equal(judged('script__display_music', null), false);
+});

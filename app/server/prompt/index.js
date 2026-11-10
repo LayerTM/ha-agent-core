@@ -19,6 +19,7 @@ const { checkWebOptions } = require('./web');
 const { adapter } = require('../adapter-contract');
 const { resolveCoreTarget } = require('./core-target');
 const { startCoreRelay } = require('./core-relay');
+const { parseExtraReadTools } = require('./ha-tool-names');
 const { boundAddress } = require('../listen');
 const { readCoreVersion } = require('../core-version');
 
@@ -309,6 +310,9 @@ async function start() {
     // add-on may still carry in its options, is not read.
     cameraModel: optionString(options, 'chat_model_camera'),
     dailyBudgetUsd,
+    // Home Assistant tools a read may call beyond the live context, opted in by the
+    // operator as name patterns (`script__*`, `ha_*`, exact names); empty by default.
+    extraReadTools: parseExtraReadTools(process.env.CLAUDE_PROMPT_EXTRA_READ_TOOLS),
     web,
     // Camera snapshots (vision) go through the same relay, so the HA token and
     // the Core TLS decision live in exactly one place.
