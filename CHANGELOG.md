@@ -16,6 +16,11 @@ uses [Semantic Versioning](https://semver.org/).
 - A streamed answer that a notice replaces (a device that matches more than one,
   or none) used to stop mid-word where the stream's hold-back ended, and the
   notice followed. The model's text now goes out whole before the notice.
+- The hook audit lines (`cc-hook-audit`, `cc-hook-backup`) were stamped in local
+  time while the prompt server's lines in the same file are UTC. The shell writers
+  now take the stamp from one function, `audit_timestamp` (UTC, the prompt
+  server's format), and a test discovers every writer of the file and runs each
+  under a zone far from UTC.
 
 ## [0.13.0] - 2026-11-10
 

@@ -51,6 +51,9 @@
 # with the add-on, not here.
 set -o pipefail
 
+# shellcheck source-path=SCRIPTDIR source=../lib/audit-time.sh
+source "${BASH_SOURCE[0]%/*}/../lib/audit-time.sh"
+
 # Same override convention as cc-alerts and cc-monitor, so the read/write split
 # below can be exercised by a test without a container.
 DATA_DIR="${CC_AUDIT_DATA_DIR:-/data}"
@@ -58,7 +61,7 @@ DATA_DIR="${CC_AUDIT_DATA_DIR:-/data}"
 input="$(cat)"
 tool="$(printf '%s' "${input}" | jq -r '.tool_name // ""' 2>/dev/null)"
 event="$(printf '%s' "${input}" | jq -r '.hook_event_name // ""' 2>/dev/null)"
-ts="$(date '+%Y-%m-%d %H:%M:%S')"
+ts="$(audit_timestamp)"
 line=""
 
 # The outcome marker. Empty for a call that succeeded, so every line this hook

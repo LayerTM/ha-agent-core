@@ -9,6 +9,8 @@ set -o pipefail
 source "${BASH_SOURCE[0]%/*}/../lib/addon-branding.sh"
 # shellcheck source-path=SCRIPTDIR source=../lib/ha-curl.sh
 source "${BASH_SOURCE[0]%/*}/../lib/ha-curl.sh"
+# shellcheck source-path=SCRIPTDIR source=../lib/audit-time.sh
+source "${BASH_SOURCE[0]%/*}/../lib/audit-time.sh"
 
 input="$(cat)"
 tool="$(printf '%s' "${input}" | jq -r '.tool_name // ""' 2>/dev/null)"
@@ -44,7 +46,7 @@ echo "${now}" > "${marker}"
 # One record, one line: a multi-line error from ha-backup must not add lines of
 # its own to the audit log (ha-usage reads chat spend from whole lines).
 audit_line() {
-    printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$(printf '%s' "$1" | tr '\000-\037\177' ' ')" >> /data/claude-audit.log
+    printf '%s  %s\n' "$(audit_timestamp)" "$(printf '%s' "$1" | tr '\000-\037\177' ' ')" >> /data/claude-audit.log
 }
 
 # The claude-auto- prefix and the marker file name stay as they are: the backups
