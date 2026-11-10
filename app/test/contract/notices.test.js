@@ -21,6 +21,7 @@ const CLAUDE_BUDGET_NOTICE = {
   it: `Ho raggiunto il budget d'uso di Claude di oggi ($7.5), quindi sono in pausa fino a domani. Puoi aumentare "Chat daily budget (USD)" nelle opzioni dell'add-on.`,
   pt: `Atingi o orçamento de uso do Claude de hoje ($7.5), por isso estou pausado até amanhã. Podes aumentar "Chat daily budget (USD)" nas opções do add-on.`,
   nl: `Ik heb het Claude-gebruiksbudget van vandaag ($7.5) bereikt en pauzeer tot morgen. Je kunt "Chat daily budget (USD)" in de add-on-opties verhogen.`,
+  hu: `Elértem a mai Claude használati keretet ($7.5), ezért holnapig szünetelek. A „Chat daily budget (USD)” értéket a bővítmény beállításaiban növelheted.`,
 };
 
 test('with the Claude name every budget notice is unchanged', () => {
@@ -50,7 +51,7 @@ test('a refused Home Assistant token is explained in every supported language, w
   for (const lang of SUPPORTED_LANGS) {
     const text = tokenRefusedNotice(lang, 403);
     assert.ok(text.includes('403'), lang);
-    assert.ok(/administra|адміністратор|amministrat|beheerder/i.test(text), lang);
+    assert.ok(/administra|адміністратор|amministrat|beheerder|rendszergazd/i.test(text), lang);
     assert.ok(!/claude/i.test(text), lang);
   }
   assert.equal(tokenRefusedNotice('xx', 401), tokenRefusedNotice('en', 401));

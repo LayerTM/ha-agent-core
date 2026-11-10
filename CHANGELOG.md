@@ -6,6 +6,12 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- The texts the server writes itself (a device that was not found or is ambiguous, a
+  cut answer, the daily budget, a refused token) are available in Hungarian; a
+  conversation in `hu` no longer gets them in English.
+
 ### Changed
 
 - Every answer, including a voice command through Assist, arrives sooner: a read now
