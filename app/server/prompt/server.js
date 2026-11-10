@@ -12,7 +12,7 @@ const crypto = require('node:crypto');
 const express = require('express');
 const {
   ipAllowed, tokenMatches, sanitizePrompt, sanitizeId,
-  validateIntents, validateMemory, factText, MEMORY_MAX_BYTES, redactDeep, sha12, wholeCharEnd,
+  validateIntents, validateMemory, factText, MEMORY_MAX_BYTES, redactDeep, sha12, streamableEnd,
 } = require('./security');
 const { adapter, branding } = require('../adapter-contract');
 const {
@@ -94,10 +94,19 @@ const BODY_KEYS = new Set([
 // A version published on /api/status is a plain token, whatever the agent printed.
 const VERSION_RE = /^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$/;
 
-// When streaming, hold back this many trailing chars of the redacted text before
-// emitting, so a secret split across fragments is redacted before any of it ships.
-// The terminal `done` line always carries the fully-redacted authoritative text.
+// When streaming, at least this many trailing chars of the redacted text stay back
+// (see streamableEnd in security.js for the rest of the hold-back rule). The
+// terminal `done` line always carries the fully-redacted authoritative text.
 const STREAM_SAFETY_WINDOW = 96;
+
+// What the last delta of a streamed answer carries. Deltas only grow and a client
+// builds the answer from them: when the core's own words took the model's place (a
+// device that was not found), they follow what already went out rather than
+// continuing it mid-word. Otherwise the rest of the text.
+function lastDelta(text, emittedLen, replaced) {
+  if (replaced && emittedLen > 0) return `\n\n${text}`;
+  return text.slice(emittedLen);
+}
 
 // Camera vision: only a well-formed `camera.<object_id>` may be snapshotted, the
 // image is capped, and the integration must only pass cameras exposed to Assist.
@@ -1253,10 +1262,9 @@ function createPromptApp({
           // goes on to write is a guess: nothing more of it ships.
           if (tokenRefusal(runId) !== null) return;
           const redacted = redact(fullText);
-          // The window is counted in UTF-16 code units, so its edge can fall
-          // between the two halves of one character; the last half-character is
-          // held back for the next delta, which will carry it whole.
-          const safeLen = wholeCharEnd(redacted, Math.max(0, redacted.length - STREAM_SAFETY_WINDOW));
+          // What may go out is the stream's hold-back rule (security.js), which
+          // also keeps every character whole.
+          const safeLen = streamableEnd(redacted, STREAM_SAFETY_WINDOW, redact);
           if (safeLen > emittedLen) {
             const chunk = redacted.slice(emittedLen, safeLen);
             emittedLen = safeLen;
@@ -1453,6 +1461,7 @@ function createPromptApp({
         ? { ...outcome, proposal: null, automation: null, memoryChange: null }
         : outcome;
       let answerText = answer.text;
+      let replaced = false;
       let resolved = { proposal: null, automation: null };
       if (answer.proposal || answer.automation) {
         let problems;
@@ -1468,9 +1477,13 @@ function createPromptApp({
           resolved = { proposal: null, automation: null };
           problems = [{ problem: err.tooLarge ? 'too_large' : 'unavailable', ref: '', candidates: [] }];
         }
-        if (problems.length > 0) answerText = targetNotice(language, problems);
+        if (problems.length > 0) {
+          answerText = targetNotice(language, problems);
+          replaced = true;
+        }
       }
 
+      // What this turn kept, repeats and is measured by: the answer, redacted whole.
       const text = redact(answerText);
       // Remember this read turn (redacted text only) so the next turn in the same
       // conversation has context. Never a web-granted turn: its text came from
@@ -1523,11 +1536,11 @@ function createPromptApp({
       if (streaming) {
         // Flush any tail the safety window held back, then one terminal `done`
         // line carrying the authoritative payload (full redacted text + proposal).
-        // The deltas already reconstruct `text`; it is repeated in `done` for
-        // resilience, and the client treats `done` as truth.
-        if (text.length > emittedLen) {
-          res.write(`${JSON.stringify({ type: 'delta', text: text.slice(emittedLen) })}\n`);
-        }
+        // The deltas reconstruct `text`, except that a notice in place of the
+        // model's text follows what already went out (lastDelta); the client
+        // treats `done` as truth.
+        const tail = lastDelta(text, emittedLen, replaced);
+        if (tail) res.write(`${JSON.stringify({ type: 'delta', text: tail })}\n`);
         res.write(`${JSON.stringify({ type: 'done', ...responseBody })}\n`);
         return res.end();
       }

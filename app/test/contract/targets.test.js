@@ -2,9 +2,10 @@
 
 // A device the model NAMES becomes an entity id by Home Assistant's own matcher,
 // or no proposal leaves at all. Driven through the real relay against a Core
-// that answers like Home Assistant 2026.9: the live-context tool lists exposed
-// devices by names, domain and areas — never by entity id — and matches a name
-// by any of the device's names or aliases, or by its exact entity id.
+// that answers like Home Assistant 2026.11: the live-context tool lists exposed
+// devices by names, domain, state, areas and attributes — never by entity id —
+// and matches a name by any of the device's names or aliases, or by its exact
+// entity id.
 
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
@@ -20,13 +21,27 @@ const { adapter, branding } = createNeutralAdapter();
 useAdapter(adapter, branding);
 
 const { startCoreRelay } = require('../../server/prompt/core-relay');
-const { resolveAnswer, createResolver } = require('../../server/prompt/targets');
+const { resolveAnswer, createResolver, identity } = require('../../server/prompt/targets');
 const { createPromptApp } = require('../../server/prompt/server');
 const { buildRedactor } = require('../../server/prompt/security');
 
 // The home. `exposed: false` is an entity Home Assistant does not share with Assist.
 const HOME = [
   { id: 'input_boolean.sandbox_test_lamp', name: 'Sandbox Test Lamp', area: 'Office' },
+  // A device's block ends with its areas when it has no attributes to print (a light
+  // that is off), with its attributes, or with its state when it has no area. None
+  // of these is the last of its domain in the listing, while a device asked for by
+  // name is the last (and only) block of its answer.
+  { id: 'light.living_room_o1', name: 'Living Room O1', area: 'Living Room' },
+  { id: 'switch.kitchen_fridge', name: 'Kitchen Fridge Kitchen Fridge', area: 'Kitchen' },
+  { id: 'button.kitchen_display_off', name: 'Kitchen Display Bildschirm ausschalten', area: 'Kitchen' },
+  { id: 'switch.hallway_intercom_door_open', name: 'Hallway Intercom Door Open', area: 'Hallway' },
+  { id: 'valve.utility_water_valve', name: 'Utility Water Valve', area: 'Utility', attributes: { device_class: 'water' } },
+  { id: 'switch.boiler_power', name: 'Boiler BUD Ariston power' },
+  { id: 'input_select.guest_language', name: 'Guest language', attributes: { options: 'en, de' } },
+  { id: 'button.doorbell_ring', name: 'Doorbell Ring', area: 'Hallway' },
+  { id: 'valve.garden_valve', name: 'Garden Valve', area: 'Garden', attributes: { device_class: 'water' } },
+  { id: 'input_select.house_mode', name: 'House mode' },
   { id: 'light.desk_lamp', name: 'Desk Lamp', area: 'Office' },
   { id: 'light.desk_lamp_2', name: 'Desk Lamp', area: 'Bedroom' },
   { id: 'switch.heater', name: 'Heater', aliases: ['Warmer'] },
@@ -51,17 +66,19 @@ const haNames = (e) => e.haNames || [e.name, ...(e.aliases || [])];
 const norm = (s) => s.trim().toLowerCase();
 let tick = 0;
 
-// Home Assistant's `yaml_util.dump` of the exposed entities: names, domain, a
-// state that changes between two questions, areas.
+// Home Assistant's answer: a heading and `yaml_util.dump` of the exposed entities
+// (names, domain, a state that changes between two questions, areas, attributes),
+// joined by a newline — and YAML's dump ends with one of its own.
 function dump(entities) {
   tick += 1;
-  return ['Live Context: An overview of the areas and the devices in this smart home:',
-    ...entities.flatMap((e) => [
-      `- names: ${haNames(e).join(', ')}`,
-      `  domain: ${e.id.split('.')[0]}`,
-      `  state: '${tick % 2 ? 'on' : 'off'}'`,
-      ...(e.area ? [`  areas: ${e.area}`] : []),
-    ])].join('\n');
+  const yaml = entities.flatMap((e) => [
+    `- names: ${haNames(e).join(', ')}`,
+    `  domain: ${e.id.split('.')[0]}`,
+    `  state: '${tick % 2 ? 'on' : 'off'}'`,
+    ...(e.area ? [`  areas: ${e.area}`] : []),
+    ...(e.attributes ? ['  attributes:', ...Object.entries(e.attributes).map(([k, v]) => `    ${k}: ${v}`)] : []),
+  ]).map((line) => `${line}\n`).join('');
+  return ['Live Context: An overview of the areas and the devices in this smart home:', yaml].join('\n');
 }
 
 function liveContext({ name, domain }) {
@@ -130,6 +147,34 @@ test('a unique name becomes its entity id, and the rest of the intent is kept', 
 test('a name in other letter case, and an exposed entity id, resolve too', async () => {
   const out = await resolveProposal(proposalOf(intent(['sandbox test lamp', 'light.porch'])));
   assert.deepEqual(out.proposal.intents[0].targets, ['input_boolean.sandbox_test_lamp', 'light.porch']);
+});
+
+test('a device resolves to its one id wherever its block ends and wherever it sits in the listing', async () => {
+  const table = [
+    ['Living Room O1', 'light.living_room_o1'],
+    ['Kitchen Fridge Kitchen Fridge', 'switch.kitchen_fridge'],
+    ['Kitchen Display Bildschirm ausschalten', 'button.kitchen_display_off'],
+    ['Hallway Intercom Door Open', 'switch.hallway_intercom_door_open'],
+    ['Utility Water Valve', 'valve.utility_water_valve'],
+    ['Boiler BUD Ariston power', 'switch.boiler_power'],
+    ['Guest language', 'input_select.guest_language'],
+    ['Doorbell Ring', 'button.doorbell_ring'],
+    ['Garden Valve', 'valve.garden_valve'],
+    ['House mode', 'input_select.house_mode'],
+  ];
+  for (const [ref, id] of table) {
+    const out = await resolveProposal(proposalOf(intent([ref])));
+    assert.deepEqual(out.problems, [], ref);
+    assert.deepEqual(out.proposal.intents[0].targets, [id], ref);
+  }
+});
+
+test("a device's identity does not depend on blank lines or trailing blanks around it", () => {
+  const block = '- names: Living Room O1\n  domain: light\n  state: \'off\'\n  areas: Living Room';
+  for (const variant of [`${block}\n`, `${block}\n\n`, `${block}  \n`, `${block.replace(/\n/g, '  \n')}\n`]) {
+    assert.equal(identity(variant), identity(block), JSON.stringify(variant));
+  }
+  assert.notEqual(identity(block), identity(block.replace('Living Room', 'Kitchen')));
 });
 
 test('an ambiguous name is refused, naming both candidates', async () => {
@@ -255,7 +300,7 @@ test('every lookup is recorded against its run', async () => {
 
 // --- through the prompt API ---------------------------------------------------------
 
-async function ask(lookupFor, proposal) {
+async function ask(lookupFor, proposal, { stream = false, streamed = null } = {}) {
   const app = createPromptApp({
     token: 'contract-token-0123456789abcdef',
     claudeBin: path.join(TMP, 'none'),
@@ -268,16 +313,21 @@ async function ask(lookupFor, proposal) {
     redact: buildRedactor([]),
     audit: () => {},
     lookupFor,
-    runAgent: async () => ({ status: 'ok', text: 'Turning it off?', proposal, automation: null, toolsUsed: [], numTurns: 1 }),
+    runAgent: async (opts) => {
+      const text = streamed ?? 'Turning it off?';
+      if (streamed !== null) opts.onText(text);
+      return { status: 'ok', text, proposal, automation: null, toolsUsed: [], numTurns: 1 };
+    },
   });
   const server = await new Promise((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
   try {
     const res = await fetch(`http://127.0.0.1:${server.address().port}/api/prompt`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: 'Bearer contract-token-0123456789abcdef' },
-      body: JSON.stringify({ prompt: 'turn off the lamp', mode: 'read', language: 'en' }),
+      body: JSON.stringify({ prompt: 'turn off the lamp', mode: 'read', language: 'en', ...(stream ? { stream: true } : {}) }),
     });
-    return await res.json();
+    if (!stream) return await res.json();
+    return (await res.text()).split('\n').filter(Boolean).map((line) => JSON.parse(line));
   } finally {
     server.closeAllConnections();
     server.close();
@@ -294,6 +344,27 @@ test('the prompt API says which device it could not find, and proposes nothing',
   const body = await ask((runId) => relay.lookup(runId), proposalOf(intent(['Desk Lamp'])));
   assert.equal(body.proposal, null);
   assert.match(body.text, /“Desk Lamp” matches more than one device \(Desk Lamp: light\.desk_lamp, Desk Lamp: light\.desk_lamp_2\)/);
+});
+
+test('a streamed answer a notice replaces ends with the notice, after what already went out', async () => {
+  const streamed = `I will turn off the Desk Lamp now. ${'It is the one by the window. '.repeat(6)}Done in a moment.`;
+  const notice = '“Desk Lamp” matches more than one device (Desk Lamp: light.desk_lamp, Desk Lamp: light.desk_lamp_2) — which one do you mean?';
+  const lines = await ask((runId) => relay.lookup(runId), proposalOf(intent(['Desk Lamp'])), { stream: true, streamed });
+  const done = lines.pop();
+  assert.equal(done.type, 'done');
+  assert.equal(done.proposal, null);
+  assert.equal(done.text, notice, 'what the turn keeps is the notice alone');
+  assert.ok(lines.length >= 2 && lines.every((l) => l.type === 'delta'));
+  const deltas = lines.map((l) => l.text).join('');
+  const went = lines.slice(0, -1).map((l) => l.text).join('');
+  assert.ok(went.length > 0 && streamed.startsWith(went), 'what went out before the lookup is the model\'s text');
+  assert.equal(deltas, `${went}\n\n${notice}`, 'the notice follows it whole');
+
+  const plain = await ask((runId) => relay.lookup(runId), proposalOf(intent(['Sandbox Test Lamp'])), { stream: true, streamed });
+  const plainDone = plain.pop();
+  assert.equal(plainDone.text, streamed, 'an answer nothing replaced is streamed as it is');
+  assert.equal(plain.map((l) => l.text).join(''), streamed);
+  assert.deepEqual(plainDone.proposal.intents[0].targets, ['input_boolean.sandbox_test_lamp']);
 });
 
 test('a lookup that fails, or no Home Assistant at all, proposes nothing', async () => {

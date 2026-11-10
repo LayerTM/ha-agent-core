@@ -400,6 +400,64 @@ test('a streamed read sends deltas and ends with exactly one done line', async (
   assert.equal(lines.map((line) => line.text).join(''), answer);
 });
 
+// Secrets of every shape the redactor knows, each longer than the stream's window,
+// streamed one character at a time as an engine may: no part of one goes out.
+const LONG_SECRETS = [
+  `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.${'eyJpc3MiOiI0ZjM2YjQ1ZGE5ZTQ0ZTBhOGM0ZDY2NTEyZWZhNjY3ZiIsImlhdCI6MTczMDAwMDAwMH0'}.SIGNATUREsignatureSIGNATURE0123456789abcdef`,
+  `sk-ant-api03-${'A1b2C3d4E5f6G7h8'.repeat(7)}`,
+  `Bearer ${'Zx9_Yw8-Vu7.Ts6~'.repeat(7)}`,
+];
+
+test('the stream holds back a word that has not ended, and a header word before it', () => {
+  const { streamableEnd } = require('../../server/prompt/security');
+  const lead = 'x '.repeat(100);
+  assert.equal(streamableEnd(`${lead}abc`, 0), lead.length, 'an open word stays back');
+  assert.equal(streamableEnd(`${lead}abc `, 0), lead.length + 4, 'an ended word goes');
+  for (const header of ['Bearer', 'Token']) {
+    for (const tail of ['', ' ', '  abc']) {
+      assert.equal(streamableEnd(`${lead}${header}${tail}`, 0), lead.length, `${header}${JSON.stringify(tail)}`);
+    }
+  }
+  assert.equal(streamableEnd(`${lead}NotBearer abc`, 0), lead.length + 10, 'only the word itself');
+  const ja = 'トークンの値は表示できません。'.repeat(20);
+  assert.equal(streamableEnd(ja, 96), ja.length - 96, 'text without blanks streams up to the window');
+  const jwt = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiI0ZjM2YjQ1';
+  const glued = `${'説明します。'.repeat(30)}トークン${jwt}`;
+  assert.equal(streamableEnd(glued, 0), glued.length - jwt.length, 'a key run glued to other text is held whole');
+  assert.equal(streamableEnd(`${lead}abc def`, 96), lead.length + 7 - 96, 'the window stays behind');
+  assert.equal(streamableEnd(`${lead}a\uD83D\uDE00 `, 2), lead.length + 1, 'a character stays whole');
+  const value = 'pass phrase '.repeat(12);
+  const redact = buildRedactor([value]);
+  const answer = `${lead}${value}end`;
+  let out = '';
+  for (let i = 1; i <= answer.length; i += 1) {
+    const r = redact(answer.slice(0, i));
+    const end = streamableEnd(r, 96, redact);
+    if (end > out.length) out += r.slice(out.length, end);
+  }
+  assert.equal(out.includes(value.slice(0, 8)), false, 'a secret given by value, blanks and all, longer than the window');
+});
+
+test('no delta carries any part of a secret, however long, and nothing the run kept does', async () => {
+  for (const secret of LONG_SECRETS) {
+    const answer = `Here it is: ${secret} and that is all I can say about it, really.`;
+    state.script.push((opts) => {
+      for (let i = 1; i <= answer.length; i += 1) opts.onText(answer.slice(0, i));
+      return okOutcome({ text: answer });
+    });
+    // eslint-disable-next-line no-await-in-loop
+    const lines = await ndjson(await post({ prompt: 'stream a secret', stream: true }));
+    const done = lines.pop();
+    const deltas = lines.map((l) => l.text).join('');
+    const token = secret.replace(/^Bearer /, '');
+    for (const text of [deltas, done.text]) {
+      assert.equal(text.includes(token.slice(0, 8)), false, `${secret.slice(0, 12)}…: ${JSON.stringify(text)}`);
+    }
+    assert.equal(done.text, 'Here it is: [REDACTED] and that is all I can say about it, really.');
+    assert.equal(deltas, done.text);
+  }
+});
+
 test('remembered facts reach the run normalized, a suggested change comes back, and no fact text is logged', async () => {
   const memory = [{ id: 'a1', text: '  My room is\nthe office. ' }, { id: 'b2', text: 'é'.repeat(200) }];
   const change = { remember: [`Sleep mode is ${SECRET}.`], forget: ['a1'] };
