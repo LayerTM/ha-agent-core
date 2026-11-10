@@ -13,6 +13,9 @@ uses [Semantic Versioning](https://semver.org/).
   the notice and the degraded outcome a fresh read gives. A warm session is now
   neither served nor kept while Home Assistant does not accept the connection
   (refused or unreachable): the read runs fresh and is judged like any fresh read.
+- A streamed answer that a notice replaces (a device that matches more than one,
+  or none) used to stop mid-word where the stream's hold-back ended, and the
+  notice followed. The model's text now goes out whole before the notice.
 
 ## [0.13.0] - 2026-11-10
 

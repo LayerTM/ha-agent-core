@@ -101,10 +101,11 @@ const STREAM_SAFETY_WINDOW = 96;
 
 // What the last delta of a streamed answer carries. Deltas only grow and a client
 // builds the answer from them: when the core's own words took the model's place (a
-// device that was not found), they follow what already went out rather than
-// continuing it mid-word. Otherwise the rest of the text.
-function lastDelta(text, emittedLen, replaced) {
-  if (replaced && emittedLen > 0) return `\n\n${text}`;
+// device that was not found), the model's text first goes out whole (the hold-back
+// can stop it mid-word), then the notice on a paragraph of its own. Otherwise the
+// rest of the text.
+function lastDelta(text, emittedLen, replaced, modelText) {
+  if (replaced && emittedLen > 0) return `${modelText.slice(emittedLen)}\n\n${text}`;
   return text.slice(emittedLen);
 }
 
@@ -1494,6 +1495,7 @@ function createPromptApp({
 
       // What this turn kept, repeats and is measured by: the answer, redacted whole.
       const text = redact(answerText);
+      const modelText = replaced ? redact(answer.text) : text;
       // Remember this read turn (redacted text only) so the next turn in the same
       // conversation has context. Never a web-granted turn: its text came from
       // pages nobody vetted, and the next turn may propose.
@@ -1548,7 +1550,7 @@ function createPromptApp({
         // The deltas reconstruct `text`, except that a notice in place of the
         // model's text follows what already went out (lastDelta); the client
         // treats `done` as truth.
-        const tail = lastDelta(text, emittedLen, replaced);
+        const tail = lastDelta(text, emittedLen, replaced, modelText);
         if (tail) res.write(`${JSON.stringify({ type: 'delta', text: tail })}\n`);
         res.write(`${JSON.stringify({ type: 'done', ...responseBody })}\n`);
         return res.end();
