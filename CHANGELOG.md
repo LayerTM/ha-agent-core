@@ -6,6 +6,14 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- With `prompt_keep_warm` on, a read after Home Assistant refused the token was
+  answered by the warm agent with prose, and was recorded as healthy, instead of
+  the notice and the degraded outcome a fresh read gives. A warm session is now
+  neither served nor kept while Home Assistant does not accept the connection
+  (refused or unreachable): the read runs fresh and is judged like any fresh read.
+
 ## [0.13.0] - 2026-11-10
 
 ### Added

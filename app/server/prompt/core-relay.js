@@ -411,6 +411,7 @@ function deny(res, status, message) {
  *   revokeSession: (sessionToken: string) => void,
  *   revoke: (token: string) => void, close: () => void,
  *   mcpAuth: () => null|'ok'|'unauthorized'|'unreachable',
+ *   mcpUsable: () => boolean,
  *   probeAuth: () => Promise<null|'ok'|'unauthorized'|'unreachable'>,
  *   tokenRefusal: (runId: string) => null|number,
  *   lookup: (runId: string) => {
@@ -1237,6 +1238,8 @@ async function startCoreRelay({
     },
     // Whether Home Assistant accepts the token on the MCP path (see mcpAuth).
     mcpAuth: () => mcpAuth,
+    // Whether a process that connected in the current state may be trusted (MCP_AUTH_USABLE).
+    mcpUsable: () => mcpAuth === null || MCP_AUTH_USABLE[mcpAuth] === true,
     // The status (401 or 403) Home Assistant answered this run's own requests
     // with, or null if it has not refused them: what a run is told when the
     // token it rode on was the reason it could not read the house.
@@ -1260,4 +1263,10 @@ async function startCoreRelay({
   };
 }
 
-module.exports = { startCoreRelay, refusedTokenHint, allowed, CAMERA_PATH_RE, MCP_PATH };
+// The states `mcpAuth` can take once something has answered, and whether a
+// process holding a connection made in that state may be trusted: 'ok' is the
+// only one that says Home Assistant accepts the token. (null, before anything
+// has answered, is not a state of the connection and is treated as usable.)
+const MCP_AUTH_USABLE = Object.freeze({ ok: true, unauthorized: false, unreachable: false });
+
+module.exports = { startCoreRelay, refusedTokenHint, allowed, CAMERA_PATH_RE, MCP_PATH, MCP_AUTH_USABLE };

@@ -76,6 +76,7 @@ function killProcessGroup(child) {
  *   close(handle): Promise<void>                                                   revoke it, remove its files
  *   bind(token, runToken): boolean                                                 lend it one run for one turn
  *   unbind(token): void
+ *   usable(): boolean                                                              whether Home Assistant accepts the connection a session makes
  * }
  */
 function createSessionPool({
@@ -163,6 +164,10 @@ function createSessionPool({
 
     take(runToken) {
       if (this.state !== 'ready') return null;
+      // A session's tools connected when it started. A turn makes no request that
+      // would show the connection is no longer accepted, so the answer would be
+      // the model's guess; a read it cannot serve runs fresh, and is judged as one.
+      if (!hooks.usable()) { this.kill('Home Assistant does not accept its connection'); return null; }
       if (!hooks.bind(this.handle.token, runToken)) return null;
       clearTimeout(this.timer);
       this.state = 'busy';
@@ -190,6 +195,7 @@ function createSessionPool({
       const total = inputTotal(tokens);
       if (this.baseline === null) this.baseline = total;
       if (!keep) { this.kill('its turn did not end cleanly'); return; }
+      if (!hooks.usable()) { this.kill('Home Assistant does not accept its connection'); return; }
       if (this.turns >= maxTurns) { this.kill(`it served ${this.turns} turns`); return; }
       if (total > this.baseline + contextGrowth) { this.kill('its context kept growing'); return; }
       this.startReset();
@@ -244,6 +250,7 @@ function createSessionPool({
     // the process and returns { child, release }. Never rejects.
     async spawn(key, launch) {
       if (closed || sessions.has(key)) return;
+      if (!hooks.usable()) return;
       if (sessions.size >= cap) {
         const idle = [...sessions.values()].find((s) => s.state === 'ready');
         if (!idle) return;

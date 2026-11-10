@@ -300,6 +300,7 @@ async function start() {
           },
           bind: (sessionToken, runToken) => (!relay || !sessionToken ? true : relay.bindSession(sessionToken, runToken)),
           unbind: (sessionToken) => { if (relay && sessionToken) relay.unbindSession(sessionToken); },
+          usable: () => !relay || relay.mcpUsable(),
         },
       });
       log('prompt_keep_warm: on — reads may be served by a warm session, reset before every read');
