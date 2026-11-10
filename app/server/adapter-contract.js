@@ -44,6 +44,14 @@ const REQUIRED = {
 const OPTIONAL = {
   'console.remoteWindow': 'function',
   'runner.endRun': 'function',
+  // Warm sessions (`prompt_keep_warm`): { clearLine(), userLine(text),
+  // createResetReader() }, and `runner.launch` reads `spec.session` (see README).
+  'runner.session': 'object',
+  // The engine-safe form of a read's text: the core passes the composed input
+  // through it before the engine sees it, on a fresh run's stdin and on a warm
+  // session's turn alike, so user text can never be read as an engine command.
+  // Absent, the text goes in as composed.
+  'runner.userText': 'function',
   'descriptor.versionAlias': 'string',
   'descriptor.reportsCost': 'boolean',
   // An engine whose structured output cannot describe an OPEN object — one with

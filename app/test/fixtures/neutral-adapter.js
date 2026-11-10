@@ -82,6 +82,14 @@ function createNeutralAdapter() {
     // from a sweep, a boot wipe or a collected decoder.
     endRuns: [], // { spec, existed }
     tapes: [], // queued tapes for the agent process; empty → okTape()
+    // Warm sessions: with `stableArgs` a fresh run's command line depends only on
+    // what decides a run (so two alike runs share a session), each turn of a
+    // session plays the next of `turnTapes`, and `sessionAgent` says how the
+    // session agent treats a reset: { honourClear, forget } (both default true).
+    stableArgs: false,
+    turnTapes: [],
+    sessionAgent: {},
+    sessionLaunches: [],
     mcpConfigs: [],
     removedSessions: [],
     limits: null,
@@ -116,11 +124,20 @@ function createNeutralAdapter() {
         const runDir = path.join(tapeDir(), `run-${state.launches.length}`);
         fs.mkdirSync(runDir, { recursive: true });
         state.runDirs.set(spec, runDir);
+        if (spec.session) {
+          state.sessionLaunches.push(spec);
+          const conf = path.join(tapeDir(), `session-${state.launches.length}.json`);
+          fs.writeFileSync(conf, JSON.stringify({ honourClear: true, forget: true, ...state.sessionAgent }));
+          return { args: [AGENT, '--session', conf, `--mcp=${spec.mcpConfigPath || ''}`], env: {} };
+        }
         const tape = state.tapes.shift() || okTape();
-        const file = path.join(tapeDir(), `tape-${state.launches.length}.json`);
+        const file = path.join(tapeDir(), state.stableArgs ? 'tape-stable.json' : `tape-${state.launches.length}.json`);
         fs.writeFileSync(file, JSON.stringify(tape));
+        const decides = state.stableArgs
+          ? [`--model=${spec.model || ''}`, `--stream=${spec.stream}`, spec.systemPrompt, '--mcp', spec.mcpConfigPath || '']
+          : [];
         return {
-          args: [AGENT, file],
+          args: [AGENT, file, ...decides],
           env: {
             ...(env.NEUTRAL_AGENT_KEY ? { NEUTRAL_AGENT_KEY: env.NEUTRAL_AGENT_KEY } : {}),
             ...(env.NEUTRAL_LEAK_TEST ? { SUPERVISOR_TOKEN: 'leak', TERM: 'xterm', PATH: '/leak' } : {}),
@@ -136,6 +153,20 @@ function createNeutralAdapter() {
         if (!dir) return;
         state.runDirs.delete(spec);
         fs.rmSync(dir, { recursive: true, force: true });
+      },
+      // The neutral session protocol: one JSON line per user turn carrying the
+      // tape that turn plays, a `clear` line, and a reset that is complete at the
+      // result that follows the agent's `reset` event.
+      session: {
+        clearLine: () => JSON.stringify({ type: 'clear' }),
+        userLine: (text) => JSON.stringify({ type: 'user', text, tape: state.turnTapes.shift() || okTape() }),
+        createResetReader() {
+          let reset = false;
+          return (line) => {
+            if (line && line.type === 'reset') reset = true;
+            return reset && line && line.type === 'result';
+          };
+        },
       },
       createDecoder() {
         return (event) => {

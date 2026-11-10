@@ -6,6 +6,25 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- The option `prompt_keep_warm` (off by default) lets a read be answered by an
+  agent that is already running, so it skips the agent's start and its connection
+  to Home Assistant. The engine's conversation is reset before every read and the
+  read is sent only after the reset is confirmed. Between reads the agent cannot
+  call a Home Assistant tool or read a camera. A session serves only reads from the
+  same client with the same model, language and surface, never a camera question,
+  a web read, an automation edit or a retry. At most two run at once, each costing
+  the memory of one agent process. People who talk through one integration share
+  its session.
+- An engine adapter may declare `runner.session` to support it, and
+  `server/prompt/session-check.js` checks that the bundled engine still resets a
+  session.
+- An engine adapter may declare `runner.userText(text)`, the engine-safe form of a
+  read's text. The core applies it to every read before the engine sees it, on a
+  fresh run and in a warm session alike, so a question can never be taken for one
+  of the engine's own commands.
+
 ### Changed
 
 - Every answer, including a voice command through Assist, arrives sooner: a read now

@@ -42,6 +42,8 @@ valid (see [Names](#names) and [Console pages](#console-pages)):
 | `runner.launch(spec, { env })` | function | `{ args, env }` for one run (see below) |
 | `runner.createDecoder(spec)` | function | a function turning one parsed line of the agent's JSON-lines output into a list of run events |
 | `runner.endRun(spec)` | optional function | free what this run allocated (a scratch directory, an entry in a live set). Called once per run on EVERY ending — an answer, a model error, a timeout, an abort, a kill, and a failure to spawn, where the run never started but `launch` had already allocated. `spec` is the one `launch` and `createDecoder` received, so it is the run's identity. It may arrive for a `spec` nothing was allocated for, so it must tolerate that and be idempotent; a throw is logged and never changes the run's outcome. An adapter that allocates nothing per run does not ship it. A process that is killed outright never reaches it, so an adapter whose allocation outlives the process needs its own way back to it |
+| `runner.session` | optional object | `{ clearLine(), userLine(text), createResetReader() }`: what [warm sessions](#warm-sessions) need. `clearLine()` is the line that resets the engine's conversation, `userLine(text)` the line that sends one turn, and `createResetReader()` returns a function that is given each parsed output line after a reset was sent and returns `true` at the line that completes it. With it, `launch` receives `spec.session: true` for a session's command line and must make the engine read its turns from stdin, one line each. Absent, `prompt_keep_warm` is logged as unsupported and every read runs fresh |
+| `runner.userText` | optional function | `userText(text)` returns the engine-safe form of a read's text, so a question the engine would take as one of its own commands is read as an ordinary turn. The core passes every read's composed input through it before the engine sees it: a fresh run's stdin and a warm session's turn (before `userLine`) alike. It must return a string; one that throws or returns anything else fails that read before any agent starts. Absent, the text goes in as composed |
 | `runner.webCapability` | optional object | `{ search, fetch }`, both booleans: whether the engine can search the web and open web pages. Absent, a [web read](#web-reads) is refused; present, `launch` must turn a run's `spec.web` into the engine's own web tools and allow nothing beyond it |
 | `runner.toolName(basename)` | function | the name the agent gives a tool of the `ha` MCP server |
 | `runner.toolBasename(name)` | function | the basename of such a tool name, or `null` for any other tool |
@@ -136,7 +138,7 @@ The adapter turns the run spec into a command line. Its `launch(spec, { env })`
 receives `mode` (always `"read"`), `read` (always `true`), `vision`, `imagePath`, `haAllowed` and
 `haDisallowed` (the tools the run may and may not call), `schema`,
 `systemPrompt`, `maxTurns`, `mcpConfigPath`, `toolTimeoutSeconds`, `settings`, `model`,
-`stream` and `web`.
+`stream`, `web` and, for a [warm session](#warm-sessions), `session`.
 `toolTimeoutSeconds` comes with `mcpConfigPath`, and the adapter must set the engine's own
 timeout for a tool of that server to it: an engine that gives up at Home Assistant's limit
 of 60 seconds reports its own timeout, and the agent never reads that the tool was cut off.
@@ -539,6 +541,48 @@ tree: it reads every file under `server/` and `adapter/`, follows only
 `Function`, the `vm` and `module` built-ins, `.mjs` and `.node` files, local
 requires of anything but `.js`, `.cjs` or `.json`, or outside those two
 directories), and reports cycles.
+
+### Warm sessions
+
+With the add-on option `prompt_keep_warm` on (it is off by default), a read may be
+answered by an agent process that is already running, so it does not wait for the
+agent to start and connect to Home Assistant. Each warm session costs the memory of
+one agent process for as long as it lives, and there are at most two.
+
+A session serves only reads that would get the same command line, which means the
+same model, language, surface, remembered facts and stream setting, and that come
+from the same client (`X-Claude-Caller`). Home Assistant does not say which person
+is speaking, so everyone who talks through one integration can be served by the
+same session. Nothing of one read reaches the next:
+- before every read, the engine's conversation is reset, and the read is sent only
+  after the engine has confirmed the reset. A reset that is not confirmed within
+  two seconds ends the session, and the read runs fresh;
+- the session's Home Assistant bearer means the read it is serving and nothing
+  else. Between reads it may connect and list its tools, and the relay refuses any
+  tool call or camera read with `between turns` in the log;
+- every read gets its own output path, as a fresh run does: its own decoding,
+  redaction and caps.
+
+This rests on the engine writing a read's output only while that read runs, in
+order. A line between reads ends the session. A line that the engine wrote for one
+read after it had confirmed the next reset would reach the next read, and only an
+engine tool that keeps running in the background could write one. A warm read's
+engine therefore must not be given such a tool. A read has no engine tools of its
+own, only Home Assistant's live context.
+
+Conversation history still travels in the prompt, as for a fresh read. A session
+never serves a camera question, a web read, an automation edit or a retry. It ends
+after 20 reads, after 10 minutes without one, when a read's context grows far past
+its first, on any read that does not end at its own answer (a timeout, an abort, a
+renamed tool, an engine error), and when the add-on stops. The next read then runs
+fresh, and a fresh read that succeeds starts a new session in the background. A
+read served warm has `warm=1` in its audit line.
+
+`node server/prompt/session-check.js` checks, in an assembled tree, that the engine
+still resets a session the way this relies on. It needs no sign-in and exits `0`
+when the reset holds and `1` when it does not. An add-on runs it against its
+bundled engine whenever the engine changes, because an engine release that
+stopped resetting would let one read's text reach the next.
 
 ## The start script
 
