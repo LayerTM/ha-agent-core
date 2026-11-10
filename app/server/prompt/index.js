@@ -19,6 +19,8 @@ const { checkWebOptions } = require('./web');
 const { adapter } = require('../adapter-contract');
 const { resolveCoreTarget } = require('./core-target');
 const { startCoreRelay } = require('./core-relay');
+const { createSessionPool } = require('./session-pool');
+const { READ_HA_BASENAMES } = require('./run');
 const { boundAddress } = require('../listen');
 const { readCoreVersion } = require('../core-version');
 
@@ -266,6 +268,44 @@ async function start() {
   };
   const workDir = await ensureWorkDir();
 
+  // Warm sessions (`prompt_keep_warm`, off by default): only for an engine whose
+  // adapter can reset its session between turns. Each session has a bearer of its
+  // own, bound to one run per turn (core-relay.js), and a configuration file of its own.
+  let sessionPool = null;
+  if (options.prompt_keep_warm === true) {
+    const session = adapter().runner.session;
+    if (!session || ['clearLine', 'userLine', 'createResetReader'].some((m) => typeof session[m] !== 'function')) {
+      log('prompt_keep_warm: the engine adapter cannot reset a session between turns; every read runs fresh');
+    } else {
+      sessionPool = createSessionPool({
+        log,
+        hooks: {
+          async open() {
+            if (!relay) return { token: '', mcpConfigPath: null, dir: null };
+            const bearer = relay.issueSession({ basenames: READ_HA_BASENAMES });
+            const dir = path.join(RUNS_DIR, `session-${crypto.randomBytes(6).toString('hex')}`);
+            try {
+              await fsp.mkdir(dir, { recursive: true, mode: 0o700 });
+              const configPath = await writeMcpConfig(dir, HA_MCP_URL_OVERRIDE || `${relay.url}/api/mcp`, bearer);
+              return { token: bearer, mcpConfigPath: configPath, dir };
+            } catch (err) {
+              relay.revokeSession(bearer);
+              await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
+              throw err;
+            }
+          },
+          async close(handle) {
+            if (relay && handle.token) relay.revokeSession(handle.token);
+            if (handle.dir) await fsp.rm(handle.dir, { recursive: true, force: true }).catch(() => {});
+          },
+          bind: (sessionToken, runToken) => (!relay || !sessionToken ? true : relay.bindSession(sessionToken, runToken)),
+          unbind: (sessionToken) => { if (relay && sessionToken) relay.unbindSession(sessionToken); },
+        },
+      });
+      log('prompt_keep_warm: on — reads may be served by a warm session, reset before every read');
+    }
+  }
+
   // The engine's credentials, in the order the redactor has always received them:
   // its option values after the Home Assistant ones, its environment values last.
   const secrets = adapter().prompt.secretValues({ options, env: process.env, optionString });
@@ -331,6 +371,7 @@ async function start() {
     dataDir: DATA_DIR,
     // Whether proactive alerts are on — /api/status publishes a set only then.
     proactiveAlerts: options.proactive_alerts === true,
+    sessionPool,
   });
 
   const server = http.createServer(app);
@@ -349,6 +390,7 @@ async function start() {
   announceDiscovery(token).catch((err) => log(`discovery error: ${err.message}`));
 
   return function shutdown() {
+    if (sessionPool) sessionPool.shutdown();
     shutdownRuns();
     if (relay) relay.close();
     server.close();

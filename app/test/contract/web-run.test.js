@@ -57,6 +57,8 @@ function makeApp(web) {
     },
     actFor: () => async () => ({ ok: true }),
     web,
+    // A pool is there, so the run's `warm` says whether a read could be served warm.
+    sessionPool: { neutral: 'pool' },
   });
 }
 
@@ -224,6 +226,8 @@ test('a web read gets the grant, no Home Assistant, no history, and no bearer is
   assert.equal(webRun.memory, undefined);
   assert.equal(webRun.imagePath, null);
   assert.equal(state.runs[0].web, null, 'a house read is not granted the web');
+  assert.equal(webRun.warm, null, 'a web-granted read is never served warm');
+  assert.ok(state.runs[0].warm, 'the house read beside it could be');
   assert.match(auditLines.pop(), /^prompt\[read\] .* web=1 .*status=200/);
 });
 

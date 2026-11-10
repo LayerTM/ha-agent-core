@@ -685,6 +685,19 @@ function shutdown() {
   children.clear();
 }
 
+// Tells the adapter a run (or a warm session) it launched is over.
+function tellEndRun(spec) {
+  const tell = adapter().runner.endRun;
+  if (typeof tell !== 'function') return;
+  try {
+    tell(spec);
+  } catch (err) {
+    // The run is over either way; a failed cleanup must not replace its
+    // outcome, and it must never reach a caller as a rejection.
+    console.error(`[prompt] engine adapter: endRun failed: ${err.message}`);
+  }
+}
+
 /**
  * Run one agent call. Resolves to:
  *   { status: 'ok', text, proposal, automation, memoryChange, toolsUsed, numTurns, costUsd, tokens,
@@ -713,7 +726,7 @@ function shutdown() {
  */
 function run({
   bin, settings, prompt, mcpConfigPath: mcpConfig, model, cwd, signal, history: earlier, imagePath: image,
-  onText, timeoutMs, language, surface, editAutomation: edit, memory: facts, haTools, web = null,
+  onText, timeoutMs, language, surface, editAutomation: edit, memory: facts, haTools, web = null, warm = null,
 }) {
   // A web-granted run is house-blind (web.js): whatever else the caller passed,
   // nothing of the home reaches it — no Home Assistant tools, no facts, no
@@ -738,6 +751,11 @@ function run({
     let spec;
     let child;
     let decode;
+    // A turn of a warm session (session-pool.js) when one serves this run: then
+    // `child` is that turn, and the run ends it instead of killing the process.
+    let turn = null;
+    let key = null;
+    let command;
 
     // An adapter may allocate for one run in `launch` — a scratch directory, an
     // entry in a live set — and only the core knows when that run is over. This
@@ -750,15 +768,7 @@ function run({
     const endRun = () => {
       if (released || !spec) return;
       released = true;
-      const tell = adapter().runner.endRun;
-      if (typeof tell !== 'function') return;
-      try {
-        tell(spec);
-      } catch (err) {
-        // The run is over either way; a failed cleanup must not replace its
-        // outcome, and it must never reach a caller as a rejection.
-        console.error(`[prompt] engine adapter: endRun failed: ${err.message}`);
-      }
+      tellEndRun(spec);
     };
 
     try {
@@ -767,9 +777,13 @@ function run({
         mcpConfigPath, model, imagePath, language, surface, editAutomation, memory, haTools, settings, web,
         stream: Boolean(onText),
       });
-      const command = launch(spec, process.env);
+      command = launch(spec, process.env);
       decode = adapter().runner.createDecoder(spec);
-      child = spawn(bin, command.args, {
+      if (warm && warm.pool) {
+        key = warm.pool.keyFor(command, spec.mcpConfigPath, warm.caller);
+        turn = warm.pool.take(key, warm.runToken);
+      }
+      child = turn || spawn(bin, command.args, {
         cwd,
         env: childEnv(process.env, command.env),
         stdio: ['pipe', 'pipe', 'pipe'],
@@ -781,7 +795,7 @@ function run({
       resolve({ status: 'error', reason: 'spawn-failed', message: `spawn failed: ${err.message}` });
       return;
     }
-    children.add(child);
+    if (!turn) children.add(child);
 
     let timedOut = false;
     let aborted = false;
@@ -841,10 +855,35 @@ function run({
       settled = true;
       clearTimeout(timer);
       if (signal) signal.removeEventListener('abort', onAbort);
-      killGroup(child);
-      children.delete(child);
+      if (turn) {
+        // A warm session survives a turn only when the turn ended at its own
+        // answer: anything else ends the session as it would end a fresh agent.
+        turn.end(outcome.status === 'ok' && answered && !timedOut && !aborted && !toolNameMismatch
+          && streamBytes <= STREAM_CAP_BYTES, outcome.tokens);
+      } else {
+        killGroup(child);
+        children.delete(child);
+      }
       endRun();
-      resolve(outcome);
+      resolve(turn ? { ...outcome, warm: true } : outcome);
+      // A fresh read that a warm session could have served starts one for the
+      // reads after it, in the background; it never delays this answer.
+      if (warm && warm.pool && !turn && key && outcome.status === 'ok') startSession();
+    };
+
+    const startSession = () => {
+      const sessionSpec = { ...spec, session: true };
+      warm.pool.spawn(key, (sessionConfigPath) => {
+        sessionSpec.mcpConfigPath = spec.mcpConfigPath ? (sessionConfigPath || undefined) : undefined;
+        const sessionCommand = launch(sessionSpec, process.env);
+        const sessionChild = spawn(bin, sessionCommand.args, {
+          cwd,
+          env: childEnv(process.env, sessionCommand.env),
+          stdio: ['pipe', 'pipe', 'pipe'],
+          detached: true,
+        });
+        return { child: sessionChild, release: () => tellEndRun(sessionSpec) };
+      }).catch(() => {});
     };
 
     child.on('error', (err) => {

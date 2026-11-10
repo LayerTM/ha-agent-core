@@ -653,6 +653,8 @@ function createPromptApp({
   // The function that runs one agent call: the core's own, unless a test of the
   // HTTP layer replaces it to script outcomes.
   runAgent = run,
+  // Warm sessions (session-pool.js), or null when `prompt_keep_warm` is off.
+  sessionPool = null,
 }) {
   // Whether Home Assistant is configured is a fact the caller states; there is no
   // default, because deriving it from the config path is exactly the coupling that
@@ -1275,6 +1277,7 @@ function createPromptApp({
 
       let outcome;
       let attempts = 0;
+      let servedWarm = false;
       // Why each retry was needed, in order, for the audit below. A run that only
       // succeeded on the second attempt looked identical to a clean one before —
       // which is how a whole class of silent failures stayed invisible (#58) —
@@ -1331,7 +1334,13 @@ function createPromptApp({
             // the one-request budget, so TOTAL wall-clock across attempts never
             // exceeds TIMEOUT_MS (the client can pair its timeout to that one bound).
             timeoutMs: attempts === 1 ? undefined : Math.max(0, TIMEOUT_MS - (Date.now() - started)),
+            // A warm session serves a plain read only: never a camera question (its
+            // snapshot is a per-run file), a web-granted read, an automation edit,
+            // or a retry.
+            warm: sessionPool && attempts === 1 && !imagePath && !grant && body.edit_automation === undefined
+              ? { pool: sessionPool, caller, runToken: runHandle ? runHandle.token : '' } : null,
           });
+          if (outcome.warm) servedWarm = true;
           spent += Number(outcome.costUsd) || 0;
           addRunTokens(spentTokens, outcome.tokens);
           // Learn the published tool names from EVERY attempt (success or not) —
@@ -1383,7 +1392,7 @@ function createPromptApp({
         + ` lang=${language} langdir=${safeLangTag(body.language) || '-'}`
         + ` surface=${body.surface || '-'} model=${sanitizeId(resolvedModel, 64) || 'default'}`
         + `${body.edit_automation !== undefined ? ' edit=1' : ''}${memory ? ` memory=${memory.length}` : ''}`
-        + `${grant ? ' web=1' : ''} ${detail}`;
+        + `${grant ? ' web=1' : ''}${servedWarm ? ' warm=1' : ''} ${detail}`;
 
       // A streaming READ must NEVER terminate with `{type:"error"}` — the
       // integration's NDJSON reader treats that as fatal and the chat hard-fails,

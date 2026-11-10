@@ -405,6 +405,10 @@ function deny(res, status, message) {
  * @param {number} [opts.answerStallMs]  How long Home Assistant may go silent mid-answer.
  * @returns {Promise<{
  *   url: string, port: number, issue: (runId: string) => string,
+ *   issueSession: (may?: {basenames?: string[]}) => string,
+ *   bindSession: (sessionToken: string, runToken: string) => boolean,
+ *   unbindSession: (sessionToken: string) => void,
+ *   revokeSession: (sessionToken: string) => void,
  *   revoke: (token: string) => void, close: () => void,
  *   mcpAuth: () => null|'ok'|'unauthorized'|'unreachable',
  *   probeAuth: () => Promise<null|'ok'|'unauthorized'|'unreachable'>,
@@ -466,8 +470,16 @@ async function startCoreRelay({
   // request names at most one). Both are given when the bearer is minted, so
   // there is no moment in which a live bearer means less than it will mean later.
   // An entry with an empty set may call nothing and read nothing: unset refuses.
-  /** @type {Map<string, {runId: string, basenames: Set<string>, cameras: Set<string>, ended: boolean}>} */
+  /** @typedef {{runId: string, basenames: Set<string>, cameras: Set<string>, ended: boolean, idle?: boolean}} RunEntry */
+  /** @type {Map<string, RunEntry>} */
   const runs = new Map();
+  // A warm session's bearer: one agent process serves several runs in turn, so
+  // its bearer means whichever run it is serving NOW (`current`), set when a
+  // turn starts and cleared when it ends. Between turns it means only `idle`:
+  // the session may start and list its tools (the read allowlist, which every
+  // turn shares), and nothing else — no tool call, no camera.
+  /** @type {Map<string, {current: RunEntry|null, idle: RunEntry}>} */
+  const sessions = new Map();
   // Calls a run has sent and Home Assistant has not answered yet, per run rather
   // than per request: the answer may come back on this POST or on the run's own
   // event stream, and either resolves it.
@@ -547,7 +559,12 @@ async function startCoreRelay({
     // loopback, and an attacker able to time it is already inside the container.
     // A lookup rather than a comparison, because the answer is WHICH run this is,
     // not merely whether it may pass; an unknown bearer is refused as before.
-    const entry = auth.startsWith('Bearer ') ? runs.get(auth.slice(7)) : undefined;
+    const presented = auth.startsWith('Bearer ') ? auth.slice(7) : undefined;
+    const session = presented === undefined ? undefined : sessions.get(presented);
+    // A session's bearer is resolved here, once per request: a request that
+    // arrived during a turn keeps that turn's run even if the turn ends while it
+    // is in flight, exactly like a run's own bearer.
+    const entry = session ? (session.current || session.idle) : (presented === undefined ? undefined : runs.get(presented));
     if (entry === undefined) {
       // A refusal says so. Until this line the relay refused in silence, and the
       // silence arrived by the same path as "nothing happened": the run still
@@ -568,6 +585,12 @@ async function startCoreRelay({
       return;
     }
     const { runId } = entry;
+    if (entry.idle && pathname !== MCP_PATH) {
+      log(`relay refused ${req.method} ${pathname}: a warm session between turns may not read the house`);
+      deny(res, 401, 'between turns');
+      req.resume();
+      return;
+    }
     if (!allowed(req.method, pathname, entry)) {
       deny(res, 404, 'not found');
       req.resume();
@@ -585,6 +608,11 @@ async function startCoreRelay({
           // Before anything is recorded as sent: this one goes nowhere. Only a call of a
           // tool: the rest cannot pile up, and an agent still needs them to start.
           const callsTool = (verdict.calls || []).length > 0;
+          if (callsTool && entry.idle) {
+            log(`relay refused ${req.method} ${pathname}: a warm session between turns called a tool`);
+            deny(res, 401, 'between turns');
+            return;
+          }
           if (callsTool && unansweredRequests >= maxUnansweredRequests) {
             const why = `too many requests are waiting for Home Assistant to answer (${unansweredRequests})`;
             log(`relay refused ${req.method} ${pathname}: ${why}`);
@@ -1093,9 +1121,42 @@ async function startCoreRelay({
       const entry = runs.get(token);
       runs.delete(token);
       if (entry === undefined) return;
+      // A session still bound to this run is between turns from now on.
+      for (const s of sessions.values()) if (s.current === entry) s.current = null;
       entry.ended = true;
       refusedRuns.delete(entry.runId);
       settleUnanswered(entry.runId);
+    },
+    // A warm session's bearer: minted unbound, with the basenames its process may
+    // list (the read allowlist). `bindSession` lends it one live run for one turn;
+    // `unbindSession` takes it back; `revokeSession` ends it.
+    issueSession({ basenames = [] } = {}) {
+      const token = crypto.randomBytes(32).toString('base64url');
+      sessions.set(token, {
+        current: null,
+        idle: {
+          runId: `session-${crypto.randomBytes(4).toString('hex')}`,
+          basenames: new Set([...basenames].map(haBasename)),
+          cameras: new Set(),
+          ended: false,
+          idle: true,
+        },
+      });
+      return token;
+    },
+    bindSession(sessionToken, runToken) {
+      const s = sessions.get(sessionToken);
+      const entry = runs.get(runToken);
+      if (!s || !entry) return false;
+      s.current = entry;
+      return true;
+    },
+    unbindSession(sessionToken) {
+      const s = sessions.get(sessionToken);
+      if (s) s.current = null;
+    },
+    revokeSession(sessionToken) {
+      sessions.delete(sessionToken);
     },
     // What the core asks Home Assistant to learn which entity a device the model
     // named is (targets.js): the live-context tool by name, and the states list.
@@ -1177,6 +1238,7 @@ async function startCoreRelay({
       // tokens go. The keys are copied because settling deletes as it goes.
       for (const runId of [...awaiting.keys()]) settleUnanswered(runId);
       runs.clear();
+      sessions.clear();
       refusedRuns.clear();
       server.close();
       server.closeAllConnections();

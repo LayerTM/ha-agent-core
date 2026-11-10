@@ -44,6 +44,9 @@ const REQUIRED = {
 const OPTIONAL = {
   'console.remoteWindow': 'function',
   'runner.endRun': 'function',
+  // Warm sessions (`prompt_keep_warm`): { clearLine(), userLine(text),
+  // createResetReader() }, and `runner.launch` reads `spec.session` (see README).
+  'runner.session': 'object',
   'descriptor.versionAlias': 'string',
   'descriptor.reportsCost': 'boolean',
   // An engine whose structured output cannot describe an OPEN object — one with
