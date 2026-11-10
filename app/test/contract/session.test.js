@@ -22,7 +22,10 @@ const core = require('../../server/prompt/run');
 const { createSessionPool } = require('../../server/prompt/session-pool');
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'core-session-'));
-after(() => fs.rmSync(TMP, { recursive: true, force: true }));
+after(() => {
+  for (const p of pools || []) p.shutdown();
+  fs.rmSync(TMP, { recursive: true, force: true });
+});
 
 let hooks;
 let pools;
@@ -299,4 +302,44 @@ test('the session check passes on an engine that resets, and fails on one that d
     console.log = quiet;
     console.error = loud;
   }
+});
+
+// --- the pool under concurrency, and a kill that never sees an exit ------------------
+
+const { spawn: spawnChild } = require('node:child_process');
+const { EventEmitter } = require('node:events');
+function sessionLauncher(cfg) {
+  const cmd = adapter.runner.launch({ session: true, mcpConfigPath: cfg }, { env: {} });
+  return { child: spawnChild(process.execPath, cmd.args, { stdio: ['pipe', 'pipe', 'pipe'], detached: true }), release() {} };
+}
+
+test('concurrent spawns never take more than the cap, nor evict more than one session per slot', async () => {
+  const pool = newPool({ cap: 2 });
+  await pool.spawn('A', sessionLauncher);
+  assert.equal(await ready(pool), true);
+  await Promise.all([pool.spawn('B', sessionLauncher), pool.spawn('C', sessionLauncher)]);
+  assert.ok(pool.size() <= 2, `size ${pool.size()} with a cap of 2`);
+  assert.equal(await until(() => pool.states().filter((s) => s === 'ready').length === 2), true);
+  assert.equal(logs.filter((l) => /pool is full/.test(l)).length, 1, 'one slot, one eviction');
+});
+
+test('a session that is killed releases its bearer even if its process never reports an exit', async () => {
+  const pool = newPool({ idleMs: 100 });
+  // A child whose output answers the reset but which never closes: no pid, so the
+  // pool cannot signal it, and no `close` ever comes.
+  const child = new EventEmitter();
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.stdin = {
+    on() {},
+    write(line) {
+      if (JSON.parse(line).type === 'clear') {
+        setImmediate(() => child.stdout.emit('data', Buffer.from('{"type":"reset"}\n{"type":"result","numTurns":0}\n')));
+      }
+    },
+  };
+  child.kill = () => {};
+  await pool.spawn('stuck', () => ({ child, release() {} }));
+  assert.equal(await until(() => pool.size() === 0), true, 'ended when idle');
+  assert.equal(await until(() => hooks.closed.length === 1), true, 'its bearer was revoked without an exit');
 });

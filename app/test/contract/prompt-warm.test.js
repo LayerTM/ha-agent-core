@@ -107,3 +107,11 @@ test('an answer from a warm session says so in the audit', async () => {
   await post(on, { prompt: 'is the lamp on?' });
   assert.match(auditLines.pop(), /^prompt\[read\] .* warm=1 .*status=200/);
 });
+
+test('a camera question is never served warm, even when its snapshot could not be read', async () => {
+  // No relay URL here, so the snapshot fetch fails and the run gets no image.
+  const res = await post(on, { prompt: 'who is at the door?', image_entity: 'camera.door' });
+  assert.equal(res.status, 200);
+  assert.equal(state.runs[0].imagePath, null, 'the snapshot failed, as intended');
+  assert.equal(state.runs[0].warm, null);
+});

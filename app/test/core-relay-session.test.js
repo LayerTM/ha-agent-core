@@ -90,3 +90,59 @@ test('a bound session acts as its run, and only for as long as the turn lasts', 
   assert.equal((await post(session, INIT)).status, 401, 'a revoked session is unknown');
   relay.revoke(runA);
 });
+
+// A request is judged by its body, which may arrive long after its headers: what
+// its bearer meant when the body is complete is what counts.
+function stalledCall(token) {
+  const body = Buffer.from(CALL);
+  const url = new URL(relay.url);
+  let done;
+  const answered = new Promise((resolve) => { done = resolve; });
+  const req = http.request({
+    host: url.hostname, port: url.port, path: '/api/mcp', method: 'POST',
+    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'content-length': body.length },
+  }, (res) => { res.resume(); res.on('end', () => done(res.statusCode)); });
+  req.on('error', () => done(0));
+  req.write(body.subarray(0, 10));
+  return { finish: () => { req.end(body.subarray(10)); return answered; } };
+}
+
+test('a tool call whose body completes after its turn ended is refused', async () => {
+  const session = relay.issueSession({ basenames: ['GetLiveContext'] });
+  const run = relay.issue('run-stalled', { basenames: ['GetLiveContext'] });
+  relay.bindSession(session, run);
+  seen = [];
+  const call = stalledCall(session);
+  await new Promise((r) => setTimeout(r, 50));
+  relay.unbindSession(session);
+  relay.revoke(run);
+  assert.equal(await call.finish(), 401);
+  assert.deepEqual(seen, [], 'nothing reached Home Assistant');
+  relay.revokeSession(session);
+});
+
+test('a run bearer whose body completes after the run was revoked is refused', async () => {
+  const run = relay.issue('run-stalled-plain', { basenames: ['GetLiveContext'] });
+  seen = [];
+  const call = stalledCall(run);
+  await new Promise((r) => setTimeout(r, 50));
+  relay.revoke(run);
+  assert.equal(await call.finish(), 401);
+  assert.deepEqual(seen, []);
+});
+
+test('a session rebound to another run while a body was arriving does not act as the new run', async () => {
+  const session = relay.issueSession({ basenames: ['GetLiveContext'] });
+  const runA = relay.issue('run-a2', { basenames: ['GetLiveContext'] });
+  const runB = relay.issue('run-b2', { basenames: ['GetLiveContext'] });
+  relay.bindSession(session, runA);
+  seen = [];
+  const call = stalledCall(session);
+  await new Promise((r) => setTimeout(r, 50));
+  relay.unbindSession(session);
+  relay.bindSession(session, runB);
+  assert.equal(await call.finish(), 401, 'turn A is over; its request is not turn B\'s');
+  assert.deepEqual(seen, []);
+  for (const t of [runA, runB]) relay.revoke(t);
+  relay.revokeSession(session);
+});

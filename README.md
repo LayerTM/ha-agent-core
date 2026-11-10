@@ -562,6 +562,13 @@ same session. Nothing of one read reaches the next:
 - every read gets its own output path, as a fresh run does: its own decoding,
   redaction and caps.
 
+This rests on the engine writing a read's output only while that read runs, in
+order. A line between reads ends the session. A line that the engine wrote for one
+read after it had confirmed the next reset would reach the next read, and only an
+engine tool that keeps running in the background could write one. A warm read's
+engine therefore must not be given such a tool. A read has no engine tools of its
+own, only Home Assistant's live context.
+
 Conversation history still travels in the prompt, as for a fresh read. A session
 never serves a camera question, a web read, an automation edit or a retry. It ends
 after 20 reads, after 10 minutes without one, when a read's context grows far past

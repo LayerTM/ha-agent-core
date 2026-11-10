@@ -99,6 +99,7 @@ function createSessionPool({
       this.turn = null;
       this.timer = null;
       this.reset = null;
+      this.closed = false;
       this.lineBuffer = '';
       this.decoder = new StringDecoder('utf8');
       child.stdout.on('data', (chunk) => this.onStdout(chunk));
@@ -202,6 +203,14 @@ function createSessionPool({
       if (sessions.get(this.key) === this) sessions.delete(this.key);
       log(`warm session ended: ${why}`);
       killProcessGroup(this.child);
+      // The bearer and the configuration go with the session, not with its exit.
+      this.closeHandle();
+    }
+
+    closeHandle() {
+      if (this.closed) return;
+      this.closed = true;
+      Promise.resolve(hooks.close(this.handle)).catch(() => {});
     }
 
     onClose(code) {
@@ -210,7 +219,7 @@ function createSessionPool({
       this.turn = null;
       // A turn in flight ends the way a fresh run ends when its process exits.
       if (turn) turn.emit('close', code);
-      Promise.resolve(hooks.close(this.handle)).catch(() => {});
+      this.closeHandle();
       try { this.release(); } catch { /* the adapter's cleanup; logged by it */ }
     }
   }
@@ -240,20 +249,31 @@ function createSessionPool({
         if (!idle) return;
         idle.kill('the pool is full');
       }
+      // The slot is taken now, before anything is awaited, so spawns that run at
+      // the same time count each other and the cap holds.
+      const slot = {
+        state: 'starting',
+        take: () => null,
+        kill() { if (sessions.get(key) === slot) sessions.delete(key); },
+      };
+      sessions.set(key, /** @type {any} */ (slot));
+      const ours = () => !closed && sessions.get(key) === slot;
       let handle;
       try {
         handle = await hooks.open();
       } catch (err) {
+        slot.kill();
         log(`warm session not started: ${err.message}`);
         return;
       }
-      if (closed || sessions.has(key)) { await hooks.close(handle).catch(() => {}); return; }
+      if (!ours()) { await Promise.resolve(hooks.close(handle)).catch(() => {}); return; }
       let started;
       try {
         started = launch(handle.mcpConfigPath);
       } catch (err) {
+        slot.kill();
         log(`warm session not started: ${err.message}`);
-        await hooks.close(handle).catch(() => {});
+        await Promise.resolve(hooks.close(handle)).catch(() => {});
         return;
       }
       sessions.set(key, new Session(key, handle, started.child, started.release));

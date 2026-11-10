@@ -603,6 +603,16 @@ async function startCoreRelay({
           deny(res, 413, 'request body too large');
           return;
         }
+        // The bearer was resolved at the headers; the body may complete much later.
+        // What it is judged by is what the bearer means NOW: a run that has ended,
+        // or a session turn that is over, sends nothing on.
+        const stale = entry.ended || (session !== undefined
+          && (sessions.get(presented) !== session || (!entry.idle && session.current !== entry)));
+        if (stale) {
+          log(`relay refused ${req.method} ${pathname}: its run ended while the request was arriving`);
+          deny(res, 401, 'run ended');
+          return;
+        }
         const verdict = judgeClientBody(body.toString('utf8'), entry.basenames);
         if (verdict.forward === true) {
           // Before anything is recorded as sent: this one goes nowhere. Only a call of a

@@ -1337,7 +1337,7 @@ function createPromptApp({
             // A warm session serves a plain read only: never a camera question (its
             // snapshot is a per-run file), a web-granted read, an automation edit,
             // or a retry.
-            warm: sessionPool && attempts === 1 && !imagePath && !grant && body.edit_automation === undefined
+            warm: sessionPool && attempts === 1 && !imageEntity && !grant && body.edit_automation === undefined
               ? { pool: sessionPool, caller, runToken: runHandle ? runHandle.token : '' } : null,
           });
           if (outcome.warm) servedWarm = true;
