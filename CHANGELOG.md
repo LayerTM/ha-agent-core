@@ -20,6 +20,10 @@ uses [Semantic Versioning](https://semver.org/).
 - An engine adapter may declare `runner.session` to support it, and
   `server/prompt/session-check.js` checks that the bundled engine still resets a
   session.
+- An engine adapter may declare `runner.userText(text)`, the engine-safe form of a
+  read's text. The core applies it to every read before the engine sees it, on a
+  fresh run and in a warm session alike, so a question can never be taken for one
+  of the engine's own commands.
 
 ### Changed
 

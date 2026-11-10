@@ -126,6 +126,17 @@ test('the optional terminal call may be absent, but not malformed, and needs no 
   );
 });
 
+test('the optional engine-safe text form may be absent, but not malformed', () => {
+  const { adapter } = createNeutralAdapter();
+  assert.equal(adapter.runner.userText, undefined);
+  const withForm = { ...adapter, runner: { ...adapter.runner, userText: (t) => t } };
+  assert.equal(contract.validateAdapter(withForm), withForm);
+  assert.throws(
+    () => contract.validateAdapter({ ...adapter, runner: { ...adapter.runner, userText: ' ' } }),
+    /runner\.userText must be a function when present/,
+  );
+});
+
 test('an adapter can be installed once, before first use, and only a valid one with valid names', () => {
   const { adapter, branding } = createNeutralAdapter();
   assert.throws(() => contract.useAdapter({ ...adapter, apiVersion: 2 }, branding), /apiVersion/);

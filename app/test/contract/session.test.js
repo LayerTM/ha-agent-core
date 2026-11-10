@@ -343,3 +343,53 @@ test('a session that is killed releases its bearer even if its process never rep
   assert.equal(await until(() => pool.size() === 0), true, 'ended when idle');
   assert.equal(await until(() => hooks.closed.length === 1), true, 'its bearer was revoked without an exit');
 });
+
+// `runner.userText(text)`: the engine-safe form of a turn's text. A question
+// that starts with the engine's own command marker must reach the engine as
+// whatever the adapter makes of it — on the fresh path's stdin and on a warm
+// session's turn alike — and, with no such member, exactly as composed.
+test('a read reaches the engine as runner.userText makes it, fresh and warm; absent, unchanged', async () => {
+  const seen = [];
+  adapter.runner.userText = (text) => { seen.push(text); return `[safe]${text}`; };
+  try {
+    state.tapes.push([{ echo: 'stdin' }]);
+    const fresh = await read(null, { prompt: '/model x' });
+    assert.equal(fresh.status, 'ok');
+    assert.equal(fresh.text, '[safe]/model x', 'the fresh engine read the safe form');
+
+    const pool = newPool();
+    await read(pool);
+    assert.equal(await ready(pool), true);
+    state.turnTapes.push([{ echo: 'stdin' }]);
+    const warm = await read(pool, { prompt: '/model x' });
+    assert.equal(warm.warm, true);
+    assert.equal(warm.text, '[safe]/model x', 'the warm session was given the safe form');
+    assert.deepEqual(seen.filter((t) => t === '/model x').length, 2, 'it was given the composed text, once per read');
+  } finally {
+    delete adapter.runner.userText;
+  }
+
+  state.tapes.push([{ echo: 'stdin' }]);
+  const plain = await read(null, { prompt: '/model x' });
+  assert.equal(plain.text, '/model x', 'with no member the text is the composed text');
+});
+
+test('a text form that fails ends the read before any agent runs or any session is taken', async () => {
+  const pool = newPool();
+  await read(pool);
+  assert.equal(await ready(pool), true);
+  const binds = hooks.binds.length;
+  for (const form of [() => 42, () => { throw new Error('no form'); }]) {
+    adapter.runner.userText = form;
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      const outcome = await read(pool, { prompt: '/model x' });
+      assert.equal(outcome.status, 'error');
+      assert.equal(outcome.reason, 'spawn-failed');
+    } finally {
+      delete adapter.runner.userText;
+    }
+  }
+  assert.equal(hooks.binds.length, binds, 'no session was bound to it');
+  assert.deepEqual(pool.states(), ['ready'], 'the session is still there for the next read');
+});

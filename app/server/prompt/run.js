@@ -493,6 +493,16 @@ function buildReadInput({ prompt, history, memory, imagePath }) {
   return imgNote + facts + earlier + (facts && !earlier ? '---\nCurrent message:\n' : '') + prompt;
 }
 
+// `runner.userText` (optional): the engine-safe form of a read's text, so user
+// text is never taken for an engine command. Absent, the text is unchanged.
+function engineText(text) {
+  const form = adapter().runner.userText;
+  if (typeof form !== 'function') return text;
+  const safe = form(text);
+  if (typeof safe !== 'string') throw new Error('engine adapter: runner.userText must return a string');
+  return safe;
+}
+
 // Best-effort: pull the GROWING value of the top-level "text" field out of a
 // partial structured-output JSON string (built up from the agent's streamed
 // fragments). Handles JSON string escapes and stops cleanly at an incomplete
@@ -756,6 +766,7 @@ function run({
     let turn = null;
     let key = null;
     let command;
+    let stdinContent;
 
     // An adapter may allocate for one run in `launch` — a scratch directory, an
     // entry in a live set — and only the core knows when that run is over. This
@@ -779,6 +790,11 @@ function run({
       });
       command = launch(spec, process.env);
       decode = adapter().runner.createDecoder(spec);
+      // What the engine reads, in the engine-safe form the adapter gives it: the
+      // one write below is the fresh run's stdin and a warm session's turn alike.
+      // Settled before any agent is started or any session taken, so a form that
+      // fails ends the read here.
+      stdinContent = engineText(buildReadInput({ prompt, history, memory, imagePath: spec.imagePath }));
       if (warm && warm.pool) {
         key = warm.pool.keyFor(command, spec.mcpConfigPath, warm.caller);
         turn = warm.pool.take(key, warm.runToken);
@@ -890,8 +906,7 @@ function run({
       finish({ status: 'error', reason: 'spawn-failed', message: `spawn failed: ${err.message}` });
     });
 
-    // The untrusted prompt goes in as data.
-    const stdinContent = buildReadInput({ prompt, history, memory, imagePath: spec.imagePath });
+    // The untrusted prompt goes in as data (stdinContent, composed above).
     child.stdin.on('error', () => { /* child died before reading stdin */ });
     child.stdin.end(stdinContent, 'utf8');
 
