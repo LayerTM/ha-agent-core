@@ -28,8 +28,12 @@
 # with addon-run's own options, read from addon-run itself (its top-level `set`
 # and `shopt` lines) — the helper runs there, so that is where it must hold.
 #
+# Requires: bash + python3. A missing dependency FAILS rather than skipping.
+#
 # Run:  bash app/test/background-loop.test.sh
 set -o pipefail
+
+command -v python3 >/dev/null 2>&1 || { echo "FAIL: python3 is required"; exit 1; }
 
 here="$(cd "$(dirname "$0")" && pwd)"
 repo="$(cd "${here}/../.." && pwd)"
@@ -226,12 +230,14 @@ suite() {
     kill "${runner10}" 2>/dev/null; wait "${runner10}" 2>/dev/null
 
     # 11. Stop the caller as a supervisor may: TERM to its whole process group.
-    #     The caller gets a group of its own here, so the test is not in it.
+    #     The caller gets a group of its own here, so the test is not in it. It
+    #     makes that group itself, before it becomes bash: with `set -m` the test
+    #     and the caller would both make it at once, and on some kernels the
+    #     caller's attempt then fails and bash prints it on the test's stderr.
     local runner11 loop11 child11=""
-    set -m
-    bash "${runner}" cc-nap "${work}/nap" "${dir}/t11" > /dev/null 2>&1 &
+    python3 -c 'import os, sys; os.setpgid(0, 0); os.execvp(sys.argv[1], sys.argv[1:])' \
+        bash "${runner}" cc-nap "${work}/nap" "${dir}/t11" > /dev/null 2>&1 &
     runner11=$!
-    set +m
     if await_file "${dir}/t11.pid"; then
         read -r loop11 < "${dir}/t11.pid"
         check "the caller has a process group of its own" \
