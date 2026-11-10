@@ -6,6 +6,8 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-11-10
+
 ### Added
 
 - The option `prompt_keep_warm` (off by default) lets a read be answered by an
