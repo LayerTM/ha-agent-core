@@ -19,6 +19,7 @@ const { adapter, state, branding } = createNeutralAdapter();
 useAdapter(adapter, branding);
 
 const core = require('../../server/prompt/run');
+const { MCP_AUTH_USABLE } = require('../../server/prompt/core-relay');
 const { createSessionPool } = require('../../server/prompt/session-pool');
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'core-session-'));
@@ -57,6 +58,7 @@ beforeEach(() => {
     async close(handle) { this.closed.push(handle.token); },
     bind(token, runToken) { this.binds.push([token, runToken]); return true; },
     unbind(token) { this.unbinds.push(token); },
+    usable: () => hooks.mcpAuth === undefined || MCP_AUTH_USABLE[hooks.mcpAuth] === true,
   };
 });
 
@@ -392,4 +394,49 @@ test('a text form that fails ends the read before any agent runs or any session 
   }
   assert.equal(hooks.binds.length, binds, 'no session was bound to it');
   assert.deepEqual(pool.states(), ['ready'], 'the session is still there for the next read');
+});
+
+// Whether Home Assistant accepts the connection is a fact of the relay, not of
+// a turn: a session started before the token was refused answers from a process
+// whose tools never connected, and its turn makes no request that could show it.
+// Every state the relay declares is tried; each that is not usable must make a
+// warm read behave as a fresh one.
+for (const [auth, usable] of Object.entries(MCP_AUTH_USABLE)) {
+  test(`with Home Assistant's connection ${auth}, ${usable ? 'a warm session serves' : 'no warm session serves or is kept'}`, async () => {
+    const pool = newPool();
+    await read(pool);
+    assert.equal(await ready(pool), true);
+    hooks.mcpAuth = auth;
+    state.turnTapes.push([{ echo: 'stdin' }]);
+    const next = await read(pool);
+    if (usable) {
+      assert.equal(next.warm, true);
+      assert.equal(await ready(pool), true, 'and keeps it');
+      return;
+    }
+    assert.equal(next.warm, undefined, 'the read runs fresh, so it is judged as a fresh read is');
+    assert.equal(hooks.binds.length, 0, 'no turn was lent to the old session');
+    assert.equal(await until(() => hooks.closed.includes(hooks.opened[0].token)), true, 'the old session is closed');
+    // The fresh read found Home Assistant still not accepting: no new session is
+    // started for it either.
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(pool.size(), 0);
+    assert.equal(state.sessionLaunches.length, 1);
+    // When the connection works again the next fresh read starts one.
+    hooks.mcpAuth = 'ok';
+    await read(pool);
+    assert.equal(await ready(pool), true);
+  });
+}
+
+test('a session whose connection stopped being accepted during its turn is ended with the turn', async () => {
+  const pool = newPool();
+  await read(pool);
+  await ready(pool);
+  state.turnTapes.push([{ echo: 'stdin' }]);
+  const turn = read(pool);
+  hooks.mcpAuth = 'unauthorized';
+  assert.equal((await turn).warm, true);
+  assert.equal(await until(() => hooks.closed.includes(hooks.opened[0].token)), true);
+  assert.equal(pool.size(), 0);
 });

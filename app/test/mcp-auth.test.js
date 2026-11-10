@@ -319,3 +319,20 @@ test('an accepted answer marks no run, and a 403 is recorded as 403', async () =
     assert.equal(relay.tokenRefusal('run-fine'), 403, 'an unrelated error does not clear it');
   });
 });
+
+test('mcpUsable follows mcpAuth through every state the relay declares', async () => {
+  const { MCP_AUTH_USABLE } = require('../server/prompt/core-relay');
+  const reach = { ok: 200, unauthorized: 401, unreachable: 500 };
+  assert.deepEqual(Object.keys(reach).sort(), Object.keys(MCP_AUTH_USABLE).sort(), 'every declared state is exercised');
+  for (const [state, status] of Object.entries(reach)) {
+    answer = status;
+    // eslint-disable-next-line no-await-in-loop
+    await withRelay({}, async (relay) => {
+      assert.equal(relay.mcpUsable(), true, 'before anything has answered');
+      await relay.probeAuth();
+      assert.equal(relay.mcpAuth(), state);
+      assert.equal(relay.mcpUsable(), MCP_AUTH_USABLE[state]);
+    });
+  }
+  answer = 200;
+});

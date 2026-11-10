@@ -358,7 +358,7 @@ test('a streamed answer a notice replaces ends with the notice, after what alrea
   const deltas = lines.map((l) => l.text).join('');
   const went = lines.slice(0, -1).map((l) => l.text).join('');
   assert.ok(went.length > 0 && streamed.startsWith(went), 'what went out before the lookup is the model\'s text');
-  assert.equal(deltas, `${went}\n\n${notice}`, 'the notice follows it whole');
+  assert.equal(deltas, `${streamed}\n\n${notice}`, 'the model\'s text goes out whole, then the notice');
 
   const plain = await ask((runId) => relay.lookup(runId), proposalOf(intent(['Sandbox Test Lamp'])), { stream: true, streamed });
   const plainDone = plain.pop();

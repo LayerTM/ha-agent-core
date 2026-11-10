@@ -6,6 +6,27 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-11-10
+
+### Fixed
+
+- With `prompt_keep_warm` on, a read after Home Assistant refused the token was
+  answered by the warm agent with prose, and was recorded as healthy, instead of
+  the notice and the degraded outcome a fresh read gives. A warm session is now
+  neither served nor kept while Home Assistant does not accept the connection
+  (refused or unreachable): the read runs fresh and is judged like any fresh read.
+  Because a warm turn makes no request that could show a change, the server asks
+  Home Assistant about the token (one request) before it offers a read to a warm
+  session; a token already known to be refused is not asked about again.
+- A streamed answer that a notice replaces (a device that matches more than one,
+  or none) used to stop mid-word where the stream's hold-back ended, and the
+  notice followed. The model's text now goes out whole before the notice.
+- The hook audit lines (`cc-hook-audit`, `cc-hook-backup`) were stamped in local
+  time while the prompt server's lines in the same file are UTC. The shell writers
+  now take the stamp from one function, `audit_timestamp` (UTC, the prompt
+  server's format), and a test discovers every writer of the file and runs each
+  under a zone far from UTC.
+
 ## [0.13.0] - 2026-11-10
 
 ### Added
