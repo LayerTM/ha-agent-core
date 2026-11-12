@@ -6,6 +6,12 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Hungarian (`hu`) for the texts the server writes itself: the degrade notice,
+  the budget notice, the refused-token notice and the device-lookup notices.
+  Contributed by @marcello-star (#136).
+
 ## [0.14.0] - 2026-11-12
 
 ### Added
