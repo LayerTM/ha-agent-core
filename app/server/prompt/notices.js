@@ -17,6 +17,7 @@ const DEGRADE_TEXT = {
   it: 'Scusa — non sono riuscito a completare la risposta. Riprova, per favore.',
   pt: 'Desculpa — não consegui terminar essa resposta. Tenta novamente, por favor.',
   nl: 'Sorry — ik kon dat antwoord niet afmaken. Probeer het opnieuw.',
+  hu: 'Sajnálom — nem tudtam befejezni ezt a választ. Kérlek, próbáld újra.',
 };
 // Derived from the notice table so the supported set can never drift from the
 // strings: adding a language = adding it to DEGRADE_TEXT + budgetNotice only.
@@ -35,6 +36,7 @@ const budgetNotice = (lang, limit, agentName) => ({
   it: `Ho raggiunto il budget d'uso di ${agentName} di oggi ($${limit}), quindi sono in pausa fino a domani. Puoi aumentare "Chat daily budget (USD)" nelle opzioni dell'add-on.`,
   pt: `Atingi o orçamento de uso do ${agentName} de hoje ($${limit}), por isso estou pausado até amanhã. Podes aumentar "Chat daily budget (USD)" nas opções do add-on.`,
   nl: `Ik heb het ${agentName}-gebruiksbudget van vandaag ($${limit}) bereikt en pauzeer tot morgen. Je kunt "Chat daily budget (USD)" in de add-on-opties verhogen.`,
+  hu: `Elértem a mai ${agentName} használati keretet ($${limit}), ezért holnapig szünetelek. A „Chat daily budget (USD)” értéket a bővítmény beállításaiban növelheted.`,
 }[lang]);
 
 // What a read says when Home Assistant refused the add-on's token during it. The
@@ -50,6 +52,7 @@ const tokenRefusedNotice = (lang, status) => ({
   it: `Home Assistant ha rifiutato il token dell'add-on (${status}) — controlla il token nella configurazione dell'add-on e che il suo utente sia amministratore se il server Model Context Protocol lo richiede.`,
   pt: `O Home Assistant recusou o token do add-on (${status}) — verifica o token na configuração do add-on e se o seu utilizador é administrador, caso o servidor Model Context Protocol o exija.`,
   nl: `Home Assistant heeft het token van de add-on geweigerd (${status}) — controleer het token in de add-on-configuratie en of de gebruiker beheerder is, als de Model Context Protocol Server dat vereist.`,
+  hu: `A Home Assistant elutasította a bővítmény tokenjét (${status}) — ellenőrizd a tokent a bővítmény beállításaiban, és hogy a felhasználója rendszergazda-e, ha a Model Context Protocol Server ezt megköveteli.`,
 }[lang] || tokenRefusedNotice('en', status));
 
 // Why a device the model named did not become a proposal (targets.js), one
@@ -117,6 +120,13 @@ const TARGET_TEXT = {
     unpinned: (n) => `Ik kon niet bepalen welk apparaat „${n}” is — gebruik de volledige naam.`,
     unavailable: () => 'Ik kon de apparaten niet opzoeken in Home Assistant, dus ik heb niets voorbereid. Probeer het opnieuw.',
     too_large: () => 'Het antwoord van Home Assistant over de apparaten is te groot om te lezen, dus ik heb niets voorbereid.',
+  },
+  hu: {
+    unknown: (n) => `Nem találtam „${n}” nevű eszközt azok között, amelyeket a Home Assistant megoszt velem.`,
+    ambiguous: (n, c) => `„${n}” több eszközre is illik${c ? ` (${c})` : ''} — melyikre gondolsz?`,
+    unpinned: (n) => `Nem tudtam megállapítani, melyik eszköz „${n}” — kérlek, használd a teljes nevét.`,
+    unavailable: () => 'Nem tudtam kikeresni az eszközöket a Home Assistantban, ezért nem készítettem elő semmit. Kérlek, próbáld újra.',
+    too_large: () => 'A Home Assistant eszközökről adott válasza túl nagy ahhoz, hogy elolvassam, ezért nem készítettem elő semmit.',
   },
 };
 const targetNotice = (lang, problems) => {
