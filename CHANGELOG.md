@@ -6,6 +6,8 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-11-12
+
 ### Added
 
 - An adapter can give a prompt run a home of its own: `runner.launch` may return
