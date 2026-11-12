@@ -17,7 +17,7 @@ const { spawn } = require('node:child_process');
 const os = require('node:os');
 const path = require('node:path');
 const { adapter } = require('../adapter-contract');
-const { launchSpec, childEnv } = require('./run');
+const { launchSpec, childEnv, launch } = require('./run');
 const { RESET_MS } = require('./session-pool');
 
 const RESETS = 3;
@@ -38,9 +38,9 @@ function main(argv) {
     }),
     session: true,
   };
-  const command = adapter().runner.launch(spec, { env: process.env });
+  const command = launch(spec, process.env);
   const child = spawn(bin, command.args, {
-    cwd: os.tmpdir(), env: childEnv(process.env, command.env), stdio: ['pipe', 'pipe', 'pipe'], detached: true,
+    cwd: os.tmpdir(), env: childEnv(process.env, command.env, command.home), stdio: ['pipe', 'pipe', 'pipe'], detached: true,
   });
   let stderr = '';
   child.stderr.on('data', (d) => { if (stderr.length < 2000) stderr += d; });

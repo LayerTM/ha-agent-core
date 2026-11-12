@@ -71,6 +71,12 @@ const OPTIONAL = {
   'runner.webCapability': 'object',
 };
 
+// Which credential an engine used for a run it reports refused for its sign-in
+// (`authExpired`): `durable`, the one set in the add-on's options, or `login`,
+// the engine's own stored sign-in. A decoder names it as `credential` on that
+// result; anything else, or nothing, is unknown.
+const REFUSED_CREDENTIALS = new Set(['durable', 'login']);
+
 // The engine name is published on /api/status and stored by clients, so it is a
 // stable token. A version alias is one more status key carrying the same value
 // as `engine_version`, for clients that predate it; it cannot shadow a key the
@@ -169,4 +175,4 @@ function useAdapter(mod, brandingValue, themeValue = NEUTRAL) {
   return loaded;
 }
 
-module.exports = { API_VERSION, REQUIRED, OPTIONAL, validateAdapter, adapter, branding, theme, useAdapter };
+module.exports = { API_VERSION, REQUIRED, OPTIONAL, REFUSED_CREDENTIALS, validateAdapter, adapter, branding, theme, useAdapter };

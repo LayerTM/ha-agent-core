@@ -116,6 +116,27 @@ test('a read like the one before it is served warm, by one session, bound only f
   assert.equal(state.sessionLaunches[0].mcpConfigPath, hooks.opened[0].mcpConfigPath, 'the session reads its own config');
 });
 
+test('a warm session runs in the home the adapter declared for it', async () => {
+  state.launchHome = (runDir) => {
+    const home = path.join(runDir, 'home');
+    fs.mkdirSync(home, { recursive: true });
+    return home;
+  };
+  try {
+    const pool = newPool();
+    await read(pool);
+    assert.equal(await ready(pool), true);
+    state.turnTapes.push([{ echo: 'env' }]);
+    const warm = await read(pool);
+    assert.equal(warm.warm, true);
+    const home = JSON.parse(warm.text).HOME;
+    assert.notEqual(home, process.env.HOME);
+    assert.equal(path.basename(home), 'home');
+  } finally {
+    state.launchHome = undefined;
+  }
+});
+
 test('nothing of one turn reaches the next — and the instrument can see it when it does', async () => {
   const pool = newPool();
   await read(pool);

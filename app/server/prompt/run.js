@@ -15,11 +15,13 @@
 //   - the model's structured output is validated before anything uses it
 
 const { spawn } = require('node:child_process');
+const fs = require('node:fs');
+const { isAbsolute } = require('node:path');
 const { StringDecoder } = require('node:string_decoder');
 const {
   validateProposal, validateAutomationDraft, validateMemoryChange, oneLine, wholeCharEnd,
 } = require('./security');
-const { adapter } = require('../adapter-contract');
+const { adapter, REFUSED_CREDENTIALS } = require('../adapter-contract');
 
 // Wall-clock ceiling per run; tunable for slow hardware via the add-on's
 // environment_vars (CLAUDE_PROMPT_TIMEOUT_MS), bounded 10s..10min.
@@ -649,11 +651,12 @@ function launchSpec({
 }
 
 // The child's environment: a fixed base, the adapter's additions, never a
-// Supervisor or Home Assistant credential.
-function childEnv(parentEnv, extra) {
+// Supervisor or Home Assistant credential. HOME is the one the adapter declared
+// for the run (`home`, already checked by launch), else the add-on's own.
+function childEnv(parentEnv, extra, home) {
   const env = {
     PATH: parentEnv.PATH || '/usr/local/bin:/usr/bin:/bin',
-    HOME: parentEnv.HOME || '/data/home',
+    HOME: home || parentEnv.HOME || '/data/home',
     LANG: parentEnv.LANG || 'C.UTF-8',
     TERM: 'dumb',
   };
@@ -667,12 +670,33 @@ function childEnv(parentEnv, extra) {
 // The adapter's command line for one spec, checked: an array of strings. The
 // adapter reads the parent environment to pick what it passes on (its own
 // credential variables); childEnv decides what may actually reach the child.
+// `home`, when the adapter declares one, is the child's HOME: an existing
+// directory, named by an absolute path. Anything else fails the run here, before
+// an agent starts, rather than start it in a HOME nobody chose.
 function launch(spec, parentEnv) {
   const out = adapter().runner.launch(spec, { env: parentEnv });
   if (!out || !Array.isArray(out.args) || !out.args.every((a) => typeof a === 'string')) {
     throw new Error('engine adapter: runner.launch must return { args: string[] }');
   }
-  return { args: out.args, env: out.env && typeof out.env === 'object' ? out.env : {} };
+  return {
+    args: out.args,
+    env: out.env && typeof out.env === 'object' ? out.env : {},
+    home: 'home' in out ? declaredHome(out.home) : undefined,
+  };
+}
+
+function declaredHome(home) {
+  if (typeof home !== 'string' || !isAbsolute(home)) {
+    throw new Error('engine adapter: runner.launch home must be an absolute path');
+  }
+  let stat;
+  try {
+    stat = fs.statSync(home);
+  } catch {
+    throw new Error(`engine adapter: runner.launch home ${home} does not exist`);
+  }
+  if (!stat.isDirectory()) throw new Error(`engine adapter: runner.launch home ${home} is not a directory`);
+  return home;
 }
 
 // Live children, so shutdown can reap every spawned agent.
@@ -713,7 +737,8 @@ function tellEndRun(spec) {
  *   { status: 'ok', text, proposal, automation, memoryChange, toolsUsed, numTurns, costUsd, tokens,
  *     truncated, mcpFailed, mcpConnected, haTools }
  *   { status: 'timeout', haTools }
- *   { status: 'error', reason, message, numTurns?, toolsUsed?, costUsd?, tokens?, haTools? }
+ *   { status: 'error', reason, message, credential?, numTurns?, toolsUsed?, costUsd?, tokens?, haTools? }
+ *     credential ∈ durable | login, on auth-expired only, when the adapter named it
  *     reason ∈ spawn-failed | aborted | stream-cap | no-result | model-error | max-turns
  *              | auth-expired | tool-name-mismatch
  *     (ha-token-refused is never the runner's: the server ends a read under it
@@ -801,7 +826,7 @@ function run({
       }
       child = turn || spawn(bin, command.args, {
         cwd,
-        env: childEnv(process.env, command.env),
+        env: childEnv(process.env, command.env, command.home),
         stdio: ['pipe', 'pipe', 'pipe'],
         detached: true, // own process group -> group SIGKILL reaps MCP children
       });
@@ -894,7 +919,7 @@ function run({
         const sessionCommand = launch(sessionSpec, process.env);
         const sessionChild = spawn(bin, sessionCommand.args, {
           cwd,
-          env: childEnv(process.env, sessionCommand.env),
+          env: childEnv(process.env, sessionCommand.env, sessionCommand.home),
           stdio: ['pipe', 'pipe', 'pipe'],
           detached: true,
         });
@@ -1107,12 +1132,19 @@ function run({
         // own report; this is the one place it becomes a reason. costUsd is
         // surfaced even on error so the caller can bill every attempt against
         // the daily cap.
+        // A refusal may also say which credential was refused, so a client can
+        // tell the user which one to fix; one the contract does not know is
+        // passed on as unknown.
         let reason = 'model-error';
-        if (result.authExpired === true) reason = 'auth-expired';
-        else if (result.deterministic) reason = 'max-turns';
+        let credential;
+        if (result.authExpired === true) {
+          reason = 'auth-expired';
+          if (REFUSED_CREDENTIALS.has(result.credential)) ({ credential } = result);
+        } else if (result.deterministic) reason = 'max-turns';
         finish({
           status: 'error',
           reason,
+          ...(credential ? { credential } : {}),
           message: typeof result.text === 'string'
             ? result.text.slice(0, 300)
             : `${engine} reported an error`,
@@ -1215,6 +1247,7 @@ module.exports = {
   resolveHaTools,
   launchSpec,
   childEnv,
+  launch,
   safeLangTag,
   growingText,
   formatHistory,

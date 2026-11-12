@@ -98,6 +98,31 @@ test('a streamed read names the reason on its done line', async () => {
   assert.equal(lines[0].reason, 'auth-expired');
 });
 
+test('a refusal that names its credential says so on the answer, streamed or not, and on status', async () => {
+  const app = await start(fs.mkdtempSync(path.join(TMP, 'state-')));
+  state.script.push(() => errorOutcome('auth-expired', { credential: 'durable' }));
+  const body = await (await post(app, { prompt: 'hi' })).json();
+  assert.equal(body.reason, 'auth-expired');
+  assert.equal(body.credential, 'durable');
+  assert.equal((await status(app)).auth.credential, 'durable');
+
+  state.script.push(() => errorOutcome('auth-expired', { credential: 'login' }));
+  const lines = (await (await post(app, { prompt: 'hi', stream: true })).text())
+    .split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  assert.equal(lines[0].credential, 'login');
+  assert.equal((await status(app)).auth.credential, 'login', 'the last refusal names it');
+
+  // A refusal that does not name it, and every other failure, carry no key.
+  state.script.push(() => errorOutcome('auth-expired'));
+  assert.equal('credential' in (await (await post(app, { prompt: 'hi' })).json()), false);
+  state.script.push(() => errorOutcome('model-error', { credential: 'login' }), () => errorOutcome('model-error'));
+  assert.equal('credential' in (await (await post(app, { prompt: 'hi' })).json()), false);
+
+  state.script.push(() => okOutcome());
+  await post(app, { prompt: 'hi' });
+  assert.equal('credential' in (await status(app)).auth, false, 'an answer clears it');
+});
+
 test('every degraded read names its reason, a passing one too', async () => {
   state.script.push(() => errorOutcome('model-error'), () => errorOutcome('model-error'));
   const body = await (await post(base, { prompt: 'hi' })).json();
@@ -204,6 +229,36 @@ test('the state machine: the newer evidence wins, and only a readable saved stat
   assert.deepEqual(restored.snapshot(), { state: 'expired', since: iso(T + 1234) });
   restored.record(true);
   assert.deepEqual(saves, [{ state: 'ok', since: T + 2500, answeredAt: T + 2500 }]);
+});
+
+test('the refused credential is part of the expired state: kept, replaced, cleared, and restored only when valid', () => {
+  const T = 1_800_000_000_000;
+  let clock = T + 1000;
+  const now = () => clock;
+  const iso = (ms) => new Date(ms).toISOString();
+  let saved = null;
+  const store = { load: () => saved, save: (v) => { saved = v; } };
+
+  const auth = createAuthState(store, now);
+  auth.record(false, 'durable');
+  assert.deepEqual(auth.snapshot(), { state: 'expired', since: iso(T + 1000), credential: 'durable' });
+  clock = T + 2000;
+  auth.record(false, 'login'); // another credential refused: named, the moment does not move
+  assert.deepEqual(auth.snapshot(), { state: 'expired', since: iso(T + 1000), credential: 'login' });
+  assert.deepEqual(createAuthState(store, now).snapshot(), auth.snapshot(), 'survives a restart');
+  auth.record(false); // a refusal that names none: unknown again
+  assert.deepEqual(auth.snapshot(), { state: 'expired', since: iso(T + 1000) });
+  auth.record(false, 'login');
+  auth.record(true);
+  assert.deepEqual(auth.snapshot(), { state: 'ok', since: iso(T + 2000) });
+
+  // An expiry read from the local credential names no refused credential.
+  assert.deepEqual(createAuthState(null, now).snapshot(T + 500), { state: 'expired', since: iso(T + 500) });
+  // A saved value that is not one of the two is not restored.
+  for (const credential of ['api-key', 1, null]) {
+    const loaded = createAuthState({ load: () => ({ state: 'expired', since: T, credential }), save: () => {} }, now);
+    assert.deepEqual(loaded.snapshot(), { state: 'expired', since: iso(T) });
+  }
 });
 
 test('an answer while already ok outdates an expiry that passed in between, and that survives a restart', () => {
