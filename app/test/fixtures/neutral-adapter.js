@@ -96,13 +96,14 @@ function createNeutralAdapter() {
     limitsAsked: [],
     limitsRead: [],
     // The child's HOME the adapter declares from launch: undefined declares
-    // none; a function is given the run's own directory and returns the value
-    // handed back as `home`, whatever it is, so a test can declare a bad one.
+    // none; a function is given the run's own directory and its spec and returns
+    // the value handed back as `home`, whatever it is, so a test can declare a
+    // bad one.
     launchHome: undefined,
   };
-  const withHome = (out, runDir) => {
+  const withHome = (out, runDir, spec) => {
     if (state.launchHome === undefined) return out;
-    return { ...out, home: typeof state.launchHome === 'function' ? state.launchHome(runDir) : state.launchHome };
+    return { ...out, home: typeof state.launchHome === 'function' ? state.launchHome(runDir, spec) : state.launchHome };
   };
   async function run(opts) {
     state.runs.push(opts);
@@ -136,7 +137,7 @@ function createNeutralAdapter() {
           state.sessionLaunches.push(spec);
           const conf = path.join(tapeDir(), `session-${state.launches.length}.json`);
           fs.writeFileSync(conf, JSON.stringify({ honourClear: true, forget: true, ...state.sessionAgent }));
-          return withHome({ args: [AGENT, '--session', conf, `--mcp=${spec.mcpConfigPath || ''}`], env: {} }, runDir);
+          return withHome({ args: [AGENT, '--session', conf, `--mcp=${spec.mcpConfigPath || ''}`], env: {} }, runDir, spec);
         }
         const tape = state.tapes.shift() || okTape();
         const file = path.join(tapeDir(), state.stableArgs ? 'tape-stable.json' : `tape-${state.launches.length}.json`);
@@ -150,7 +151,7 @@ function createNeutralAdapter() {
             ...(env.NEUTRAL_AGENT_KEY ? { NEUTRAL_AGENT_KEY: env.NEUTRAL_AGENT_KEY } : {}),
             ...(env.NEUTRAL_LEAK_TEST ? { SUPERVISOR_TOKEN: 'leak', TERM: 'xterm', PATH: '/leak', HOME: '/leak-home' } : {}),
           },
-        }, runDir);
+        }, runDir, spec);
       },
       // The contract's optional terminal call: free what launch allocated for
       // this run. Recorded before the removal, so the assertion is about the

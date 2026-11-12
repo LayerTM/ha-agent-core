@@ -137,6 +137,21 @@ test('a warm session runs in the home the adapter declared for it', async () => 
   }
 });
 
+test('a session whose launch is refused frees what launch allocated for it, and no session starts', async () => {
+  state.launchHome = (runDir, spec) => (spec.session ? 'relative/home' : undefined);
+  try {
+    const pool = newPool();
+    assert.equal((await read(pool)).status, 'ok');
+    assert.equal(await until(() => state.sessionLaunches.length === 1), true, 'a session was attempted');
+    const sessionSpec = state.sessionLaunches[0];
+    assert.equal(await until(() => state.endRuns.some((e) => e.spec === sessionSpec)), true, 'its allocation was freed');
+    assert.equal(state.runDirs.has(sessionSpec), false);
+    assert.equal(pool.size(), 0);
+  } finally {
+    state.launchHome = undefined;
+  }
+});
+
 test('nothing of one turn reaches the next — and the instrument can see it when it does', async () => {
   const pool = newPool();
   await read(pool);
@@ -321,7 +336,17 @@ test('the session check passes on an engine that resets, and fails on one that d
     state.sessionAgent = { honourClear: false };
     assert.equal(await main(['--bin', process.execPath]), 1);
     assert.match(said.pop(), /reset 1 did not complete/);
+
+    // A command line the core refuses ends the check, and frees what launch allocated.
+    state.sessionAgent = {};
+    state.launchHome = 'relative/home';
+    const ends = state.endRuns.length;
+    assert.equal(await main(['--bin', process.execPath]), 1);
+    assert.match(said.pop(), /runner\.launch home/);
+    assert.equal(state.endRuns.length, ends + 1);
+    assert.equal(state.endRuns[ends].existed, true);
   } finally {
+    state.launchHome = undefined;
     console.log = quiet;
     console.error = loud;
   }

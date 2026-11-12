@@ -670,9 +670,9 @@ function childEnv(parentEnv, extra, home) {
 // The adapter's command line for one spec, checked: an array of strings. The
 // adapter reads the parent environment to pick what it passes on (its own
 // credential variables); childEnv decides what may actually reach the child.
-// `home`, when the adapter declares one, is the child's HOME: an existing
-// directory, named by an absolute path. Anything else fails the run here, before
-// an agent starts, rather than start it in a HOME nobody chose.
+// `home`, when the adapter declares one (anything but undefined), is the child's
+// HOME: an existing directory, named by an absolute path. Anything else fails the
+// run here, before an agent starts, rather than start it in a HOME nobody chose.
 function launch(spec, parentEnv) {
   const out = adapter().runner.launch(spec, { env: parentEnv });
   if (!out || !Array.isArray(out.args) || !out.args.every((a) => typeof a === 'string')) {
@@ -681,7 +681,7 @@ function launch(spec, parentEnv) {
   return {
     args: out.args,
     env: out.env && typeof out.env === 'object' ? out.env : {},
-    home: 'home' in out ? declaredHome(out.home) : undefined,
+    home: out.home === undefined ? undefined : declaredHome(out.home),
   };
 }
 
@@ -916,14 +916,21 @@ function run({
       const sessionSpec = { ...spec, session: true };
       warm.pool.spawn(key, (sessionConfigPath) => {
         sessionSpec.mcpConfigPath = spec.mcpConfigPath ? (sessionConfigPath || undefined) : undefined;
-        const sessionCommand = launch(sessionSpec, process.env);
-        const sessionChild = spawn(bin, sessionCommand.args, {
-          cwd,
-          env: childEnv(process.env, sessionCommand.env, sessionCommand.home),
-          stdio: ['pipe', 'pipe', 'pipe'],
-          detached: true,
-        });
-        return { child: sessionChild, release: () => tellEndRun(sessionSpec) };
+        // A session that does not start is over: what launch allocated for it
+        // is freed here, because the pool only ever releases a started one.
+        try {
+          const sessionCommand = launch(sessionSpec, process.env);
+          const sessionChild = spawn(bin, sessionCommand.args, {
+            cwd,
+            env: childEnv(process.env, sessionCommand.env, sessionCommand.home),
+            stdio: ['pipe', 'pipe', 'pipe'],
+            detached: true,
+          });
+          return { child: sessionChild, release: () => tellEndRun(sessionSpec) };
+        } catch (err) {
+          tellEndRun(sessionSpec);
+          throw err;
+        }
       }).catch(() => {});
     };
 
@@ -1248,6 +1255,7 @@ module.exports = {
   launchSpec,
   childEnv,
   launch,
+  tellEndRun,
   safeLangTag,
   growingText,
   formatHistory,

@@ -149,6 +149,17 @@ test('a home the adapter declares from launch is the agent HOME, per run', async
   }
 });
 
+test('a home returned as undefined is not declared: the agent keeps the add-on HOME', async () => {
+  state.launchHome = () => undefined;
+  try {
+    const outcome = await runWith([{ echo: 'env' }]);
+    assert.equal(outcome.status, 'ok');
+    assert.equal(JSON.parse(outcome.text).HOME, process.env.HOME);
+  } finally {
+    state.launchHome = undefined;
+  }
+});
+
 test('a declared home that is not an existing absolute directory fails the run before any agent starts', async () => {
   const file = path.join(TMP, 'home-is-a-file');
   fs.writeFileSync(file, '');

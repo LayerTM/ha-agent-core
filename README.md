@@ -172,7 +172,12 @@ becomes the child's `HOME` for that run (or, for a [warm session](#warm-sessions
 for that session). The adapter owns it: it creates it in `launch` and frees it in
 `endRun`, like any other per-run allocation. A `home` that is not an absolute
 path to an existing directory fails the run with `spawn-failed` before any agent
-starts. Without `home`, the child's `HOME` is the add-on's own, which is also
+starts; `home: undefined` is the same as no `home`.
+
+A `home` must never decide what a run is. Which warm session may serve a read is
+decided by the read's `args` and `env` alone, so a read served warm runs in the
+`HOME` its session was started with, not in the one `launch` returned for the
+read. Anything that has to differ between runs belongs in `args` or `env`. Without `home`, the child's `HOME` is the add-on's own, which is also
 the console's: whatever the console's user installed under it (skills,
 instructions, settings the engine discovers by itself) is within the run's
 reach unless the engine's command line excludes it.
@@ -612,7 +617,8 @@ read served warm has `warm=1` in its audit line.
 
 `node server/prompt/session-check.js` checks, in an assembled tree, that the engine
 still resets a session the way this relies on. It needs no sign-in and exits `0`
-when the reset holds and `1` when it does not. An add-on runs it against its
+when the reset holds and `1` when it does not, or when the core refuses the
+command line `launch` returns for it, as it would refuse it for a read. An add-on runs it against its
 bundled engine whenever the engine changes, because an engine release that
 stopped resetting would let one read's text reach the next.
 
