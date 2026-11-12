@@ -14,7 +14,7 @@ const {
   ipAllowed, tokenMatches, sanitizePrompt, sanitizeId,
   validateIntents, validateMemory, factText, MEMORY_MAX_BYTES, redactDeep, sha12, streamableEnd,
 } = require('./security');
-const { adapter, branding } = require('../adapter-contract');
+const { adapter, branding, REFUSED_CREDENTIALS } = require('../adapter-contract');
 const {
   langOf, DEGRADE_TEXT, budgetNotice, tokenRefusedNotice, targetNotice,
 } = require('./notices');
@@ -379,6 +379,9 @@ function createBudget(limitUsd, now = () => new Date(), persist = null) {
 //   `since`: an answer while already ok does not move `since`, but it does
 //   outdate an expiry that passed in between.
 // `since` is when the published state became true (ISO-8601), or null.
+// `credential` is present only while a run's refusal is the evidence and that
+// refusal named the credential (`durable` | `login`); the last refusal names it,
+// and it does not move `since`. Absent means unknown.
 const AUTH_STATES = new Set(['ok', 'expired']);
 // An epoch-millis time; anything earlier than 2001-09-09 (1e12 ms) is a time in
 // seconds or nonsense, and either way not something to call a sign-in dead by.
@@ -388,23 +391,28 @@ function createAuthState(persist = null, now = Date.now) {
   let state = 'unknown';
   let since = null;
   let answeredAt = null;
+  let credential = null;
   if (saved && AUTH_STATES.has(saved.state) && Number.isFinite(saved.since) && saved.since > 0) {
     ({ state, since } = saved);
     if (Number.isFinite(saved.answeredAt) && saved.answeredAt > 0) ({ answeredAt } = saved);
+    if (state === 'expired' && REFUSED_CREDENTIALS.has(saved.credential)) ({ credential } = saved);
   }
   return {
-    // From one run's outcome: true = answered, false = the sign-in was refused.
-    record(answered) {
+    // From one run's outcome: true = answered, false = the sign-in was refused,
+    // with the credential the refusal named, if it named one.
+    record(answered, refused = null) {
       const at = now();
       const next = answered ? 'ok' : 'expired';
+      const named = !answered && REFUSED_CREDENTIALS.has(refused) ? refused : null;
       if (answered) answeredAt = at;
       if (next !== state) {
         state = next;
         since = at;
-      } else if (!answered) {
-        return; // still refused: nothing new to keep
+      } else if (!answered && named === credential) {
+        return; // still refused, the same way: nothing new to keep
       }
-      if (persist && persist.save) persist.save({ state, since, answeredAt });
+      credential = named;
+      if (persist && persist.save) persist.save({ state, since, answeredAt, ...(credential ? { credential } : {}) });
     },
     // `credentialExpiry`: epoch millis, or null when the adapter cannot tell.
     snapshot(credentialExpiry = null) {
@@ -413,7 +421,11 @@ function createAuthState(persist = null, now = Date.now) {
       if (at !== null && at <= now() && state !== 'expired' && !answeredSince) {
         return { state: 'expired', since: new Date(at).toISOString() };
       }
-      return { state, since: since === null ? null : new Date(since).toISOString() };
+      return {
+        state,
+        since: since === null ? null : new Date(since).toISOString(),
+        ...(credential ? { credential } : {}),
+      };
     },
   };
 }
@@ -1421,12 +1433,15 @@ function createPromptApp({
       const degradedBody = (reason) => ({
         text: reason === 'ha-token-refused' ? tokenRefusedNotice(language, outcome.refusal) : DEGRADE_TEXT[language],
         proposal: null, tools_used: [], truncated: false, degraded: true, reason,
+        // Which credential the engine refused, when the adapter named it.
+        ...(reason === 'auth-expired' && REFUSED_CREDENTIALS.has(outcome.credential)
+          ? { credential: outcome.credential } : {}),
         // Deltas already went out: they were an incomplete answer, and `text`
         // is to be shown after them.
         ...(emittedLen > 0 ? { partial: true } : {}),
       });
       if (outcome.status === 'ok') authState.record(true);
-      else if (outcome.reason === 'auth-expired') authState.record(false);
+      else if (outcome.reason === 'auth-expired') authState.record(false, outcome.credential);
       // How the earlier attempts of a request that still failed ended.
       const retried = retriedFrom.length ? ` retried=${retriedFrom.join('+')}` : '';
       if (outcome.status === 'timeout') {

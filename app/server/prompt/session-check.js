@@ -17,7 +17,7 @@ const { spawn } = require('node:child_process');
 const os = require('node:os');
 const path = require('node:path');
 const { adapter } = require('../adapter-contract');
-const { launchSpec, childEnv } = require('./run');
+const { launchSpec, childEnv, launch, tellEndRun } = require('./run');
 const { RESET_MS } = require('./session-pool');
 
 const RESETS = 3;
@@ -38,10 +38,19 @@ function main(argv) {
     }),
     session: true,
   };
-  const command = adapter().runner.launch(spec, { env: process.env });
-  const child = spawn(bin, command.args, {
-    cwd: os.tmpdir(), env: childEnv(process.env, command.env), stdio: ['pipe', 'pipe', 'pipe'], detached: true,
-  });
+  // The command line as the core checks it for every run; one it refuses, or
+  // a spawn that throws, ends the check, and what launch allocated is freed.
+  let child;
+  try {
+    const command = launch(spec, process.env);
+    child = spawn(bin, command.args, {
+      cwd: os.tmpdir(), env: childEnv(process.env, command.env, command.home), stdio: ['pipe', 'pipe', 'pipe'], detached: true,
+    });
+  } catch (err) {
+    tellEndRun(spec);
+    console.error(`session-check: the engine did not start: ${err.message}`);
+    return Promise.resolve(1);
+  }
   let stderr = '';
   child.stderr.on('data', (d) => { if (stderr.length < 2000) stderr += d; });
   return new Promise((resolve) => {
@@ -55,7 +64,7 @@ function main(argv) {
       finished = true;
       clearTimeout(timer);
       try { process.kill(-child.pid, 'SIGKILL'); } catch { /* gone */ }
-      if (typeof adapter().runner.endRun === 'function') adapter().runner.endRun(spec);
+      tellEndRun(spec);
       console[code === 0 ? 'log' : 'error'](`session-check: ${message}`);
       resolve(code);
     };

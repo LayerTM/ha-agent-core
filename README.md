@@ -39,7 +39,7 @@ valid (see [Names](#names) and [Console pages](#console-pages)):
 | `descriptor.versionAlias` | optional string | one more `<name>_version` status key carrying `engine_version`, for clients that predate it |
 | `descriptor.reportsCost` | optional boolean | `true` when every run reports its cost in USD; only then is a daily budget published and enforced |
 | `runner.bin` | string | the agent executable a prompt run starts (`CLAUDE_PROMPT_BIN` overrides it) |
-| `runner.launch(spec, { env })` | function | `{ args, env }` for one run (see below) |
+| `runner.launch(spec, { env })` | function | `{ args, env, home? }` for one run (see below) |
 | `runner.createDecoder(spec)` | function | a function turning one parsed line of the agent's JSON-lines output into a list of run events |
 | `runner.endRun(spec)` | optional function | free what this run allocated (a scratch directory, an entry in a live set). Called once per run on EVERY ending — an answer, a model error, a timeout, an abort, a kill, and a failure to spawn, where the run never started but `launch` had already allocated. `spec` is the one `launch` and `createDecoder` received, so it is the run's identity. It may arrive for a `spec` nothing was allocated for, so it must tolerate that and be idempotent; a throw is logged and never changes the run's outcome. An adapter that allocates nothing per run does not ship it. A process that is killed outright never reaches it, so an adapter whose allocation outlives the process needs its own way back to it |
 | `runner.session` | optional object | `{ clearLine(), userLine(text), createResetReader() }`: what [warm sessions](#warm-sessions) need. `clearLine()` is the line that resets the engine's conversation, `userLine(text)` the line that sends one turn, and `createResetReader()` returns a function that is given each parsed output line after a reset was sent and returns `true` at the line that completes it. With it, `launch` receives `spec.session: true` for a session's command line and must make the engine read its turns from stdin, one line each. Absent, `prompt_keep_warm` is logged as unsupported and every read runs fresh |
@@ -129,7 +129,9 @@ decides:
   names the agent last published;
 - the wall-clock limit, the output caps and process-group termination;
 - the child's environment: `PATH`, `HOME`, `LANG`, `TERM`, plus what the adapter
-  adds, never a Supervisor or Home Assistant credential;
+  adds, never a Supervisor or Home Assistant credential (an adapter's own
+  `PATH`, `HOME`, `LANG` or `TERM` in `env` is ignored; `HOME` is set only
+  through `home`, see [The run's home](#the-runs-home));
 - the validation of the answer.
 
 A confirmed `write` runs no agent; see [Confirmed writes](#confirmed-writes).
@@ -161,7 +163,36 @@ Its decoder reports these events:
 | `tool-use` | `id`, `name` | the model called a tool |
 | `tool-result` | `id`, `isError` | that call's result |
 | `fragment-start`, `fragment` | `json` | streamed pieces of the structured answer |
-| `result` | `isError`, `deterministic`, `authExpired?`, `structured`, `text`, `numTurns?`, `costUsd?`, `tokens?` | the run ended; `authExpired: true` on an error the engine reports as its sign-in being refused. The core answers at this event, without waiting for the agent to exit: it ends the agent's process group, and drops what the agent writes after it |
+| `result` | `isError`, `deterministic`, `authExpired?`, `credential?`, `structured`, `text`, `numTurns?`, `costUsd?`, `tokens?` | the run ended; `authExpired: true` on an error the engine reports as its sign-in being refused, and with it `credential`, which credential the engine used for the run: `"durable"`, the one set in the add-on's options, or `"login"`, the engine's own stored sign-in. Any other `credential`, or none, is unknown. The core answers at this event, without waiting for the agent to exit: it ends the agent's process group, and drops what the agent writes after it |
+
+#### The run's home
+
+`launch` may return `home`: the absolute path of an existing directory, which
+becomes the child's `HOME` for that run (or, for a [warm session](#warm-sessions),
+for that session). The adapter owns it: it creates it in `launch` and frees it in
+`endRun`, like any other per-run allocation. A `home` that is not an absolute
+path to an existing directory fails the run with `spawn-failed` before any agent
+starts; `home: undefined` is the same as no `home`.
+
+A `home` must never decide what a run is. Which warm session may serve a read is
+decided by the read's `args` and `env` alone, so a read served warm runs in the
+`HOME` its session was started with, not in the one `launch` returned for the
+read. Anything that has to differ between runs belongs in `args` or `env`. Without `home`, the child's `HOME` is the add-on's own, which is also
+the console's: whatever the console's user installed under it (skills,
+instructions, settings the engine discovers by itself) is within the run's
+reach unless the engine's command line excludes it.
+
+A run's home holds only what the engine must have there, and that depends on
+where the engine keeps its sign-in. Before an adapter declares one, it measures
+its engine with an empty directory as `HOME`:
+- an engine that reads its sign-in and configuration from a directory named by
+  a variable of its own, which the adapter sets, needs nothing from `HOME`: an
+  empty directory signs in as before;
+- an engine that keeps its stored sign-in under `HOME` reports that it is not
+  signed in with an empty one, unless its credential reaches it another way (a
+  key or token variable, or a variable naming its configuration directory). Such
+  an engine usually also writes its own state into `HOME` on every run, so the
+  directory must be writable.
 
 A missing optional field never widens what a run may do:
 - no tool list means no renamed-tool detection;
@@ -477,7 +508,10 @@ open pages while no site is listed, refuses a web read with `web_unsupported`.
 A `read` whose run fails is not an error answer: it is a `200` (or, streamed, a
 `done` line) with `degraded: true`, a short apology as `text`, and `reason`, the
 failed run's reason. `auth-expired` means the engine refused its sign-in. That
-run is never retried — nothing but signing in again changes the answer.
+run is never retried — nothing but signing in again changes the answer. With it
+comes `credential` when the adapter named the refused one: `"durable"` (the
+credential set in the add-on's options) or `"login"` (the engine's stored
+sign-in); absent, it is unknown.
 `ha-token-refused` means Home Assistant refused the add-on's token (401 or 403)
 during that read — a revoked token, or a non-administrator's while the Model
 Context Protocol Server requires an administrator. Whatever the model wrote is
@@ -492,13 +526,16 @@ otherwise. Writes are unaffected: they run no model and
 report Home Assistant's own reason per action.
 
 `GET /api/status` publishes `auth`, whether the agent is still signed in, without
-running it: `{ "state": "ok" | "expired" | "unknown", "since": "<ISO-8601>" | null }`.
+running it: `{ "state": "ok" | "expired" | "unknown", "since": "<ISO-8601>" | null, "credential"?: "durable" | "login" }`.
 A run the engine refused for its sign-in makes it `expired`; the next run that
 answers makes it `ok`; any other failure leaves it as it was. When the adapter
 can tell from the local credential that it can no longer be used
 (`prompt.credentialsExpiry`), it is `expired` from that moment, unless a run
 answered after it. `since` is when the state became true. `unknown` means there
-is no evidence yet. The state survives a restart.
+is no evidence yet. `credential` is present while the state is `expired`
+because of a refused run that named its credential (the last such refusal
+names it); otherwise it is absent, which means unknown. The state survives a
+restart.
 
 `GET /api/status` publishes `ha_mcp_auth`, whether Home Assistant accepts the
 add-on's token on its MCP endpoint: `"ok"`, `"unauthorized"` (Home Assistant
@@ -580,7 +617,8 @@ read served warm has `warm=1` in its audit line.
 
 `node server/prompt/session-check.js` checks, in an assembled tree, that the engine
 still resets a session the way this relies on. It needs no sign-in and exits `0`
-when the reset holds and `1` when it does not. An add-on runs it against its
+when the reset holds and `1` when it does not, or when the core refuses the
+command line `launch` returns for it, as it would refuse it for a read. An add-on runs it against its
 bundled engine whenever the engine changes, because an engine release that
 stopped resetting would let one read's text reach the next.
 

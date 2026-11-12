@@ -6,6 +6,24 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- An adapter can give a prompt run a home of its own: `runner.launch` may return
+  `home`, an existing directory that becomes the run's `HOME` (a warm session's
+  too). Without it, a run's `HOME` is still the add-on's, which the console
+  shares, so what the console's user installed there (skills the engine picks up
+  by itself) can reach every read. A `home` that is not an existing directory
+  named by an absolute path fails the run before the agent starts. The README
+  documents what an engine needs from `HOME` to stay signed in. The session check
+  (`session-check.js`) now holds `launch`'s result to the same rules as a read
+  does, and frees what `launch` allocated when it stops early; so does a warm
+  session that fails to start.
+- A read refused for the engine's sign-in now says which credential was refused,
+  when the adapter names it on the result (`credential`: `durable` for the one
+  set in the add-on's options, `login` for the engine's stored sign-in): on the
+  degraded answer and on `/api/status` as `auth.credential`. Absent means
+  unknown, as before. The adapter API version does not change: both are optional.
+
 ## [0.13.1] - 2026-11-10
 
 ### Fixed

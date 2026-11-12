@@ -120,6 +120,66 @@ test('the agent environment is the fixed base plus what the adapter adds, never 
   }
 });
 
+// --- the child's HOME ----------------------------------------------------------------
+
+test('without a declared home the agent gets the add-on HOME, and an adapter env HOME never replaces it', async () => {
+  process.env.NEUTRAL_LEAK_TEST = '1';
+  try {
+    const env = JSON.parse((await runWith([{ echo: 'env' }])).text);
+    assert.equal(env.HOME, process.env.HOME);
+  } finally {
+    delete process.env.NEUTRAL_LEAK_TEST;
+  }
+});
+
+test('a home the adapter declares from launch is the agent HOME, per run', async () => {
+  state.launchHome = (runDir) => {
+    const home = path.join(runDir, 'home');
+    fs.mkdirSync(home, { recursive: true });
+    return home;
+  };
+  try {
+    const first = JSON.parse((await runWith([{ echo: 'env' }])).text);
+    const second = JSON.parse((await runWith([{ echo: 'env' }])).text);
+    assert.notEqual(first.HOME, process.env.HOME);
+    assert.equal(path.basename(first.HOME), 'home');
+    assert.notEqual(first.HOME, second.HOME, 'each run its own');
+  } finally {
+    state.launchHome = undefined;
+  }
+});
+
+test('a home returned as undefined is not declared: the agent keeps the add-on HOME', async () => {
+  state.launchHome = () => undefined;
+  try {
+    const outcome = await runWith([{ echo: 'env' }]);
+    assert.equal(outcome.status, 'ok');
+    assert.equal(JSON.parse(outcome.text).HOME, process.env.HOME);
+  } finally {
+    state.launchHome = undefined;
+  }
+});
+
+test('a declared home that is not an existing absolute directory fails the run before any agent starts', async () => {
+  const file = path.join(TMP, 'home-is-a-file');
+  fs.writeFileSync(file, '');
+  const bad = [null, '', 5, {}, 'relative/home', path.join(TMP, 'no-such-home'), file];
+  try {
+    for (const home of bad) {
+      state.launchHome = home;
+      const ends = state.endRuns.length;
+      const outcome = await runWith([{ echo: 'env' }]);
+      assert.equal(outcome.status, 'error', `home ${JSON.stringify(home)} was accepted`);
+      assert.equal(outcome.reason, 'spawn-failed');
+      assert.match(outcome.message, /runner\.launch home/);
+      assert.equal(state.endRuns.length, ends + 1, 'what launch allocated is freed');
+      state.tapes.length = 0;
+    }
+  } finally {
+    state.launchHome = undefined;
+  }
+});
+
 // --- remembered facts -------------------------------------------------------------
 
 const FACTS = [{ id: 'a1', text: 'My room is the office.' }, { id: 'b2', text: 'Sleep mode means the hall lights off.' }];
@@ -277,6 +337,22 @@ test('an engine that refuses its sign-in ends auth-expired, whatever else the re
   // A result that is not an error is an answer, flag or not.
   const answered = await runWith([{ emit: { type: 'result', isError: false, authExpired: true, text: 'fine' } }]);
   assert.equal(answered.status, 'ok');
+});
+
+test('a refusal carries which credential the engine used when the adapter names one of the two', async () => {
+  const refused = (extra) => runWith([{ emit: { type: 'result', isError: true, authExpired: true, ...extra } }]);
+  assert.equal((await refused({ credential: 'durable' })).credential, 'durable');
+  assert.equal((await refused({ credential: 'login' })).credential, 'login');
+  // Not named, or named as anything else: unknown, so the key is absent.
+  for (const credential of [undefined, null, 'api-key', true, ['login']]) {
+    const outcome = await refused({ credential });
+    assert.equal(outcome.reason, 'auth-expired');
+    assert.equal('credential' in outcome, false, `credential ${JSON.stringify(credential)} was passed on`);
+  }
+  // Only a refusal says which credential was refused.
+  const other = await runWith([{ emit: { type: 'result', isError: true, credential: 'login' } }]);
+  assert.equal(other.reason, 'model-error');
+  assert.equal('credential' in other, false);
 });
 
 test('an agent that ends without a result is a transient no-result naming its exit and stderr', async () => {

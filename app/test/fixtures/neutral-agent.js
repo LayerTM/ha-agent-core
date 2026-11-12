@@ -20,8 +20,9 @@
 //   { mark: <file> }            write the current time (ms) to <file>
 
 // Session mode (`--session <conf>`): one turn per stdin line. A `user` line plays
-// its own tape, where `{ echo: 'stdin' }` answers with the turn's text and
-// `{ echo: 'memory' }` with every user text the agent still remembers. A `clear`
+// its own tape, where `{ echo: 'stdin' }` answers with the turn's text,
+// `{ echo: 'memory' }` with every user text the agent still remembers and
+// `{ echo: 'env' }` with the session's environment as JSON. A `clear`
 // line emits `reset` and a 0-turn result, and forgets — unless the conf says it
 // does not honour a reset, or does not forget.
 if (process.argv[2] === '--session') {
@@ -46,7 +47,8 @@ if (process.argv[2] === '--session') {
       else if (step.pid) require('node:fs').writeFileSync(step.pid, String(process.pid));
       else if (typeof step.exit === 'number') process.exit(step.exit);
       else if (step.echo) {
-        const text = step.echo === 'memory' ? memory.slice(0, -1).join(' | ') : msg.text;
+        const text = step.echo === 'memory' ? memory.slice(0, -1).join(' | ')
+          : step.echo === 'env' ? JSON.stringify(process.env) : msg.text;
         await out({ type: 'result', structured: { text, proposal: null, automation: null }, numTurns: 1 });
       }
     }
