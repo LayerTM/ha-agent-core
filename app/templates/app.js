@@ -300,8 +300,75 @@
   // xterm updates its selection model synchronously during the pointer events, so
   // hasSelection()/getSelection() are already current here. getSelection() rejoins
   // wrapped lines, so a line that spilled onto several rows copies as one line.
+  // One-finger vertical swipe → wheel notches. xterm.js has no touch scrolling of
+  // its own, and tmux keeps the screen in the alternate buffer, so on a phone the
+  // history was reachable only through PgUp/PgDn. Every `rowsPerNotch` rows of
+  // finger travel is one notch — the same count tmux scrolls per notch and the
+  // terminal's scrollSensitivity — so the text follows the finger. The gesture is
+  // claimed only once it is clearly a one-finger vertical drag that began moving
+  // before a long press would have fired; a tap (focus and the keyboard), a long
+  // press (selection), a pinch and a sideways drag stay with the browser. Nothing
+  // is prevented on touchstart or touchend, so taps and selection are untouched.
+  function bindTouchScroll(surface, { rowHeight, notch, rowsPerNotch = 3, slop = 10, longPressMs = 400 }) {
+    let g = null; // the touch in progress
+    let swiped = false; // whether the touch that ended last was a swipe
+    surface.addEventListener('touchstart', (e) => {
+      swiped = false;
+      if (e.touches.length !== 1) { g = null; return; }
+      const p = e.touches[0];
+      g = { x: p.clientX, y: p.clientY, t: e.timeStamp, lastY: p.clientY, travel: 0, swipe: false, off: false };
+    }, { passive: true });
+    surface.addEventListener('touchmove', (e) => {
+      if (!g || g.off) return;
+      if (e.touches.length !== 1) { g.off = true; return; }
+      const p = e.touches[0];
+      if (!g.swipe) {
+        const dx = p.clientX - g.x;
+        const dy = p.clientY - g.y;
+        if (Math.max(Math.abs(dx), Math.abs(dy)) < slop) return;
+        if (e.timeStamp - g.t >= longPressMs || Math.abs(dx) > Math.abs(dy)) { g.off = true; return; }
+        g.swipe = true;
+        swiped = true;
+      }
+      if (e.cancelable) e.preventDefault();
+      g.travel += p.clientY - g.lastY;
+      g.lastY = p.clientY;
+      const step = rowHeight() * rowsPerNotch;
+      if (!(step > 0)) return;
+      while (Math.abs(g.travel) >= step) {
+        const down = g.travel > 0; // a finger moving down pulls older lines into view
+        notch(down ? -1 : 1, g.x, g.y);
+        g.travel += down ? -step : step;
+      }
+    }, { passive: false });
+    const end = (e) => { if (e.touches.length === 0) g = null; };
+    surface.addEventListener('touchend', end);
+    surface.addEventListener('touchcancel', end);
+    return { swiped: () => swiped };
+  }
+
+  // A swipe scrolls the history through the wheel path (bindTouchScroll). The
+  // notch is a real wheel event dispatched on the screen, so whatever a desktop
+  // wheel does there happens here too: under tmux it becomes the wheel report
+  // that enters copy-mode on the way up and leaves it again at the bottom.
+  const touchScroll = bindTouchScroll(els.terminal, {
+    rowHeight: () => {
+      const screen = term.element?.querySelector('.xterm-screen');
+      return screen && term.rows ? screen.clientHeight / term.rows : 0;
+    },
+    notch: (deltaY, clientX, clientY) => {
+      const screen = term.element?.querySelector('.xterm-screen');
+      screen?.dispatchEvent(new WheelEvent('wheel', {
+        deltaY, deltaMode: WheelEvent.DOM_DELTA_LINE, clientX, clientY, bubbles: true, cancelable: true,
+      }));
+    },
+  });
+
   const maybeCopySelection = (e) => {
     if (e && e.button) return; // left button / touch only — right-click keeps its selection
+    // The end of a swipe is not a selection gesture: an older selection still on
+    // screen would otherwise be copied again on every scroll.
+    if (e?.type === 'touchend' && touchScroll.swiped()) return;
     if (!term.hasSelection()) return;
     const sel = term.getSelection();
     if (sel.trim()) copySelection(sel);

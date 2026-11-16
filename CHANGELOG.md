@@ -11,6 +11,13 @@ uses [Semantic Versioning](https://semver.org/).
 - Hungarian (`hu`) for the texts the server writes itself: the degrade notice,
   the budget notice, the refused-token notice and the device-lookup notices.
   Contributed by @marcello-star (#136).
+- On a touch screen, a one-finger vertical swipe over the console's terminal
+  scrolls its history the way the mouse wheel does on a desktop: swiping down
+  brings older lines in, and swiping back to the bottom returns to the live
+  session. Until now a phone or tablet could reach the history only with the
+  PgUp/PgDn keys. A tap still focuses the terminal, and a long press, a pinch
+  and a sideways drag are left to the browser; the end of a swipe no longer
+  copies a selection that is still on the screen.
 
 ## [0.14.0] - 2026-11-12
 
