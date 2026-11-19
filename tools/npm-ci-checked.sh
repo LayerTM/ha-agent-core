@@ -95,7 +95,12 @@ test -f "$nodedir/include/node/common.gypi" || {
   echo "no Node headers under $nodedir/include/node" >&2
   exit 1
 }
-devdir="$(mktemp -d)/node-gyp"
+# node-gyp's download directory lives in a temporary directory that is removed on
+# every exit, success or failure, so a build leaves nothing in the temp root.
+tmproot="$(mktemp -d "${TMPDIR:-/tmp}/npm-ci-checked.XXXXXX")"
+trap 'rm -rf "$tmproot"' EXIT
+trap 'exit 1' INT TERM HUP
+devdir="$tmproot/node-gyp"
 export npm_package_config_node_gyp_nodedir="$nodedir"
 export npm_package_config_node_gyp_devdir="$devdir"
 

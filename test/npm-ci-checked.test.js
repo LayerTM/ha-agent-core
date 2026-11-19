@@ -30,7 +30,7 @@ function hijacker(binDir, name, marker) {
 }
 
 const wrap = (dir, env = {}) => spawnSync('bash', [WRAPPER], {
-  cwd: dir, encoding: 'utf8', env: { ...process.env, NPM_CLI: '', ...env },
+  cwd: dir, encoding: 'utf8', env: { ...process.env, NPM_CLI: '', NODE_DISABLE_COMPILE_CACHE: '1', ...env },
 });
 
 test('an empty project installs with the image tools', (t) => {
@@ -108,4 +108,19 @@ test('--omit=dev leaves the dev dependencies out', (t) => {
   r = spawnSync('bash', [WRAPPER], { cwd: dir, encoding: 'utf8', env: { ...process.env, NPM_CLI: '' } });
   assert.equal(r.status, 0, r.stderr);
   assert.equal(fs.existsSync(path.join(dir, 'node_modules', 'devtool', 'package.json')), true);
+});
+
+test('the wrapper leaves nothing in the temp root, whether it succeeds or fails', (t) => {
+  const dir = emptyProject(t);
+  const tmp = tempDir(t);
+  const ok = wrap(dir, { TMPDIR: tmp });
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.deepEqual(fs.readdirSync(tmp), []);
+  const bad = spawnSync('bash', [WRAPPER, '--bogus'], { cwd: dir, encoding: 'utf8', env: { ...process.env, NODE_DISABLE_COMPILE_CACHE: '1', TMPDIR: tmp } });
+  assert.equal(bad.status, 2);
+  // A failure after the temp dir exists: the lockfile record is checked first.
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'empty', version: '1.0.0', allowScripts: { ghost: true } }));
+  const failed = wrap(dir, { TMPDIR: tmp });
+  assert.notEqual(failed.status, 0);
+  assert.deepEqual(fs.readdirSync(tmp), []);
 });
