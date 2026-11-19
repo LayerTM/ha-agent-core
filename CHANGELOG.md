@@ -10,6 +10,16 @@ uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- `tools/npm-ci-checked.sh` and `tools/build-allowed-packages.js` no longer
+  leave build state in the installed tree or the temp root, so two installs of
+  one lockfile are byte-identical. The wrapper removes its temporary directory
+  on every exit. The packages with install scripts are now built in
+  `/tmp/allowed-build-<digest of their lockfile entries>` instead of a random
+  directory (compilers write that path into the binaries and the build files),
+  and the build files nothing loads (`build/` except `Release` and `Debug`,
+  object files, dependency records) are removed after the build. A second build
+  of the same closure at the same time, or a leftover of a killed one, is
+  refused.
 - The engine session check (`server/prompt/session-check.js`) no longer gives
   each reset 2 s. The first reset is written right after the engine starts, so
   its answer includes the engine's cold start, which can exceed 2 s on a slow or
