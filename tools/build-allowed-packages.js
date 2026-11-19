@@ -15,7 +15,15 @@
  *      node-gyp, a PATH of the Node.js directory and the system directories, and
  *      an empty HOME, npm cache and npm configuration;
  *   3. copies the packages back over the installed ones, with what their scripts
- *      built.
+ *      built, minus the build intermediates (build/ other than Release and
+ *      Debug; object files and dependency records inside them).
+ *
+ * The staging directory's path depends on the closure's lockfile entries alone
+ * (/tmp/allowed-build-<digest>), never on TMPDIR or a random suffix: compilers
+ * write the build directory into the binaries they produce (and the build files
+ * into build/), so any other path would make two installs of the same lockfile
+ * differ. It is created exclusively and removed on every exit; a second build of
+ * the same closure at the same time, or a leftover of a killed one, is refused.
  *
  * So an install script finds only reviewed packages: npm puts the staging
  * directory's node_modules/.bin first on the PATH, and it holds the bins of the
@@ -30,12 +38,13 @@
  */
 
 const { spawnSync } = require('node:child_process');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 
 const { checkDir, omittedByInstall } = require('./check-install-scripts.js');
 
+const STAGE_ROOT = '/tmp';
 const SYSTEM_PATH = ['/usr/local/bin', '/usr/bin', '/bin'];
 
 function copyPackage(from, to) {
@@ -45,6 +54,40 @@ function copyPackage(from, to) {
     // copied by its own lockfile path instead.
     filter: (src) => path.relative(from, src).split(path.sep)[0] !== 'node_modules',
   });
+}
+
+/** The staging path for a closure: fixed parent, name from the lockfile entries. */
+function stagePath(lock, paths) {
+  const hash = crypto.createHash('sha256');
+  for (const rel of paths) hash.update(`${rel}\0${JSON.stringify(lock.packages[rel] ?? null)}\0`);
+  return path.join(STAGE_ROOT, `allowed-build-${hash.digest('hex').slice(0, 12)}`);
+}
+
+/** The nearest parent of `stage` that holds a node_modules (npm would search its .bin), or null. */
+function parentWithNodeModules(stage) {
+  for (let up = fs.realpathSync(path.dirname(stage)); ; up = path.dirname(up)) {
+    if (fs.existsSync(path.join(up, 'node_modules'))) return up;
+    if (path.dirname(up) === up) return null;
+  }
+}
+
+const INTERMEDIATE_DIRS = new Set(['obj', 'obj.target', '.deps']);
+
+/**
+ * Removes what a package's build leaves that nothing loads at runtime: every
+ * entry of build/ except Release and Debug (Makefile, config.gypi, *.mk, ...),
+ * and object files and dependency records inside those two.
+ */
+function dropBuildIntermediates(pkgDir) {
+  const build = path.join(pkgDir, 'build');
+  if (!fs.existsSync(build)) return;
+  for (const entry of fs.readdirSync(build)) {
+    const full = path.join(build, entry);
+    if (entry !== 'Release' && entry !== 'Debug') { fs.rmSync(full, { recursive: true, force: true }); continue; }
+    for (const inner of fs.readdirSync(full)) {
+      if (INTERMEDIATE_DIRS.has(inner) || inner.endsWith('.o')) fs.rmSync(path.join(full, inner), { recursive: true, force: true });
+    }
+  }
 }
 
 function main(argv) {
@@ -80,19 +123,22 @@ function main(argv) {
   }
   if (names.length === 0) return 0;
 
-  const stage = fs.mkdtempSync(path.join(os.tmpdir(), 'allowed-build-'));
+  const paths = [...new Set(names.flatMap((name) => Object.keys(closures[name])))].sort();
+  const stage = stagePath(lock, paths);
+  // npm also searches every parent of the stage for node_modules/.bin, so no
+  // parent may hold a node_modules.
+  const shadowed = parentWithNodeModules(stage);
+  if (shadowed) {
+    process.stderr.write(`build-allowed-packages: ${shadowed} holds a node_modules; remove it\n`);
+    return 1;
+  }
   try {
-    // npm also searches every parent of the stage for node_modules/.bin, so no
-    // parent may hold a node_modules (a temporary directory inside a project,
-    // or a shared one somebody wrote a node_modules into).
-    for (let up = path.dirname(fs.realpathSync(stage)); ; up = path.dirname(up)) {
-      if (fs.existsSync(path.join(up, 'node_modules'))) {
-        process.stderr.write(`build-allowed-packages: ${up} holds a node_modules; set TMPDIR to a directory outside any project\n`);
-        return 1;
-      }
-      if (path.dirname(up) === up) break;
-    }
-    const paths = [...new Set(names.flatMap((name) => Object.keys(closures[name])))].sort();
+    fs.mkdirSync(stage, { mode: 0o700 });
+  } catch (err) {
+    process.stderr.write(`build-allowed-packages: cannot create ${stage} (${err.code}); the same build is running, or a killed one left it behind: remove it\n`);
+    return 1;
+  }
+  try {
     for (const rel of paths) copyPackage(path.join(dir, rel), path.join(stage, rel));
     const dependencies = Object.fromEntries(names.map((name) => [name, lock.packages[`node_modules/${name}`]?.version ?? '*']));
     fs.writeFileSync(path.join(stage, 'package.json'), JSON.stringify({
@@ -126,7 +172,10 @@ function main(argv) {
       process.stderr.write(`build-allowed-packages: npm rebuild failed (${run.status ?? run.signal})\n`);
       return 1;
     }
-    for (const rel of paths) copyPackage(path.join(stage, rel), path.join(dir, rel));
+    for (const rel of paths) {
+      copyPackage(path.join(stage, rel), path.join(dir, rel));
+      dropBuildIntermediates(path.join(dir, rel));
+    }
     return 0;
   } finally {
     fs.rmSync(stage, { recursive: true, force: true });
@@ -134,3 +183,5 @@ function main(argv) {
 }
 
 if (require.main === module) process.exitCode = main(process.argv.slice(2));
+
+module.exports = { stagePath, parentWithNodeModules, dropBuildIntermediates };
