@@ -18,11 +18,16 @@ const os = require('node:os');
 const path = require('node:path');
 const { adapter } = require('../adapter-contract');
 const { launchSpec, childEnv, launch, tellEndRun } = require('./run');
-const { RESET_MS } = require('./session-pool');
 
 const RESETS = 3;
+// The whole check must finish within this. The first reset is written right
+// after the engine starts, so its answer includes the engine's cold start,
+// which under emulation on a slow host takes far longer than a warm reset; a
+// per-reset budget would make this verdict depend on the host's speed. An
+// engine that never answers still fails, at this deadline.
+const CHECK_DEADLINE_MS = 60 * 1000;
 
-function main(argv) {
+function main(argv, { deadlineMs = CHECK_DEADLINE_MS } = {}) {
   const at = argv.indexOf('--bin');
   const bin = at >= 0 ? argv[at + 1] : adapter().runner.bin;
   const session = adapter().runner.session;
@@ -56,7 +61,7 @@ function main(argv) {
   return new Promise((resolve) => {
     let done = 0;
     let reader = null;
-    let timer = null;
+    const timer = setTimeout(() => end(1, `reset ${done + 1} did not complete within the ${deadlineMs} ms deadline${stderr ? `; stderr: ${stderr.slice(0, 300)}` : ''}`), deadlineMs);
     let buf = '';
     let finished = false;
     const end = (code, message) => {
@@ -70,7 +75,6 @@ function main(argv) {
     };
     const clear = () => {
       reader = session.createResetReader();
-      timer = setTimeout(() => end(1, `reset ${done + 1} did not complete within ${RESET_MS} ms${stderr ? `; stderr: ${stderr.slice(0, 300)}` : ''}`), RESET_MS);
       child.stdin.write(`${session.clearLine()}\n`);
     };
     child.on('error', (err) => end(1, `the engine did not start: ${err.message}`));
@@ -85,7 +89,6 @@ function main(argv) {
         let parsed;
         try { parsed = JSON.parse(line); } catch { continue; }
         if (reader && reader(parsed) === true) {
-          clearTimeout(timer);
           reader = null;
           done += 1;
           if (done === RESETS) { end(0, `${RESETS} resets completed`); return; }
