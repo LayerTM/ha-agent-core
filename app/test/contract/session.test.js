@@ -177,16 +177,56 @@ test('nothing of one turn reaches the next — and the instrument can see it whe
   assert.match(leaked.text, /ZEBRA-41/);
 });
 
-test('a session that does not complete its reset is ended, and the next read runs fresh', async () => {
+test('a session that never completes its first reset is ended, and the next read runs fresh', async () => {
   state.sessionAgent = { honourClear: false };
-  const pool = newPool({ resetMs: 200 });
+  const pool = newPool({ resetMs: 200, startMs: 300 });
   await read(pool);
   assert.equal(await until(() => hooks.opened.length === 1), true);
   assert.equal(await until(() => pool.size() === 0 && hooks.closed.length === 1), true, 'killed and its bearer closed');
-  assert.ok(logs.some((l) => /reset did not complete/.test(l)), logs.join('\n'));
+  assert.ok(logs.some((l) => /start did not complete/.test(l)), logs.join('\n'));
   const next = await read(pool);
   assert.equal(next.warm, undefined);
   assert.equal(hooks.binds.length, 0, 'no turn was ever written to it');
+});
+
+test('a session whose engine starts slower than a reset still warms', async () => {
+  state.sessionAgent = { startDelayMs: 600 };
+  const pool = newPool({ resetMs: 200, startMs: 3000 });
+  await read(pool);
+  assert.equal(await ready(pool), true, 'its first reset had the start budget');
+  state.turnTapes.push([{ echo: 'stdin' }]);
+  const warm = await read(pool);
+  assert.equal(warm.warm, true);
+  assert.equal(warm.text, `hello ${runs}`);
+  assert.equal(hooks.opened.length, 1, 'one session, started once');
+  assert.ok(!logs.some((l) => /did not complete/.test(l)), logs.join('\n'));
+});
+
+test('a read during a slow start runs fresh and starts no second session', async () => {
+  state.sessionAgent = { startDelayMs: 1500 };
+  const pool = newPool({ resetMs: 200, startMs: 5000 });
+  await read(pool);
+  assert.equal(await until(() => pool.states().includes('clearing')), true, 'the session is starting');
+  const during = await read(pool);
+  assert.equal(during.status, 'ok');
+  assert.equal(during.warm, undefined, 'a starting session serves nothing');
+  assert.deepEqual(pool.states(), ['clearing'], 'still the one session, still starting');
+  assert.equal(hooks.opened.length, 1, 'no second session for the same read');
+  assert.equal(hooks.binds.length, 0);
+  assert.equal(await ready(pool), true);
+});
+
+test('only the first reset gets the start budget; a slow reset after a turn ends the session', async () => {
+  state.sessionAgent = { clearDelayMs: 600 };
+  const pool = newPool({ resetMs: 200, startMs: 3000 });
+  await read(pool);
+  assert.equal(await ready(pool), true, 'the first reset fitted the start budget');
+  state.turnTapes.push([{ echo: 'stdin' }]);
+  const warm = await read(pool);
+  assert.equal(warm.warm, true);
+  assert.equal(await until(() => pool.size() === 0 && hooks.closed.length === 1), true, 'the reset after the turn did not fit');
+  assert.ok(logs.some((l) => /reset did not complete/.test(l)), logs.join('\n'));
+  assert.ok(!logs.some((l) => /start did not complete/.test(l)), logs.join('\n'));
 });
 
 test('what a turn writes after its answer never reaches the next turn', async () => {
