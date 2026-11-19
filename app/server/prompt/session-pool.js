@@ -27,11 +27,17 @@ const crypto = require('node:crypto');
 const { EventEmitter } = require('node:events');
 const { StringDecoder } = require('node:string_decoder');
 const { adapter } = require('../adapter-contract');
+const { TIMEOUT_MS } = require('./run');
 
 const POOL_CAP = 2;
 const MAX_TURNS = 20;
 const IDLE_MS = 10 * 60 * 1000;
 const RESET_MS = 2000;
+// The first reset is written as soon as the process starts, so its answer
+// includes the engine's whole cold start. It gets the budget every read already
+// gives that same cold start: the per-run wall-clock ceiling. A later reset
+// starts nothing and keeps RESET_MS.
+const START_MS = TIMEOUT_MS;
 // A turn whose input grew this far past the session's first turn means the
 // reset did not reset; the session is ended rather than trusted.
 const CONTEXT_GROWTH = 64 * 1024;
@@ -81,7 +87,7 @@ function killProcessGroup(child) {
  */
 function createSessionPool({
   hooks, log = (m) => console.log(`[prompt] ${m}`), cap = POOL_CAP, maxTurns = MAX_TURNS, idleMs = IDLE_MS,
-  resetMs = RESET_MS, contextGrowth = CONTEXT_GROWTH,
+  resetMs = RESET_MS, startMs = START_MS, contextGrowth = CONTEXT_GROWTH,
 }) {
   /** @type {Map<string, Session>} */
   const sessions = new Map(); // insertion order = least recently used first
@@ -108,14 +114,14 @@ function createSessionPool({
       child.stdin.on('error', () => { /* the process is gone; close says so */ });
       child.on('error', () => this.kill('the process failed'));
       child.on('close', (code) => this.onClose(code));
-      this.startReset();
+      this.startReset(startMs, 'its start did not complete');
     }
 
-    startReset() {
+    startReset(ms = resetMs, why = 'its reset did not complete') {
       const session = adapter().runner.session;
       this.state = 'clearing';
       this.reset = session.createResetReader();
-      this.setTimer(resetMs, () => this.kill('its reset did not complete'));
+      this.setTimer(ms, () => this.kill(why));
       try {
         this.child.stdin.write(`${session.clearLine()}\n`);
       } catch {
@@ -294,4 +300,4 @@ function createSessionPool({
   };
 }
 
-module.exports = { createSessionPool, POOL_CAP, MAX_TURNS, IDLE_MS, RESET_MS, CONTEXT_GROWTH };
+module.exports = { createSessionPool, POOL_CAP, MAX_TURNS, IDLE_MS, RESET_MS, START_MS, CONTEXT_GROWTH };

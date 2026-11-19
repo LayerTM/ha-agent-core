@@ -85,7 +85,8 @@ function createNeutralAdapter() {
     // Warm sessions: with `stableArgs` a fresh run's command line depends only on
     // what decides a run (so two alike runs share a session), each turn of a
     // session plays the next of `turnTapes`, and `sessionAgent` says how the
-    // session agent treats a reset: { honourClear, forget } (both default true).
+    // session agent treats a reset: { honourClear, forget } (both default true),
+    // { clearDelayMs, startDelayMs } (see neutral-agent.js).
     stableArgs: false,
     turnTapes: [],
     sessionAgent: {},

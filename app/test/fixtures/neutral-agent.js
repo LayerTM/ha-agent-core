@@ -24,17 +24,21 @@
 // `{ echo: 'memory' }` with every user text the agent still remembers and
 // `{ echo: 'env' }` with the session's environment as JSON. A `clear`
 // line emits `reset` and a 0-turn result, and forgets — unless the conf says it
-// does not honour a reset, or does not forget; `clearDelayMs` delays its answer.
+// does not honour a reset, or does not forget; `clearDelayMs` delays its answer,
+// `startDelayMs` only the answer to the first one (a slow cold start).
 if (process.argv[2] === '--session') {
   const conf = JSON.parse(require('node:fs').readFileSync(process.argv[3], 'utf8'));
   const memory = [];
   const out = (o) => new Promise((r) => process.stdout.write(`${JSON.stringify(o)}\n`, r));
   let queue = Promise.resolve();
   let buf = '';
+  let started = false;
   const turn = async (msg) => {
     if (msg.type === 'clear') {
       if (!conf.honourClear) return;
       if (conf.forget) memory.length = 0;
+      if (!started && conf.startDelayMs) await new Promise((r) => setTimeout(r, conf.startDelayMs));
+      started = true;
       if (conf.clearDelayMs) await new Promise((r) => setTimeout(r, conf.clearDelayMs));
       await out({ type: 'reset' });
       await out({ type: 'result', numTurns: 0, structured: null });

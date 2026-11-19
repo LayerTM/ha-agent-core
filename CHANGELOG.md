@@ -15,7 +15,16 @@ uses [Semantic Versioning](https://semver.org/).
   its answer includes the engine's cold start, which can exceed 2 s on a slow or
   emulated host and failed the check although the reset held. The check now has
   one overall deadline of 60 s; an engine that never answers a reset still
-  fails, at that deadline. The warm-session pool is unchanged.
+  fails, at that deadline.
+- A warm session (`prompt_keep_warm`) now warms on a host whose engine takes
+  longer than 2 s to start. Its first reset, written as soon as the process
+  starts, had the same 2 s as the reset after a turn, so on such a host every
+  session was ended before it was ready and every read started a new one. The
+  first reset now has the per-run wall-clock ceiling of a read (120 s by
+  default), the budget a fresh read already gives the same cold start;
+  the reset after a turn keeps 2 s. A session still takes a read only once its
+  reset has completed, and one that never completes its first reset is ended at
+  that ceiling.
 
 ## [0.15.0] - 2026-11-19
 
