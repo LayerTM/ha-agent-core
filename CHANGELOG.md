@@ -6,6 +6,15 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- The engine session check (`server/prompt/session-check.js`) no longer gives
+  each reset 2 s. The first reset is written right after the engine starts, so
+  its answer includes the engine's cold start, which can exceed 2 s on a slow or
+  emulated host and failed the check although the reset held. The check now has
+  one overall deadline of 60 s; an engine that never answers a reset still
+  fails, at that deadline. The warm-session pool is unchanged.
+
 ## [0.15.0] - 2026-11-19
 
 ### Security

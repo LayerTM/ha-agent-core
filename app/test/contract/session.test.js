@@ -334,8 +334,12 @@ test('the session check passes on an engine that resets, and fails on one that d
     state.sessionAgent = {};
     assert.equal(await main(['--bin', process.execPath]), 0, said.join('\n'));
     state.sessionAgent = { honourClear: false };
-    assert.equal(await main(['--bin', process.execPath]), 1);
-    assert.match(said.pop(), /reset 1 did not complete/);
+    assert.equal(await main(['--bin', process.execPath], { deadlineMs: 1500 }), 1);
+    assert.match(said.pop(), /reset 1 did not complete within the 1500 ms deadline/);
+
+    // A reset answered after 3 s (a cold start) passes: no budget per reset.
+    state.sessionAgent = { clearDelayMs: 3000 };
+    assert.equal(await main(['--bin', process.execPath]), 0, said.join('\n'));
 
     // A command line the core refuses ends the check, and frees what launch allocated.
     state.sessionAgent = {};
