@@ -20,7 +20,7 @@ const { createNeutralAdapter } = require('./fixtures/neutral-adapter');
 const neutral = createNeutralAdapter();
 useAdapter(neutral.adapter, neutral.branding);
 
-const { startCoreRelay } = require('../server/prompt/core-relay');
+const { startCoreRelay, answersHeld } = require('../server/prompt/core-relay');
 const { resolveAnswer } = require('../server/prompt/targets');
 const { createPromptApp } = require('../server/prompt/server');
 const { TARGET_TEXT } = require('../server/prompt/notices');
@@ -301,6 +301,22 @@ function soon(promise, what, ms = 5000) {
   });
   return Promise.race([promise, late]).finally(() => clearTimeout(timer));
 }
+
+// Waits until what a budget holds satisfies `done`. It changes when the relay has read
+// an answer or let one go, which no fixed pause promises under load; and asking with
+// an answer of a share's size would take room itself and change what is measured.
+async function untilHeld(which, done, what, ms = 20000) {
+  const end = Date.now() + ms;
+  for (;;) {
+    const held = answersHeld()[which];
+    if (done(held)) return;
+    if (Date.now() > end) assert.fail(`${what}: not after ${ms} ms (${which} hold ${held} bytes)`);
+    await new Promise((resolve) => { setTimeout(resolve, 20); });
+  }
+}
+// Whether one more answer of a share's size fits: what an agent's next call depends on.
+const full = (held) => held + LARGE_SHARE * MIB > HELD_MIB * MIB;
+const hasRoom = (held) => !full(held);
 
 // Writes `mib` MiB of a JSON string and leaves the answer open, as a stalled
 // Home Assistant would. Resolves when the relay has closed the connection.
@@ -857,10 +873,10 @@ for (const [how, keepsSending] of [['says nothing', false], ['keeps sending byte
     try {
       const body = shareBody(5);
       answerRpc = (r, res) => sendJson(res, body);
-      await new Promise((resolve) => { setTimeout(resolve, 500); });
-      assert.equal((await soon(agentCall(CALL, short), 'while it holds its share')).status, 502);
-      await new Promise((resolve) => { setTimeout(resolve, 2000); });
-      assert.equal((await soon(agentCall(CALL, short), 'past the deadline', 20000)).status, 200);
+      await untilHeld('agents', full, 'its share, taken');
+      assert.equal((await soon(agentCall(CALL), 'while it holds its share')).status, 502);
+      await untilHeld('agents', hasRoom, 'its share, given back at the deadline');
+      assert.equal((await soon(agentCall(CALL), 'past the deadline', 20000)).status, 200);
     } finally {
       if (dribble) clearInterval(dribble);
       socket.destroy();
@@ -871,10 +887,13 @@ for (const [how, keepsSending] of [['says nothing', false], ['keeps sending byte
 }
 
 test('an agent reading at an ordinary pace is not cut off', async () => {
+  // Far above the time a loaded machine takes to read a share over loopback: the
+  // deadline is for an agent that does not read, not a race against one that does.
+  const deliveryDeadlineMs = 5000;
   const short = await startCoreRelay({
     coreOrigin: `http://127.0.0.1:${ha.address().port}`,
     haToken: 'ha-token-never-in-a-message',
-    deliveryDeadlineMs: 1500,
+    deliveryDeadlineMs,
   });
   try {
     const body = shareBody(5);
@@ -882,8 +901,10 @@ test('an agent reading at an ordinary pace is not cut off', async () => {
     const { status, text } = await soon(agentCall(CALL, short), 'the answer', 20000);
     assert.equal(status, 200);
     assert.equal(text, body);
-    // The timer goes with the answer: the connection is still usable afterwards.
-    await new Promise((resolve) => { setTimeout(resolve, 2000); });
+    // The timer goes with the answer: past its deadline, the relay still answers.
+    // A small answer, so its own delivery is not what is measured.
+    await new Promise((resolve) => { setTimeout(resolve, deliveryDeadlineMs + 500); });
+    answerRpc = (r, res) => sendJson(res, JSON.stringify(toolAnswer(5, 'ok')));
     assert.equal((await soon(agentCall(CALL, short), 'the next answer', 20000)).status, 200);
   } finally {
     short.close();
@@ -912,7 +933,7 @@ test('the core\'s own answers share a budget of their own', async () => {
   };
   const act = relay.act('run');
   const first = act('HassTurnOn', {});
-  await new Promise((resolve) => { setTimeout(resolve, 500); });
+  await untilHeld('own', full, 'the first action\'s share, taken');
   const second = await soon(act('HassTurnOn', {}), 'the second action', 20000);
   assert.equal(second.ok, false);
   assert.match(second.error, /too large/);
@@ -939,9 +960,9 @@ test('a whole event an agent has not read still counts against the budget', asyn
   const first = openAgent(CALL, SSE);
   try {
     const res = await soon(first.answered, 'the stream');
-    await sleep(500);
     const body = shareBody(5);
     answerRpc = (rpc, r) => sendJson(r, body);
+    await untilHeld('agents', full, 'the unread event, counted');
     const second = await soon(agentCall(CALL), 'the second answer', 20000);
     assert.equal(second.status, 502);
     assert.match(second.text, /too large/);
@@ -963,11 +984,14 @@ test('an agent not reading an event loses the stream at the deadline, and its sh
   };
   const open = openAgent(CALL, SSE, short);
   try {
-    await soon(open.answered, 'the stream');
-    await sleep(1500);
+    const res = await soon(open.answered, 'the stream');
     const body = shareBody(5);
     answerRpc = (rpc, r) => sendJson(r, body);
-    assert.equal((await soon(agentCall(CALL, short), 'the next answer', 20000)).status, 200);
+    await untilHeld('agents', full, 'the unread event, counted');
+    await untilHeld('agents', hasRoom, 'the share, given back at the deadline');
+    assert.equal((await soon(agentCall(CALL), 'the next answer', 20000)).status, 200);
+    res.resume();
+    await assert.rejects(soon(readAll(res), 'the stream, cut', 20000), /cut off|aborted|hang up/);
   } finally {
     open.req.destroy();
     open.done();
@@ -987,7 +1011,7 @@ test('an event Home Assistant stops halfway ends the stream and gives its share 
     await assert.rejects(soon(open.answered.then((res) => {
       res.resume();
       return readAll(res);
-    }), 'the end of the stream', 5000), /cut off|aborted|hang up/);
+    }), 'the end of the stream', 20000), /cut off|aborted|hang up/);
     assert.ok(logged.some((l) => l.includes('stopped answering')), logged.join('\n'));
     const body = shareBody(5);
     answerRpc = (rpc, r) => sendJson(r, body);
@@ -1382,9 +1406,9 @@ test('streams of wide characters and a JSON answer share one budget, in bytes', 
   first.answered.catch(() => {});
   second.answered.catch(() => {});
   try {
-    await sleep(500);
-    assert.equal(stalled.length, 2);
     // 12 MiB held: there is no room for 6 more, though they are only 2 MiB of units each.
+    await untilHeld('agents', full, 'both streams, counted in bytes');
+    assert.equal(stalled.length, 2);
     const body = shareBody(5);
     answerRpc = (rpc, res) => sendJson(res, body);
     const third = await soon(agentCall(CALL), 'a JSON answer', 20000);
