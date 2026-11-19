@@ -6,6 +6,8 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-11-19
+
 ### Fixed
 
 - `tools/npm-ci-checked.sh` and `tools/build-allowed-packages.js` no longer
