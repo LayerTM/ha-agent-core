@@ -6,6 +6,19 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-11-19
+
+### Security
+
+- `ws` 8.23.0 (was 8.22.1;
+  [release notes](https://github.com/websockets/ws/releases/tag/8.23.0)) fixes
+  [GHSA-37g9-w4hg-h9qr](https://github.com/websockets/ws/security/advisories/GHSA-37g9-w4hg-h9qr):
+  a peer that floods Ping frames while it stops reading made the server buffer
+  automatic Pong replies until the process ran out of memory. The console's
+  terminal socket uses `ws`; it accepts connections only from the Supervisor's
+  ingress gateway and from loopback, so only a client already let in through
+  Home Assistant could send such a flood.
+
 ### Added
 
 - Hungarian (`hu`) for the texts the server writes itself: the degrade notice,
@@ -18,6 +31,11 @@ uses [Semantic Versioning](https://semver.org/).
   PgUp/PgDn keys. A tap still focuses the terminal, and a long press, a pinch
   and a sideways drag are left to the browser; the end of a swipe no longer
   copies a selection that is still on the screen.
+
+### Changed
+
+- The dashboard screenshot helper uses `playwright-core` 1.65.1 (was 1.65.0;
+  [release notes](https://github.com/microsoft/playwright/releases/tag/v1.65.1)).
 
 ## [0.14.0] - 2026-11-12
 
