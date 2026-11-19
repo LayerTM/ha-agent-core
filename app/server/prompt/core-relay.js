@@ -106,10 +106,11 @@ const tooLargeError = (message) => Object.assign(new Error(message), { tooLarge:
 // no room for that many more bytes, and then nothing is taken; a negative count gives
 // bytes back. `release` gives back all of it, may be called any number of times, and
 // is final: a released share takes nothing more, so no order of events can leave
-// bytes charged with nobody left to give them back.
+// bytes charged with nobody left to give them back. `held` says how many bytes the
+// budget holds now, across every share of it.
 function answerBudget() {
   let held = 0;
-  return () => {
+  const open = () => {
     let mine = 0;
     let released = false;
     return {
@@ -126,6 +127,8 @@ function answerBudget() {
       },
     };
   };
+  open.held = () => held;
+  return open;
 }
 const agentAnswerHold = answerBudget();
 const ownAnswerHold = answerBudget();
@@ -1269,4 +1272,8 @@ async function startCoreRelay({
 // has answered, is not a state of the connection and is treated as usable.)
 const MCP_AUTH_USABLE = Object.freeze({ ok: true, unauthorized: false, unreachable: false });
 
-module.exports = { startCoreRelay, refusedTokenHint, allowed, CAMERA_PATH_RE, MCP_PATH, MCP_AUTH_USABLE };
+// What the answers to agents and the core's own answers hold of their budgets now, in
+// bytes: the one statement of it, for anything that has to wait on it.
+const answersHeld = () => ({ agents: agentAnswerHold.held(), own: ownAnswerHold.held() });
+
+module.exports = { startCoreRelay, refusedTokenHint, allowed, answersHeld, CAMERA_PATH_RE, MCP_PATH, MCP_AUTH_USABLE };
