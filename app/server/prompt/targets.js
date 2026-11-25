@@ -24,7 +24,8 @@
 // domain looks the same (the live context joins a device's aliases with ", ", so
 // two devices can print identically). Anything else is refused:
 //
-//   unknown      the matcher finds no exposed device by that reference;
+//   unknown      the matcher finds no exposed device by that reference (a hit
+//                that only contains the text is no device it names);
 //   ambiguous    it finds several, or the device it found is not unique;
 //   unpinned     it finds one, and no candidate is it (an alias, most likely);
 //   unavailable  a lookup failed, the exposed list could not be read, or the
@@ -76,6 +77,16 @@ function deviceBlocks(text) {
   return blocks.map((b) => b.join('\n'));
 }
 const deviceCount = (text) => deviceBlocks(text).length;
+// Whether some device of a live-context answer is named `ref` — by its name or by
+// an alias, as one whole entry of the names line — and not merely contains it.
+// The names line joins a device's names with ", ".
+const namesRef = (text, ref) => {
+  const wanted = normalize(ref);
+  return deviceBlocks(text).some((block) => {
+    const m = /^(?:- | {2})names: (.*)$/m.exec(block);
+    return m !== null && `, ${m[1].toLowerCase()}, `.includes(`, ${wanted}, `);
+  });
+};
 const domainOf = (text) => {
   const m = /^(?:- | {2})domain: (\S+)$/m.exec(contentLines(text).join('\n'));
   return m ? m[1] : null;
@@ -153,6 +164,9 @@ function createResolver(lookup, memory, signal) {
     const byName = await live(ref);
     if (!byName.ok || deviceCount(byName.text) === 0) return { problem: 'unknown', ref, candidates: [] };
     const exposed = await exposedCandidates(ref);
+    // No exposed entity is named so, and no device answers to it as a whole name or
+    // alias: what the matcher returned only contains the text.
+    if (exposed.length === 0 && !namesRef(byName.text, ref)) return { problem: 'unknown', ref, candidates: [] };
     const candidates = exposed.map(({ id, name }) => ({ id, name }));
     if (deviceCount(byName.text) > 1) return { problem: 'ambiguous', ref, candidates };
     const found = identity(byName.text);

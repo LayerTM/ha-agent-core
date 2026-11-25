@@ -18,6 +18,9 @@ uses [Semantic Versioning](https://semver.org/).
   the Supervisor's proxy to Core with the add-on's Supervisor token, so it works
   whichever user's token the add-on was given. The token is used for that one
   call only. When the list cannot be read, nothing is proposed.
+- A device name that Home Assistant 2026.12 answers only because it is part of
+  other names is reported as not found, as before 2026.12, instead of as an
+  ambiguous or unpinned device with no candidates to choose from.
 
 ## [0.15.1] - 2026-11-19
 

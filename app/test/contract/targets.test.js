@@ -295,8 +295,16 @@ test('an id the edited automation carries stands in its slots only, never in a p
 
 // --- Home Assistant 2026.12: a name that matches nothing exactly is answered with what contains it ---
 
+test('a name that only contains the text is no device it names: several hits, one hit, none', async () => {
+  for (const ref of ['Shed', 'Den Sp', 'Garage', 'light.shed_l', 'light.den_']) {
+    const out = await resolveProposal(proposalOf(intent([ref])));
+    assert.equal(out.proposal, null, ref);
+    assert.deepEqual(out.problems, [{ problem: 'unknown', ref, candidates: [] }], ref);
+  }
+});
+
 test('an entity that is not exposed is not exposed because another entity contains its id', async () => {
-  for (const [ref, problem] of [['Den', 'unpinned'], ['light.den', 'unpinned']]) {
+  for (const [ref, problem] of [['Den', 'unpinned'], ['light.den', 'unknown']]) {
     const out = await resolveProposal(proposalOf(intent([ref])));
     assert.equal(out.proposal, null, `${ref} must not become light.den`);
     assert.equal(out.problems[0].problem, problem, ref);
