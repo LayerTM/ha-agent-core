@@ -71,6 +71,20 @@ test('a refused token, a refused command and an unreadable answer all reject', a
   }
 });
 
+test('entries but none for the conversation assistant is an unreadable list, not an empty house', async () => {
+  for (const exposed of [{ 'light.a': { 'cloud.alexa': true } }, { 'light.a': 'conversation' }, { 'light.a': null, 'light.b': [] }, { 'light.a': { conversation: false } }]) {
+    await withServer(accepting({ success: true, result: { exposed_entities: exposed } }), async (url) => {
+      await assert.rejects(readExposedIds({ url, token: 'good' }), /no entry for the conversation assistant/, JSON.stringify(exposed));
+    });
+  }
+  await withServer(accepting({ success: true, result: { exposed_entities: {} } }), async (url) => {
+    assert.equal((await readExposedIds({ url, token: 'good' })).size, 0, 'a house that exposes nothing is read as such');
+  });
+  await withServer(accepting({ success: true, result: { exposed_entities: { 'light.a': 'x', 'light.b': { conversation: true } } } }), async (url) => {
+    assert.deepEqual([...await readExposedIds({ url, token: 'good' })], ['light.b'], 'an entry that is not an object names nothing');
+  });
+});
+
 test('no token, no connection, a stall, a close and an oversized answer all reject', async () => {
   await assert.rejects(readExposedIds({ url: 'ws://127.0.0.1:1', token: '' }), /no Supervisor token/);
   await assert.rejects(readExposedIds({ url: 'ws://127.0.0.1:1', token: 'good', timeoutMs: 2000 }), /could not be read|closed|did not answer/);

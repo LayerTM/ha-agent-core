@@ -72,10 +72,17 @@ function readExposedIds({
           finish(new Error(`Home Assistant refused the exposed-entities list${msg.error && msg.error.code ? ` (${msg.error.code})` : ''}`));
           return;
         }
-        finish(null, new Set(Object.keys(list).filter((id) => {
+        const ids = Object.keys(list).filter((id) => {
           const to = list[id];
           return to && typeof to === 'object' && to[ASSISTANT] === true;
-        })));
+        });
+        // Home Assistant lists an entity only under the assistants it is exposed to. Entries
+        // and not one for this assistant means the key is not the one it uses: not "nothing exposed".
+        if (ids.length === 0 && Object.keys(list).length > 0) {
+          finish(new Error(`the exposed-entities list has no entry for the ${ASSISTANT} assistant`));
+          return;
+        }
+        finish(null, new Set(ids));
       }
     });
   });
