@@ -41,6 +41,7 @@ const {
 } = require('./mcp-filter');
 const { haBasename } = require('./ha-tool-names');
 const { createStateNames } = require('./state-names');
+const { readExposedIds } = require('./exposure');
 
 // Exactly what the add-on needs, and nothing else.
 const MCP_PATH = '/api/mcp';
@@ -398,6 +399,8 @@ function deny(res, status, message) {
  * @param {object} opts
  * @param {string} opts.coreOrigin  Origin derived from the Supervisor (never user input).
  * @param {string} opts.haToken     The Home Assistant LLAT. Stays in this process.
+ * @param {string} [opts.supervisorToken]  Reads the exposed-entities list (exposure.js) and nothing else.
+ * @param {(opts: {token: string}) => Promise<Set<string>>} [opts.readExposed]  How that list is read (exposure.js unless a test stands in).
  * @param {(msg: string) => void} [opts.log]
  * @param {(line: string) => void} [opts.record]  One audit line per tool call.
  * @param {number} [opts.authProbeEveryMs]  Probe the token at start and then this
@@ -433,7 +436,8 @@ function deny(res, status, message) {
  * something Home Assistant never promised.
  */
 async function startCoreRelay({
-  coreOrigin, haToken, log = () => {}, record = () => {}, authProbeEveryMs = 0,
+  coreOrigin, haToken, supervisorToken = '', readExposed = readExposedIds,
+  log = () => {}, record = () => {}, authProbeEveryMs = 0,
   deliveryDeadlineMs = DELIVERY_DEADLINE_MS,
   abandonedRequestMs = ABANDONED_REQUEST_MS,
   maxUnansweredRequests = MAX_UNANSWERED_REQUESTS,
@@ -1201,6 +1205,19 @@ async function startCoreRelay({
         memoryHold: rememberedAnswerHold,
         live: (name) => callLive({ name }),
         liveDomain: (domain) => callLive({ domain }),
+        // Which entities Home Assistant exposes to its assistant, exactly (exposure.js).
+        // Recorded like every lookup; rejects when the list cannot be read.
+        async exposed() {
+          const call = { name: 'homeassistant/expose_entity/list', args: {}, runId };
+          try {
+            const ids = await readExposed({ token: supervisorToken });
+            record(describeCall(call, ' (lookup)'));
+            return ids;
+          } catch (err) {
+            record(describeCall(call, ' (lookup, failed)'));
+            throw err;
+          }
+        },
         async states() {
           const { status, json, tooLarge, why } = await coreRequest('GET', '/api/states', undefined, readStatesAnswer);
           if (status !== 200) throw new Error(`Home Assistant answered the states list with ${status}`);

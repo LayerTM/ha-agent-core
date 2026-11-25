@@ -9,21 +9,26 @@
 // place that turns the one into the other, for the proposal and for the
 // automation draft alike.
 //
-// The oracle is Home Assistant's own matcher: the live-context tool, asked for a
-// name, answers with every EXPOSED entity that name (or alias, or entity id)
-// matches. The states list only proposes candidates: every entity whose id is
-// the reference or whose name is it. A candidate is the answer when asking the
-// matcher for its id returns the very device the name returned — same names,
-// same domain, same areas — it is the only such candidate, and no other exposed
-// device of that domain looks the same (the live context joins a device's
-// aliases with ", ", so two devices can print identically). Anything else is
-// refused:
+// Two oracles, both Home Assistant's own. The live-context tool, asked for a
+// name, answers with the EXPOSED entities that name (or alias, or entity id)
+// matches — and since 2026.12, when nothing matches exactly, with every exposed
+// entity whose name, alias or id merely CONTAINS the text; its answer says which
+// device, never whether an entity is exposed. That is the other oracle's: Home
+// Assistant's exact list of exposed entities, keyed by entity id (exposure.js).
+//
+// The states list only proposes candidates: every entity whose id is the
+// reference or whose name is it. A candidate is considered only when the list
+// says it is exposed. It is the answer when asking the live context for its id
+// returns the very device the name returned — same names, same domain, same
+// areas — it is the only such candidate, and no other exposed device of that
+// domain looks the same (the live context joins a device's aliases with ", ", so
+// two devices can print identically). Anything else is refused:
 //
 //   unknown      the matcher finds no exposed device by that reference;
 //   ambiguous    it finds several, or the device it found is not unique;
 //   unpinned     it finds one, and no candidate is it (an alias, most likely);
-//   unavailable  a lookup failed, or the answer names more devices, or takes
-//                longer, than one answer may;
+//   unavailable  a lookup failed, the exposed list could not be read, or the
+//                answer names more devices, or takes longer, than one answer may;
 //   too_large    Home Assistant's answer to a lookup is past what may be read.
 //
 // Nothing here ever returns an id Home Assistant did not match.
@@ -83,6 +88,7 @@ const RESOLVE_DEADLINE_MS = 30000;
 /**
  * @param {{ live(name: string): Promise<{ok: boolean, text: string}>,
  *           liveDomain(domain: string): Promise<{ok: boolean, text: string}>,
+ *           exposed(): Promise<Set<string>>,
  *           states(): Promise<Array<{entity_id: string, attributes?: object}>> }} lookup
  * @param {{ take(bytes: number): boolean }} memory  what may be remembered
  * @param {AbortSignal} signal  aborted once nobody waits for this resolver: it asks nothing more
@@ -115,13 +121,27 @@ function createResolver(lookup, memory, signal) {
     return statesMemo;
   };
 
+  let exposedMemo = null;
+  const exposedIds = () => {
+    if (exposedMemo === null) {
+      signal.throwIfAborted();
+      exposedMemo = lookup.exposed();
+    }
+    return exposedMemo;
+  };
+
+  // The candidates Home Assistant exposes, each with the identity its own id gets.
+  // Exposure is read from the exact list, never inferred from a live-context answer.
   async function exposedCandidates(ref) {
     const wanted = normalize(ref);
     const all = await states();
     const candidates = all.filter((s) => s && typeof s.entity_id === 'string'
       && (s.entity_id === ref || normalize(stateName(s)) === wanted));
+    if (candidates.length === 0) return [];
+    const exposedSet = await exposedIds();
     const out = [];
     for (const s of candidates) {
+      if (!exposedSet.has(s.entity_id)) continue;
       const answer = await live(s.entity_id);
       if (answer.ok) out.push({ id: s.entity_id, name: stateName(s), identity: identity(answer.text) });
     }

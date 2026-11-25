@@ -6,6 +6,19 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- A device the assistant names is only proposed when Home Assistant exposes it.
+  That was read from the live-context tool, which since Home Assistant 2026.12
+  answers a name that matches nothing exactly with every exposed entity whose
+  name, alias or id contains the text: an entity that is not exposed, and whose
+  id is part of an exposed entity's id, was taken for an exposed one, and its id
+  could be proposed. Exposure is now read from Home Assistant's own list of
+  exposed entities (`homeassistant/expose_entity/list`, by entity id), through
+  the Supervisor's proxy to Core with the add-on's Supervisor token, so it works
+  whichever user's token the add-on was given. The token is used for that one
+  call only. When the list cannot be read, nothing is proposed.
+
 ## [0.15.1] - 2026-11-19
 
 ### Fixed

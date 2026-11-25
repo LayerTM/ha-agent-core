@@ -2,10 +2,13 @@
 
 // A device the model NAMES becomes an entity id by Home Assistant's own matcher,
 // or no proposal leaves at all. Driven through the real relay against a Core
-// that answers like Home Assistant 2026.11: the live-context tool lists exposed
+// that answers like Home Assistant: the live-context tool lists exposed
 // devices by names, domain, state, areas and attributes — never by entity id —
 // and matches a name by any of the device's names or aliases, or by its exact
-// entity id.
+// entity id. From 2026.12 a name that matches nothing exactly is answered with
+// every exposed entity whose name, alias or id CONTAINS it (`fallback`, on by
+// default here; the 2026.11 answer is the same file with it off). Which entities
+// are exposed is read from Home Assistant's exact list, not from that tool.
 
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
@@ -59,6 +62,12 @@ const HOME = [
   // The mirror: Y's one name "Shade, Top" meets X's two aliases.
   { id: 'cover.x', name: 'Shade', haNames: ['Shade', 'Top'], area: 'Hall' },
   { id: 'cover.y', name: 'Shade, Top', area: 'Hall' },
+  // Not exposed, and its id is part of an exposed entity's id: the contains-search
+  // of 2026.12 answers a question about light.den with light.den_2.
+  { id: 'light.den', name: 'Den', exposed: false },
+  { id: 'light.den_2', name: 'Den Spot', haNames: ['Den Spot', 'Den'] },
+  { id: 'light.shed_lamp', name: 'Shed Lamp' },
+  { id: 'light.shed_light', name: 'Shed Light' },
   { id: 'lock.front_door', name: 'Front Door', exposed: false },
 ];
 const haNames = (e) => e.haNames || [e.name, ...(e.aliases || [])];
@@ -81,16 +90,25 @@ function dump(entities) {
   return ['Live Context: An overview of the areas and the devices in this smart home:', yaml].join('\n');
 }
 
+let fallback = true;
 function liveContext({ name, domain }) {
-  const hits = HOME.filter((e) => e.exposed !== false && (domain
+  const exposed = HOME.filter((e) => e.exposed !== false);
+  let hits = exposed.filter((e) => (domain
     ? e.id.startsWith(`${domain}.`)
     : (e.id === name || haNames(e).some((n) => norm(n) === norm(name)))));
+  if (hits.length === 0 && name && fallback) {
+    const q = norm(name);
+    hits = exposed.filter((e) => e.id.includes(q) || haNames(e).some((n) => norm(n).includes(q)));
+  }
   if (hits.length === 0) return { success: false, error: `No device or entity named ${name}` };
   return { success: true, result: dump(hits) };
 }
 
 let core;
 let coreUp = true;
+let exposureUp = true;
+const exposureTokens = [];
+const coreBearers = new Set();
 let relay;
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'core-targets-'));
 const records = [];
@@ -101,6 +119,7 @@ before(async () => {
     req.on('data', (c) => chunks.push(c));
     req.on('end', () => {
       if (!coreUp) { res.writeHead(503); res.end(); return; }
+      coreBearers.add(req.headers.authorization);
       if (req.headers.authorization !== 'Bearer ha-token') { res.writeHead(401); res.end(); return; }
       res.setHeader('content-type', 'application/json');
       if (req.method === 'GET' && req.url === '/api/states') {
@@ -119,7 +138,14 @@ before(async () => {
   });
   await new Promise((r) => { core.listen(0, '127.0.0.1', r); });
   relay = await startCoreRelay({
-    coreOrigin: `http://127.0.0.1:${core.address().port}`, haToken: 'ha-token', record: (l) => records.push(l),
+    coreOrigin: `http://127.0.0.1:${core.address().port}`, haToken: 'ha-token', supervisorToken: 'supervisor-token',
+    record: (l) => records.push(l),
+    // Home Assistant's exact list, as the Supervisor-proxied WebSocket gives it.
+    readExposed: async ({ token }) => {
+      exposureTokens.push(token);
+      if (!exposureUp) throw new Error('the exposed-entities list could not be read');
+      return new Set(HOME.filter((e) => e.exposed !== false).map((e) => e.id));
+    },
   });
 });
 
@@ -267,12 +293,58 @@ test('an id the edited automation carries stands in its slots only, never in a p
   assert.equal(out.problems[0].problem, 'unknown');
 });
 
+// --- Home Assistant 2026.12: a name that matches nothing exactly is answered with what contains it ---
+
+test('an entity that is not exposed is not exposed because another entity contains its id', async () => {
+  for (const [ref, problem] of [['Den', 'unpinned'], ['light.den', 'unpinned']]) {
+    const out = await resolveProposal(proposalOf(intent([ref])));
+    assert.equal(out.proposal, null, `${ref} must not become light.den`);
+    assert.equal(out.problems[0].problem, problem, ref);
+  }
+  const auto = await resolveAnswer({ proposal: null, automation: { alias: 'A', triggers: [{ trigger: 'time' }], actions: [{ action: 'light.turn_off', target: { entity_id: 'light.den' } }] } }, relay.lookup('r6'));
+  assert.equal(auto.automation, null);
+});
+
+test('the 2026.11 answer, which has no such search, is refused the same way', async () => {
+  fallback = false;
+  try {
+    for (const [ref, problem] of [['Shed', 'unknown'], ['Garage', 'unknown'], ['Den', 'unpinned'], ['light.den', 'unknown'], ['Desk Lamp', 'ambiguous'], ['Warmer', 'unpinned']]) {
+      const out = await resolveProposal(proposalOf(intent([ref])));
+      assert.equal(out.proposal, null, ref);
+      assert.equal(out.problems[0].problem, problem, ref);
+    }
+    const ok = await resolveProposal(proposalOf(intent(['Sandbox Test Lamp'])));
+    assert.deepEqual(ok.proposal.intents[0].targets, ['input_boolean.sandbox_test_lamp']);
+  } finally { fallback = true; }
+});
+
+test('when the exposed list cannot be read nothing is proposed, and it is read once per resolution', async () => {
+  exposureUp = false;
+  try {
+    await assert.rejects(resolveProposal(proposalOf(intent(['Sandbox Test Lamp']))), /could not be read/);
+    const body = await ask((runId) => relay.lookup(runId), proposalOf(intent(['Sandbox Test Lamp'])));
+    assert.equal(body.proposal, null);
+    assert.match(body.text, /couldn't look the devices up/);
+  } finally { exposureUp = true; }
+  exposureTokens.length = 0;
+  await resolveProposal(proposalOf(intent(['Sandbox Test Lamp', 'Living Room O1', 'light.porch'])));
+  assert.equal(exposureTokens.length, 1);
+});
+
+test('the Supervisor token reads the exposed list and nothing else reaches Core with it', async () => {
+  exposureTokens.length = 0;
+  coreBearers.clear();
+  await resolveProposal(proposalOf(intent(['Sandbox Test Lamp', 'Garage', 'Desk Lamp'])));
+  assert.deepEqual(exposureTokens, ['supervisor-token']);
+  assert.deepEqual([...coreBearers], ['Bearer ha-token'], 'every request to Core carried the Home Assistant token only');
+});
+
 // A lookup that counts what it is asked and never answers unless told to.
 function stalledLookup() {
   const calls = [];
   const never = () => new Promise(() => {});
   const memoryHold = () => ({ take: () => true, release: () => {} });
-  return { calls, memoryHold, live: (n) => { calls.push(n); return never(); }, liveDomain: never, states: never };
+  return { calls, memoryHold, live: (n) => { calls.push(n); return never(); }, liveDomain: never, states: never, exposed: never };
 }
 
 test('an answer naming more devices than one answer may is refused before any lookup', async () => {
@@ -295,7 +367,10 @@ test('every lookup is recorded against its run', async () => {
   records.length = 0;
   await resolveAnswer({ proposal: proposalOf(intent(['Sandbox Test Lamp'])), automation: null }, relay.lookup('run9'));
   assert.ok(records.length > 0);
-  for (const line of records) assert.match(line, /^homeassistant__GetLiveContext run=run9 \(lookup(, no match)?\): \{"(name|domain)":/);
+  for (const line of records) {
+    assert.match(line, /^(homeassistant__GetLiveContext run=run9 \(lookup(, no match)?\): \{"(name|domain)":|homeassistant\/expose_entity\/list run=run9 \(lookup\): \{\})/);
+  }
+  assert.ok(records.some((l) => l.startsWith('homeassistant/expose_entity/list')), 'the exposed list is a recorded lookup too');
 });
 
 // --- through the prompt API ---------------------------------------------------------
