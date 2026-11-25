@@ -226,7 +226,7 @@ async function start() {
     // one place that sees the call, its arguments and Core's answer for EVERY
     // engine, with hooks or without.
     relay = await startCoreRelay({
-      coreOrigin: coreTarget.origin, haToken, log, record: audit, authProbeEveryMs: MCP_AUTH_PROBE_MS,
+      coreOrigin: coreTarget.origin, haToken, supervisorToken: process.env.SUPERVISOR_TOKEN || '', log, record: audit, authProbeEveryMs: MCP_AUTH_PROBE_MS,
     });
     log(`core relay on 127.0.0.1:${relay.port}`);
   }

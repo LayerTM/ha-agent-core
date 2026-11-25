@@ -7,7 +7,8 @@ const { startCoreRelay } = require('../../server/prompt/core-relay');
 const { resolveAnswer } = require('../../server/prompt/targets');
 
 (async () => {
-  const relay = await startCoreRelay({ coreOrigin: process.argv[2], haToken: 'ha-token-never-in-a-message' });
+  const relay = await startCoreRelay({ coreOrigin: process.argv[2], haToken: 'ha-token-never-in-a-message',
+    readExposed: async () => new Set(Array.from({ length: 60 }, (_, i) => `light.device_${i}`)) });
   const actions = Array.from({ length: 60 }, (_, i) => ({ action: 'light.turn_off', target: { entity_id: `Device ${i}` } }));
   const automation = { alias: 'A', triggers: [{ trigger: 'time' }], actions };
   const out = await resolveAnswer({ proposal: null, automation }, relay.lookup('run'), { deadlineMs: 120000 });

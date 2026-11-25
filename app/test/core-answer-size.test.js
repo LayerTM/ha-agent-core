@@ -114,6 +114,7 @@ before(async () => {
   relay = await startCoreRelay({
     coreOrigin: `http://127.0.0.1:${ha.address().port}`,
     haToken: 'ha-token-never-in-a-message',
+    readExposed: async () => new Set([BEDROOM.entity_id]),
     log: (line) => logged.push(line),
     record: (line) => {
       recorded.push(line);
@@ -1520,8 +1521,10 @@ function largeLookups(count, mib) {
     const i = Number(/(\d+)$/.exec(name || domain)[1]);
     return sendJson(res, liveAnswer(rpc.id, device(i)));
   };
-  return { asked, handle };
+  return { asked, handle, count };
 }
+// Home Assistant's list of exposed entities for `largeLookups(count)`: all of them.
+const exposing = (count) => async () => new Set(Array.from({ length: count }, (_, i) => `light.device_${i}`));
 const serving = (handle) => http.createServer((req, res) => {
   const chunks = [];
   req.on('data', (c) => chunks.push(c));
@@ -1532,7 +1535,7 @@ test('a resolution past what may be remembered still resolves', async () => {
   const home = largeLookups(6, 4);
   const stub = serving(home.handle);
   await new Promise((resolve) => { stub.listen(0, '127.0.0.1', resolve); });
-  const short = await startCoreRelay({ coreOrigin: `http://127.0.0.1:${stub.address().port}`, haToken: 'ha-token-never-in-a-message' });
+  const short = await startCoreRelay({ coreOrigin: `http://127.0.0.1:${stub.address().port}`, haToken: 'ha-token-never-in-a-message', readExposed: exposing(home.count) });
   try {
     const targets = Array.from({ length: 6 }, (_, i) => `Device ${i}`);
     const intents = [{ intent: 'HassTurnOff', targets, data: {}, risk: 'low' }];
@@ -1551,7 +1554,7 @@ test('what a resolution remembers is given back when it ends', async () => {
   const home = largeLookups(3, 5);
   const stub = serving(home.handle);
   await new Promise((resolve) => { stub.listen(0, '127.0.0.1', resolve); });
-  const short = await startCoreRelay({ coreOrigin: `http://127.0.0.1:${stub.address().port}`, haToken: 'ha-token-never-in-a-message' });
+  const short = await startCoreRelay({ coreOrigin: `http://127.0.0.1:${stub.address().port}`, haToken: 'ha-token-never-in-a-message', readExposed: exposing(home.count) });
   try {
     const ask = () => {
       const lookup = short.lookup('run');
@@ -1576,7 +1579,7 @@ test('an answer arriving after the deadline refused the resolution charges nothi
   const held = new Promise((resolve) => { answerNow = resolve; });
   const stub = serving((req, res, rpc) => held.then(() => home.handle(req, res, rpc)));
   await new Promise((resolve) => { stub.listen(0, '127.0.0.1', resolve); });
-  const short = await startCoreRelay({ coreOrigin: `http://127.0.0.1:${stub.address().port}`, haToken: 'ha-token-never-in-a-message' });
+  const short = await startCoreRelay({ coreOrigin: `http://127.0.0.1:${stub.address().port}`, haToken: 'ha-token-never-in-a-message', readExposed: exposing(home.count) });
   try {
     const lookup = short.lookup('run');
     let answered;

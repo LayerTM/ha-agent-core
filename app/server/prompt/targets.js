@@ -9,21 +9,27 @@
 // place that turns the one into the other, for the proposal and for the
 // automation draft alike.
 //
-// The oracle is Home Assistant's own matcher: the live-context tool, asked for a
-// name, answers with every EXPOSED entity that name (or alias, or entity id)
-// matches. The states list only proposes candidates: every entity whose id is
-// the reference or whose name is it. A candidate is the answer when asking the
-// matcher for its id returns the very device the name returned — same names,
-// same domain, same areas — it is the only such candidate, and no other exposed
-// device of that domain looks the same (the live context joins a device's
-// aliases with ", ", so two devices can print identically). Anything else is
-// refused:
+// Two oracles, both Home Assistant's own. The live-context tool, asked for a
+// name, answers with the EXPOSED entities that name (or alias, or entity id)
+// matches — and since 2026.12, when nothing matches exactly, with every exposed
+// entity whose name, alias or id merely CONTAINS the text; its answer says which
+// device, never whether an entity is exposed. That is the other oracle's: Home
+// Assistant's exact list of exposed entities, keyed by entity id (exposure.js).
 //
-//   unknown      the matcher finds no exposed device by that reference;
+// The states list only proposes candidates: every entity whose id is the
+// reference or whose name is it. A candidate is considered only when the list
+// says it is exposed. It is the answer when asking the live context for its id
+// returns the very device the name returned — same names, same domain, same
+// areas — it is the only such candidate, and no other exposed device of that
+// domain looks the same (the live context joins a device's aliases with ", ", so
+// two devices can print identically). Anything else is refused:
+//
+//   unknown      the matcher finds no exposed device by that reference (a hit
+//                that only contains the text is no device it names);
 //   ambiguous    it finds several, or the device it found is not unique;
 //   unpinned     it finds one, and no candidate is it (an alias, most likely);
-//   unavailable  a lookup failed, or the answer names more devices, or takes
-//                longer, than one answer may;
+//   unavailable  a lookup failed, the exposed list could not be read, or the
+//                answer names more devices, or takes longer, than one answer may;
 //   too_large    Home Assistant's answer to a lookup is past what may be read.
 //
 // Nothing here ever returns an id Home Assistant did not match.
@@ -71,6 +77,16 @@ function deviceBlocks(text) {
   return blocks.map((b) => b.join('\n'));
 }
 const deviceCount = (text) => deviceBlocks(text).length;
+// Whether some device of a live-context answer is named `ref` — by its name or by
+// an alias, as one whole entry of the names line — and not merely contains it.
+// The names line joins a device's names with ", ".
+const namesRef = (text, ref) => {
+  const wanted = normalize(ref);
+  return deviceBlocks(text).some((block) => {
+    const m = /^(?:- | {2})names: (.*)$/m.exec(block);
+    return m !== null && `, ${m[1].toLowerCase()}, `.includes(`, ${wanted}, `);
+  });
+};
 const domainOf = (text) => {
   const m = /^(?:- | {2})domain: (\S+)$/m.exec(contentLines(text).join('\n'));
   return m ? m[1] : null;
@@ -83,6 +99,7 @@ const RESOLVE_DEADLINE_MS = 30000;
 /**
  * @param {{ live(name: string): Promise<{ok: boolean, text: string}>,
  *           liveDomain(domain: string): Promise<{ok: boolean, text: string}>,
+ *           exposed(): Promise<Set<string>>,
  *           states(): Promise<Array<{entity_id: string, attributes?: object}>> }} lookup
  * @param {{ take(bytes: number): boolean }} memory  what may be remembered
  * @param {AbortSignal} signal  aborted once nobody waits for this resolver: it asks nothing more
@@ -115,13 +132,27 @@ function createResolver(lookup, memory, signal) {
     return statesMemo;
   };
 
+  let exposedMemo = null;
+  const exposedIds = () => {
+    if (exposedMemo === null) {
+      signal.throwIfAborted();
+      exposedMemo = lookup.exposed();
+    }
+    return exposedMemo;
+  };
+
+  // The candidates Home Assistant exposes, each with the identity its own id gets.
+  // Exposure is read from the exact list, never inferred from a live-context answer.
   async function exposedCandidates(ref) {
     const wanted = normalize(ref);
     const all = await states();
     const candidates = all.filter((s) => s && typeof s.entity_id === 'string'
       && (s.entity_id === ref || normalize(stateName(s)) === wanted));
+    if (candidates.length === 0) return [];
+    const exposedSet = await exposedIds();
     const out = [];
     for (const s of candidates) {
+      if (!exposedSet.has(s.entity_id)) continue;
       const answer = await live(s.entity_id);
       if (answer.ok) out.push({ id: s.entity_id, name: stateName(s), identity: identity(answer.text) });
     }
@@ -133,6 +164,9 @@ function createResolver(lookup, memory, signal) {
     const byName = await live(ref);
     if (!byName.ok || deviceCount(byName.text) === 0) return { problem: 'unknown', ref, candidates: [] };
     const exposed = await exposedCandidates(ref);
+    // No exposed entity is named so, and no device answers to it as a whole name or
+    // alias: what the matcher returned only contains the text.
+    if (exposed.length === 0 && !namesRef(byName.text, ref)) return { problem: 'unknown', ref, candidates: [] };
     const candidates = exposed.map(({ id, name }) => ({ id, name }));
     if (deviceCount(byName.text) > 1) return { problem: 'ambiguous', ref, candidates };
     const found = identity(byName.text);
