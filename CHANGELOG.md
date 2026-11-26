@@ -6,6 +6,8 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-11-26
+
 ### Added
 
 - When Home Assistant serves TLS itself, the prompt server now checks the
