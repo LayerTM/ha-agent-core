@@ -13,8 +13,8 @@ uses [Semantic Versioning](https://semver.org/).
   certificate is issued for the outside name. It is accepted when its chain leads
   to an authority Node trusts, when it is a certificate found under `/ssl`, or
   when its SHA-256 fingerprint is set in the new `core_certificate_sha256` option.
-  Otherwise the log and a Home Assistant notification give the fingerprint. In
-  this version the connection is still made; a later version may refuse it. An
+  Otherwise the log and a Home Assistant notification give the fingerprint; the
+  next accepted connection dismisses the notification. In this version the connection is still made; a later version may refuse it. An
   add-on needs `ssl` mapped read-only and has to declare the option. Home
   Assistant without TLS is not affected.
 

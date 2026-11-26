@@ -232,6 +232,111 @@ test('one certificate is warned about once across connections; a notice that fai
   assert.ok(logged.some((line) => line.includes('Core is starting')), logged.join('\n'));
 });
 
+/** Reads the registry (a new connection each time) through `trust` from a Core presenting `identity`. */
+async function connect(trust, identity, times = 1) {
+  await withCore(identity, async (origin) => {
+    const relay = await startCoreRelay({ coreOrigin: origin, haToken: 'token', trust });
+    try {
+      for (let i = 0; i < times; i += 1) await SITES['the registry read over wss'](relay);
+    } finally {
+      relay.close();
+    }
+  });
+}
+
+/** A trust whose notice calls are recorded in order. */
+function tracked(options, calls) {
+  return createCoreTrust({
+    sslDir: sslDir(),
+    notify: async () => { calls.push('raise'); },
+    withdraw: async () => { calls.push('dismiss'); },
+    ...options,
+  });
+}
+
+test('the notice is dismissed once by the first accepted connection, also after a restart that pins', async () => {
+  const noticeFile = path.join(sslDir(), 'notice');
+  const calls = [];
+  await connect(tracked({ noticeFile }, calls), certs.self);
+  assert.deepEqual(calls, ['raise']);
+  // The add-on restarts with the pin set.
+  await connect(tracked({ noticeFile, pin: certs.self.fingerprint }, calls), certs.self, 3);
+  assert.deepEqual(calls, ['raise', 'dismiss']);
+  // And once more: nothing is left to dismiss.
+  await connect(tracked({ noticeFile, pin: certs.self.fingerprint }, calls), certs.self);
+  assert.deepEqual(calls, ['raise', 'dismiss']);
+});
+
+test('nothing is dismissed when nothing was warned about', async () => {
+  const calls = [];
+  await connect(tracked({ noticeFile: path.join(sslDir(), 'notice'), pin: certs.self.fingerprint }, calls), certs.self, 2);
+  assert.deepEqual(calls, []);
+});
+
+test('a certificate accepted without a restart dismisses the notice, and a later unknown one raises it again', async () => {
+  const root = sslDir();
+  const calls = [];
+  const trust = tracked({ sslDir: root }, calls);
+  await connect(trust, certs.self);
+  fs.writeFileSync(path.join(root, 'fullchain.pem'), certs.self.cert);
+  await connect(trust, certs.self, 2);
+  fs.rmSync(path.join(root, 'fullchain.pem'));
+  await connect(trust, certs.self);
+  assert.deepEqual(calls, ['raise', 'dismiss', 'raise']);
+});
+
+test('a dismiss that failed is tried again at the next accepted connection', async () => {
+  const root = sslDir();
+  const logged = [];
+  let dismissals = 0;
+  const trust = createCoreTrust({
+    sslDir: root,
+    log: (line) => { logged.push(line); },
+    withdraw: async () => { dismissals += 1; if (dismissals === 1) throw new Error('Core is restarting'); },
+  });
+  await connect(trust, certs.self);
+  fs.writeFileSync(path.join(root, 'fullchain.pem'), certs.self.cert);
+  await connect(trust, certs.self, 3);
+  assert.equal(dismissals, 2);
+  assert.ok(logged.some((line) => line.includes('Core is restarting')), logged.join('\n'));
+});
+
+test('a dismiss waits for the notice still being raised', async () => {
+  const root = sslDir();
+  const calls = [];
+  let release;
+  const held = new Promise((r) => { release = r; });
+  const trust = createCoreTrust({
+    sslDir: root,
+    notify: async () => { await held; calls.push('raised'); },
+    withdraw: async () => { calls.push('dismissed'); },
+  });
+  await connect(trust, certs.self);
+  fs.writeFileSync(path.join(root, 'fullchain.pem'), certs.self.cert);
+  await connect(trust, certs.self);
+  assert.deepEqual(calls, []);
+  release();
+  await new Promise((r) => { setImmediate(r); });
+  assert.deepEqual(calls, ['raised', 'dismissed']);
+});
+
+test('only the last 32 unknown certificates are remembered, the oldest forgotten first', () => {
+  const logged = [];
+  const trust = createCoreTrust({ sslDir: sslDir(), log: (line) => { logged.push(line); } });
+  const show = (n) => trust.judge({
+    authorized: false,
+    authorizationError: 'DEPTH_ZERO_SELF_SIGNED_CERT',
+    getPeerCertificate: () => ({ fingerprint256: n.toString(16).padStart(64, '0') }),
+  });
+  for (let n = 0; n < 33; n += 1) show(n);
+  logged.length = 0;
+  show(32);
+  show(1);
+  assert.deepEqual(logged, []);
+  show(0);
+  assert.equal(logged.length, 1);
+});
+
 test('a pin that is not a SHA-256 fingerprint is said so and pins nothing', async () => {
   const logged = [];
   createCoreTrust({ pin: 'AB:CD', log: (line) => { logged.push(line); } });

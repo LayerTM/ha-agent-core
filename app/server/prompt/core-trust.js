@@ -13,7 +13,8 @@
 //   - its SHA-256 fingerprint is the one the user pinned.
 //
 // An unaccepted certificate is logged and reported once, with its fingerprint,
-// and the connection is still made.
+// and the connection is still made. The next accepted connection withdraws the
+// report.
 
 const crypto = require('node:crypto');
 const fs = require('node:fs');
@@ -29,6 +30,14 @@ const CERT_BLOCK_RE = /-----BEGIN CERTIFICATE-----[^-]+-----END CERTIFICATE-----
 const MAX_DEPTH = 3;
 const MAX_ENTRIES = 500;
 const MAX_FILE_BYTES = 256 * 1024;
+// How many unaccepted certificates are remembered as already reported.
+const MAX_REMEMBERED = 32;
+
+/** Adds to a set that keeps only its newest `MAX_REMEMBERED` entries. */
+function remember(set, value) {
+  set.add(value);
+  if (set.size > MAX_REMEMBERED) set.delete(set.values().next().value);
+}
 
 /** A SHA-256 fingerprint as 64 lower-case hex digits, or '' for anything else. */
 function normalFingerprint(value) {
@@ -100,28 +109,61 @@ function certificateNotice(fingerprint) {
  * @param {(line: string) => void} [opts.log]
  * @param {(found: {fingerprint: string}) => Promise<void>} [opts.notify]  Tells
  *   the user; one that rejects is tried again at the next connection.
+ * @param {() => Promise<void>} [opts.withdraw]  Takes that notice back; one that
+ *   rejects is tried again at the next accepted connection.
+ * @param {string} [opts.noticeFile]  Exists while a notice may be showing, so
+ *   that one raised before a restart is still withdrawn after it.
  */
-function createCoreTrust({ pin = '', sslDir = SSL_DIR, ca, log = () => {}, notify = async () => {} } = {}) {
+function createCoreTrust({
+  pin = '', sslDir = SSL_DIR, ca, log = () => {}, notify = async () => {}, withdraw = async () => {}, noticeFile = '',
+} = {}) {
   const pinned = normalFingerprint(pin);
   if (pin && !pinned) log(`ERROR: ${PIN_OPTION} is not a SHA-256 fingerprint (64 hex digits, colons optional) — it is ignored`);
 
   const warned = new Set();
   const told = new Set();
 
+  let showing = Boolean(noticeFile) && fs.existsSync(noticeFile);
+  // The notice calls run one after another: a withdrawal never overtakes the
+  // notice it takes back.
+  let calls = Promise.resolve();
+
+  function setShowing(value) {
+    showing = value;
+    if (!noticeFile) return;
+    try {
+      if (value) fs.writeFileSync(noticeFile, '', { mode: 0o600 });
+      else fs.rmSync(noticeFile, { force: true });
+    } catch (err) {
+      log(`the state of the certificate notice could not be saved: ${err.message}`);
+    }
+  }
+
+  function accept() {
+    if (!showing) return;
+    setShowing(false);
+    told.clear();
+    calls = calls.then(() => withdraw()).catch((err) => {
+      setShowing(true);
+      log(`the certificate notice could not be dismissed: ${err.message}`);
+    });
+  }
+
   function judge(socket) {
-    if (socket.authorized) return;
+    if (socket.authorized) { accept(); return; }
     const shown = socket.getPeerCertificate().fingerprint256 || '';
     const fingerprint = normalFingerprint(shown);
-    if (fingerprint && (fingerprint === pinned || isUnder(sslDir, fingerprint))) return;
+    if (fingerprint && (fingerprint === pinned || isUnder(sslDir, fingerprint))) { accept(); return; }
     if (!warned.has(shown)) {
-      warned.add(shown);
+      remember(warned, shown);
       log(`WARNING: Home Assistant's certificate could not be verified (${socket.authorizationError});`
         + ` SHA-256 fingerprint ${shown}. Connecting anyway; a later version may refuse.`
         + ` Keep this certificate under ${sslDir} or pin it with ${PIN_OPTION}, after checking it is yours`);
     }
     if (told.has(shown)) return;
-    told.add(shown);
-    notify({ fingerprint: shown }).catch((err) => {
+    remember(told, shown);
+    setShowing(true);
+    calls = calls.then(() => notify({ fingerprint: shown })).catch((err) => {
       told.delete(shown);
       log(`the certificate notice could not be raised: ${err.message}`);
     });
@@ -142,7 +184,7 @@ function createCoreTrust({ pin = '', sslDir = SSL_DIR, ca, log = () => {}, notif
   // new connection shows its certificate and is judged.
   const agent = new CoreAgent({ keepAlive: true, scheduling: 'lifo', timeout: 5000, maxCachedSessions: 0 });
 
-  return { options: { agent } };
+  return { options: { agent }, judge };
 }
 
-module.exports = { createCoreTrust, certificateNotice };
+module.exports = { createCoreTrust, certificateNotice, NOTICE_ID };

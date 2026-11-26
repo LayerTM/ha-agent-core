@@ -2,7 +2,7 @@
 
 // What the prompt API's start does with Core's certificate: one it cannot verify
 // is raised as a Home Assistant notification through the Supervisor, and the
-// `core_certificate_sha256` option pins it.
+// `core_certificate_sha256` option pins it, which dismisses the notification.
 
 const { test, after } = require('node:test');
 const assert = require('node:assert/strict');
@@ -17,10 +17,11 @@ const { TEST_HOST, captureLog } = require('../fixtures/bound-port');
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'core-certificate-'));
 const OPTIONS = path.join(TMP, 'options.json');
 const NOTICE_URL = 'http://supervisor/core/api/services/persistent_notification/create';
+const DISMISS_URL = 'http://supervisor/core/api/services/persistent_notification/dismiss';
 
 after(() => fs.rmSync(TMP, { recursive: true, force: true }));
 
-test('an unverified Core certificate raises the notification; pinned by the option it raises none', async () => {
+test('an unverified Core certificate raises the notification; pinned by the option it dismisses it', async () => {
   execFileSync('openssl', ['ecparam', '-name', 'prime256v1', '-genkey', '-noout', '-out', 'core.key'], { cwd: TMP, stdio: 'pipe' });
   execFileSync('openssl', ['req', '-x509', '-new', '-key', 'core.key', '-subj', '/CN=home.example.org', '-days', '2', '-out', 'core.crt'], { cwd: TMP, stdio: 'pipe' });
   const cert = fs.readFileSync(path.join(TMP, 'core.crt'), 'utf8');
@@ -83,6 +84,10 @@ test('an unverified Core certificate raises the notification; pinned by the opti
     await startOnce({});
     assert.deepEqual(posted.map((p) => [p.url, p.authorization]), [[NOTICE_URL, 'Bearer certificate-supervisor-token']]);
     assert.ok(posted[0].body.message.includes(fingerprint256));
+    posted.length = 0;
+    await startOnce({ core_certificate_sha256: fingerprint256 });
+    assert.deepEqual(posted.map((p) => [p.url, p.authorization, p.body]),
+      [[DISMISS_URL, 'Bearer certificate-supervisor-token', { notification_id: 'agent_core_certificate' }]]);
     posted.length = 0;
     await startOnce({ core_certificate_sha256: fingerprint256 });
     assert.deepEqual(posted, []);

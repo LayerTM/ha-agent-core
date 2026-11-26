@@ -234,7 +234,8 @@ The certificate is accepted when any of these holds
 
 Any other certificate is logged with its fingerprint and raised once as a Home
 Assistant notification, and **the connection is still made**. A later version may
-refuse it.
+refuse it. The next accepted connection dismisses the notification, also after a
+restart of the add-on.
 
 A chain to a trusted authority is accepted whatever name the certificate was
 issued for, so that rule alone does not tell Home Assistant from another holder
