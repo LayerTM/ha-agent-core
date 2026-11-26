@@ -24,6 +24,9 @@ uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- A check that gets no usable list of states (a failed or cut-off request, an
+  error answer) no longer clears the active alerts, so they are not notified
+  again at the next check. It leaves them as they were and logs it.
 - When a device name is ambiguous, or matches a device that cannot be pinned to
   one entity, the answer now lists every exposed device that answers to it,
   including those that carry the name only as an alias. Aliases are read from

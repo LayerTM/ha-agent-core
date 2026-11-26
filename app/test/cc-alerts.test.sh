@@ -471,6 +471,34 @@ quiet_log() {   # $1 = label, $2 = options
 quiet_log "widest valid margins are accepted" '"alert_co2_above": 1400, "alert_co2_margin": 1399, "alert_battery_below": 15, "alert_battery_margin": 85, "alert_temp_enabled": true, "alert_temp_margin": 19.9, "alert_humidity_enabled": true, "alert_humidity_margin": 22.4'
 quiet_log "rules that are off ignore their margin" '"alert_co2_above": 0, "alert_battery_below": 0, "alert_battery_margin": 200, "alert_temp_margin": -1, "alert_humidity_margin": -1'
 
+# --- 17. A fetch that brought no list of states is no reading: the cycle leaves
+#         the active set as it was, so the same anomaly does not notify again.
+#         $1 = what the body is, $2 = the body. ---
+no_reading() {
+    local before
+    label="after ${1}"
+    fresh '"alert_co2_above": 1400'
+    walk carbon_dioxide 1410:raise
+    before="$(cat "${work}/alerts-state.json")"
+    printf '%s' "$2" > "${work}/body.json"
+    states_file="${work}/body.json" run body.json "14:00"
+    if notified; then fail "$1: must not notify (got: $(msg))"; else pass "$1: no notification"; fi
+    if [ "$(cat "${work}/alerts-state.json")" = "${before}" ]; then
+        pass "$1: the state file is untouched"
+    else
+        fail "$1: the state file changed to: $(cat "${work}/alerts-state.json")"
+    fi
+    if grep -q '^\[cc-alerts\] states: ' "${errfile}"; then pass "$1: the log says so"; else fail "$1: nothing in the log"; fi
+    walk carbon_dioxide 1410:held
+}
+no_reading "an error page" '<html><body>502 Bad Gateway</body></html>'
+no_reading "a plain-text error" '401: Unauthorized'
+no_reading "an error object" '{"message": "API not available"}'
+no_reading "an empty object" '{}'
+no_reading "a cut-off list" '[{"entity_id":"sensor.probe","state":"14'
+no_reading "a list followed by junk" '[] upstream error'
+no_reading "a list with an entry that is no state" '["unexpected"]'
+
 echo
 if [ "${fails}" -eq 0 ]; then
     echo "PASS: all cc-alerts checks passed"
