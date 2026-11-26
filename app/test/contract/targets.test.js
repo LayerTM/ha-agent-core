@@ -492,6 +492,14 @@ test('the prompt API says which device it could not find, and proposes nothing',
   assert.match(body.text, /“Desk Lamp” matches more than one device \(Desk Lamp: light\.desk_lamp, Desk Lamp: light\.desk_lamp_2\)/);
 });
 
+test('the prompt API names the devices an unpinned name may mean, an alias match included, and none when it has none', async () => {
+  const body = await ask((runId) => relay.lookup(runId), proposalOf(intent(['Warmer'])));
+  assert.equal(body.proposal, null);
+  assert.match(body.text, /I couldn't tell which device “Warmer” is \(Heater: switch\.heater\) — please use its full name\./);
+  const { targetNotice } = require('../../server/prompt/notices');
+  assert.equal(targetNotice('en', [{ problem: 'unpinned', ref: 'X', candidates: [] }]), "I couldn't tell which device “X” is — please use its full name.");
+});
+
 test('a streamed answer a notice replaces ends with the notice, after what already went out', async () => {
   const streamed = `I will turn off the Desk Lamp now. ${'It is the one by the window. '.repeat(6)}Done in a moment.`;
   const notice = '“Desk Lamp” matches more than one device (Desk Lamp: light.desk_lamp, Desk Lamp: light.desk_lamp_2) — which one do you mean?';
