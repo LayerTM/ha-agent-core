@@ -48,7 +48,7 @@ run() {
     local rc
     rm -f "${notify_out}" "${notify_out}.title"
     CC_ALERTS_DATA_DIR="${work}" \
-    CC_ALERTS_STATES_FILE="${fixtures}/$1" \
+    CC_ALERTS_STATES_FILE="${states_file:-${fixtures}/$1}" \
     CC_ALERTS_NOW="$2" \
     CC_ALERTS_NOTIFY_CMD="${stub}" \
     NOTIFY_OUT="${notify_out}" \
@@ -336,6 +336,140 @@ out="$(
     run alerts-anomalies.json "23:30" 2>&1
 )"
 case "${out}" in *"unexpected stderr"*) fail "no temporary file to be had: ${out}";; *) pass "no temporary file to be had stays out of the log";; esac
+
+# --- 16. Hysteresis. A threshold alert is raised exactly as before; one that is
+#         already active is kept until the value is back past its threshold by
+#         that rule's margin. ---
+# One sensor's reading as one cycle. $1 = device class, $2 = value.
+reading() {
+    printf '[{"entity_id":"sensor.probe","state":"%s","attributes":{"device_class":"%s","friendly_name":"Probe"}}]\n' \
+        "$2" "$1" > "${work}/reading.json"
+    states_file="${work}/reading.json" run reading.json "14:00"
+}
+fresh() {   # $1 = further options, as JSON members
+    : > "${work}/alerts-state.json"
+    printf '{"proactive_alerts": true, "alert_offline": false, %s}\n' "$1" > "${work}/options.json"
+}
+# $1 = device class, then "value:expectation" steps. raise = notified and active,
+# held = active without a notification, clear = not active and not notified.
+walk() {
+    local dc="$1" step value want got active
+    shift
+    for step in "$@"; do
+        value="${step%%:*}"; want="${step#*:}"
+        reading "${dc}" "${value}"
+        active="$(jq '.active | length' "${work}/alerts-state.json" 2>/dev/null)"
+        if [ "${active}" = "0" ]; then
+            got=clear
+            if notified; then got="notified-but-inactive"; fi
+        elif [ "${active}" != "1" ]; then got="no-state"
+        elif notified; then got=raise
+        else got=held
+        fi
+        if [ "${got}" = "${want}" ]; then pass "${label}: ${value} -> ${want}"
+        else fail "${label}: ${value} should be ${want}, got ${got}"; fi
+    done
+}
+
+label="co2 default margin"
+fresh '"alert_co2_above": 1400'
+walk carbon_dioxide 1400:clear 1410:raise 1390:held 1410:held 1390:held 1301:held 1300:clear 1390:clear 1401:raise 1299:clear
+
+label="co2 margin 0"
+fresh '"alert_co2_above": 1400, "alert_co2_margin": 0'
+walk carbon_dioxide 1410:raise 1400:clear 1410:raise
+
+label="co2 own margin"
+fresh '"alert_co2_above": 1400, "alert_co2_margin": 20'
+walk carbon_dioxide 1410:raise 1381:held 1380:clear
+
+# A held alert shows the reading it has now.
+label="co2 held line"
+fresh '"alert_co2_above": 1400'
+walk carbon_dioxide 1410:raise 1350:held
+if [ "$(jq -r '.items[0].line' "${work}/alerts-state.json")" = "High CO2: Probe (1350 ppm)" ]; then
+    pass "a held alert reports the current reading"
+else
+    fail "held line: $(cat "${work}/alerts-state.json")"
+fi
+# An unavailable sensor still clears its alert.
+label="co2 unavailable"
+walk carbon_dioxide unavailable:clear 1390:clear
+
+label="battery default"
+fresh '"alert_battery_below": 15'
+walk battery 14:raise 15:clear 14:raise
+
+label="battery margin 5"
+fresh '"alert_battery_below": 15, "alert_battery_margin": 5'
+walk battery 15:clear 14:raise 19:held 14:held 20:clear 19:clear
+
+label="temp default"
+fresh '"alert_temp_enabled": true, "alert_temp_low": 5, "alert_temp_high": 45'
+walk temperature 46:raise 45:clear 4:raise 5:clear
+
+temp='"alert_temp_enabled": true, "alert_temp_low": 5, "alert_temp_high": 45, "alert_temp_margin": 1.5'
+label="temp high side"
+fresh "${temp}"
+walk temperature 46:raise 44:held 43.6:held 43.5:clear 6:clear
+label="temp low side"
+fresh "${temp}"
+walk temperature 4:raise 6:held 6.4:held 6.5:clear 44:clear
+# Only the side that raised an alert holds it: after a high alert, a reading
+# just above the low threshold is back in range, and the other way round.
+label="temp high does not hold low"
+fresh "${temp}"
+walk temperature 46:raise 6:clear
+label="temp low does not hold high"
+fresh "${temp}"
+walk temperature 4:raise 44:clear
+# Crossing to the other threshold is the same active alert, and that side holds it.
+label="temp crossing"
+fresh "${temp}"
+walk temperature 46:raise 4:held 6:held 6.5:clear
+
+# State written before the side was recorded: the reading decides.
+label="temp state without a side"
+fresh "${temp}"
+printf '{"active":["temp:sensor.probe"],"items":[{"key":"temp:sensor.probe","critical":false,"line":"x"}]}\n' > "${work}/alerts-state.json"
+walk temperature 44:held 6:clear
+
+label="humidity margin 3"
+fresh '"alert_humidity_enabled": true, "alert_humidity_low": 25, "alert_humidity_high": 70, "alert_humidity_margin": 3'
+walk humidity 71:raise 68:held 67:clear 24:raise 27:held 28:clear 71:raise 26:clear
+
+# A margin under which an alert could never clear (or that is no margin at all)
+# counts as 0 for its rule, and the log says so once at start-up.
+invalid() {   # $1 = option name, $2 = options, $3 = device class, then walk steps
+    local name="$1" dc="$3"
+    fresh "$2"
+    shift 3
+    label="invalid ${name}"
+    walk "${dc}" "$@"
+    if [ "$(grep -c "^\[cc-alerts\] ${name}: " "${errfile}")" = "1" ]; then
+        pass "invalid ${name} is logged once per run"
+    else
+        fail "invalid ${name} must be logged once (got: $(cat "${errfile}"))"
+    fi
+}
+invalid alert_co2_margin '"alert_co2_above": 1400, "alert_co2_margin": 1400' carbon_dioxide 1410:raise 1400:clear
+invalid alert_co2_margin '"alert_co2_above": 1400, "alert_co2_margin": -5' carbon_dioxide 1410:raise 1400:clear
+invalid alert_co2_margin '"alert_co2_above": 1400, "alert_co2_margin": "wide"' carbon_dioxide 1410:raise 1400:clear
+# The default margin is validated too: under a threshold it cannot fit, it is off.
+invalid alert_co2_margin '"alert_co2_above": 80' carbon_dioxide 90:raise 80:clear
+invalid alert_battery_margin '"alert_battery_below": 15, "alert_battery_margin": 86' battery 14:raise 15:clear
+invalid alert_temp_margin '"alert_temp_enabled": true, "alert_temp_low": 5, "alert_temp_high": 45, "alert_temp_margin": 20' temperature 46:raise 45:clear
+invalid alert_humidity_margin '"alert_humidity_enabled": true, "alert_humidity_low": 25, "alert_humidity_high": 70, "alert_humidity_margin": 22.5' humidity 71:raise 70:clear
+
+# The widest margins that can still clear are accepted, and a rule that is off
+# says nothing about its margin.
+quiet_log() {   # $1 = label, $2 = options
+    fresh "$2"
+    reading carbon_dioxide 400
+    if grep -q '_margin: ' "${errfile}"; then fail "$1 (got: $(cat "${errfile}"))"; else pass "$1"; fi
+}
+quiet_log "widest valid margins are accepted" '"alert_co2_above": 1400, "alert_co2_margin": 1399, "alert_battery_below": 15, "alert_battery_margin": 85, "alert_temp_enabled": true, "alert_temp_margin": 19.9, "alert_humidity_enabled": true, "alert_humidity_margin": 22.4'
+quiet_log "rules that are off ignore their margin" '"alert_co2_above": 0, "alert_battery_below": 0, "alert_battery_margin": 200, "alert_temp_margin": -1, "alert_humidity_margin": -1'
 
 echo
 if [ "${fails}" -eq 0 ]; then
