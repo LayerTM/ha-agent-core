@@ -158,7 +158,6 @@ run_cycle() {
         states="$(ha_curl "${SUPERVISOR_TOKEN}" -sS \
             http://supervisor/core/api/states 2>/dev/null)"
     fi
-    [ -n "${states}" ] || return 0
 
     # What was active after the last cycle: the keys (dedupe and hysteresis) and,
     # for a rule with two thresholds, the side that holds each alert.
@@ -200,7 +199,7 @@ run_cycle() {
             elif $sides[$key] != "low" and $v > $high - $m then "high"
             elif $sides[$key] != "high" and $v < $low + $m then "low"
             else empty end;
-        [ .[]
+        arrays | [ .[]
           | (.attributes.device_class // "") as $dc
           | (.state // "") as $st
           | (.entity_id) as $eid
@@ -257,8 +256,13 @@ run_cycle() {
                   )
               )
             )
-        ]' 2>/dev/null)"
-    [ -n "${anomalies_json}" ] || anomalies_json="[]"
+        ]' 2>/dev/null)" && [ -n "${anomalies_json}" ] || {
+        # No list of states (a failed or cut-off fetch, an error body) is no
+        # reading. Taking it for "nothing is wrong" would clear every active
+        # alert, and each would then notify again.
+        log "states: no usable reading this cycle; the active alerts are unchanged"
+        return 0
+    }
 
     # Diff: notify only NEWLY-appeared anomalies. During quiet hours, non-critical
     # ones are suppressed AND kept out of the active set, so they stay pending and
