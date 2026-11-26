@@ -25,21 +25,18 @@ const MAX_ANSWER_BYTES = 32 * 1024 * 1024;
  *   throws when the result is not what it reads.
  * @param {number} [opts.timeoutMs]
  * @param {number} [opts.maxBytes]
- * @param {boolean} [opts.anyCertificate]  Accept Core's certificate whatever name it carries
- *   (Core's own endpoint over TLS: see registry.js).
+ * @param {object} [opts.tls]  The TLS options for a wss endpoint (core-trust.js).
  * @returns {Promise<T>}
  * @template T
  */
 function wsCommand({
-  url, token, tokenName, what, command, read, anyCertificate = false,
+  url, token, tokenName, what, command, read, tls = {},
   timeoutMs = READ_TIMEOUT_MS, maxBytes = MAX_ANSWER_BYTES,
 }) {
   return new Promise((resolve, reject) => {
     if (!token) { reject(new Error(`no ${tokenName} to read ${what} with`)); return; }
     let settled = false;
-    const ws = new WebSocket(url, {
-      maxPayload: maxBytes, handshakeTimeout: timeoutMs, ...(anyCertificate ? { rejectUnauthorized: false } : {}),
-    });
+    const ws = new WebSocket(url, { maxPayload: maxBytes, handshakeTimeout: timeoutMs, ...tls });
     const finish = (err, value) => {
       if (settled) return;
       settled = true;
