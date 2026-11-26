@@ -257,7 +257,7 @@ function tracked(options, calls) {
   });
 }
 
-test('pinning the reported certificate and restarting dismisses the notice, once', async () => {
+test('pinning the only reported certificate and restarting dismisses the notice, once', async () => {
   const noticeFile = path.join(sslDir(), 'notice');
   const calls = [];
   await connect(tracked({ noticeFile }, calls), certs.self);
@@ -296,6 +296,75 @@ test('a chain to a trusted authority never dismisses, even for a certificate rep
   await connect(tracked({ noticeFile }, calls), certs.signed);
   await connect(tracked({ noticeFile, ca: certs.ca }, calls), certs.signed, 2);
   assert.deepEqual(calls, ['raise']);
+});
+
+/** A trust that records which certificate each notice is raised for. */
+function shown(options, calls) {
+  return createCoreTrust({
+    sslDir: sslDir(),
+    notify: async ({ fingerprint }) => { calls.push(fingerprint); },
+    withdraw: async () => { calls.push('dismiss'); },
+    ...options,
+  });
+}
+
+test('trusting one of two reported certificates raises the notice for the other; trusting that one dismisses it', async () => {
+  const noticeFile = path.join(sslDir(), 'notice');
+  const calls = [];
+  // A stranger answers once, then the user's own certificate, not yet trusted.
+  const first = shown({ noticeFile }, calls);
+  await connect(first, certs.other);
+  await connect(first, certs.self);
+  assert.deepEqual(calls, [certs.other.fingerprint, certs.self.fingerprint]);
+  calls.length = 0;
+  // The user pins their own and restarts.
+  await connect(shown({ noticeFile, pin: certs.self.fingerprint }, calls), certs.self, 2);
+  assert.deepEqual(calls, [certs.other.fingerprint]);
+  assert.equal(fs.readFileSync(noticeFile, 'utf8'), `${hex(certs.other)}\n`);
+  calls.length = 0;
+  // After another restart the stranger's is still on record, until trusted too.
+  await connect(shown({ noticeFile, pin: certs.other.fingerprint }, calls), certs.other, 2);
+  assert.deepEqual(calls, ['dismiss']);
+  assert.equal(fs.existsSync(noticeFile), false);
+});
+
+test('the notice raised again is for the certificate reported last', async () => {
+  const noticeFile = path.join(sslDir(), 'notice');
+  const root = sslDir();
+  const calls = [];
+  await connect(shown({ noticeFile }, calls), certs.signed);
+  await connect(shown({ noticeFile }, calls), certs.other);
+  // After a restart the first one is reported again, so it is the newest.
+  const trust = shown({ noticeFile, sslDir: root }, calls);
+  await connect(trust, certs.signed);
+  await connect(trust, certs.self);
+  calls.length = 0;
+  fs.writeFileSync(path.join(root, 'fullchain.pem'), certs.self.cert);
+  await connect(trust, certs.self);
+  assert.deepEqual(calls, [certs.signed.fingerprint]);
+});
+
+test('a notice that could not be raised again for the others is retried', async () => {
+  const noticeFile = path.join(sslDir(), 'notice');
+  const root = sslDir();
+  const calls = [];
+  let failing = false;
+  const trust = createCoreTrust({
+    sslDir: root,
+    noticeFile,
+    notify: async ({ fingerprint }) => {
+      if (failing) { failing = false; throw new Error('Core is restarting'); }
+      calls.push(fingerprint);
+    },
+    withdraw: async () => { calls.push('dismiss'); },
+  });
+  await connect(trust, certs.other);
+  await connect(trust, certs.self);
+  calls.length = 0;
+  failing = true;
+  fs.writeFileSync(path.join(root, 'fullchain.pem'), certs.self.cert);
+  await connect(trust, certs.self, 3);
+  assert.deepEqual(calls, [certs.other.fingerprint]);
 });
 
 test('nothing is dismissed when nothing was warned about', async () => {
@@ -394,4 +463,5 @@ test('the notice has one id, names the fingerprint and says how to check it befo
   assert.ok(notice.message.includes('core_certificate_sha256'));
   assert.ok(notice.message.includes('openssl x509'));
   assert.ok(notice.message.includes('dismiss it yourself'));
+  assert.ok(notice.message.includes('every certificate'));
 });

@@ -13,10 +13,12 @@
 //   - its SHA-256 fingerprint is the one the user pinned.
 //
 // An unaccepted certificate is logged and reported once, with its fingerprint,
-// and the connection is still made. The report is withdrawn only once the user
-// trusts a certificate it was about, by the pin or the ssl directory. Another
-// accepted connection leaves it: an unaccepted certificate that was there for a
-// moment is not to vanish with the next normal one.
+// and the connection is still made. A reported certificate is answered only when
+// the user trusts that very one, by the pin or the ssl directory. While others
+// are unanswered the report is raised again for the newest of them; after the
+// last one it is withdrawn. No other connection touches it: an unaccepted
+// certificate that was there for a moment is not to vanish from sight with the
+// next normal one, or with another the user trusts.
 
 const crypto = require('node:crypto');
 const fs = require('node:fs');
@@ -54,6 +56,11 @@ function remember(set, value) {
 function normalFingerprint(value) {
   const hex = String(value).replace(/[\s:]/g, '').toLowerCase();
   return /^[0-9a-f]{64}$/.test(hex) ? hex : '';
+}
+
+/** A normalised fingerprint as Node and openssl print it. */
+function printedFingerprint(hex) {
+  return hex.toUpperCase().match(/../g).join(':');
 }
 
 /** The fingerprints of one file's certificates. Private keys are never read. */
@@ -105,8 +112,8 @@ function certificateNotice(fingerprint) {
       + ' on the certificate file Home Assistant uses. If the fingerprints match, either keep that file under `/ssl`'
       + ` or set the add-on option \`${PIN_OPTION}\` to the fingerprint, and restart the add-on.`
       + ' If they do not match, do not pin it: something else is answering as Home Assistant.',
-      'This notification is removed when the add-on next connects after you have trusted a reported certificate in one'
-      + ' of those two ways. You can also dismiss it yourself.',
+      'This notification is removed once you have trusted every certificate it reported in one of those two ways; when'
+      + ' you trust one and others remain, it shows another of them. You can also dismiss it yourself.',
     ].join('\n\n'),
   };
 }
@@ -122,11 +129,11 @@ function certificateNotice(fingerprint) {
  * @param {(line: string) => void} [opts.log]
  * @param {(found: {fingerprint: string}) => Promise<void>} [opts.notify]  Tells
  *   the user; one that rejects is tried again at the next connection.
- * @param {() => Promise<void>} [opts.withdraw]  Takes that notice back; one that
- *   rejects is tried again at the next connection that calls for it.
- * @param {string} [opts.noticeFile]  Holds the reported fingerprints, one per
- *   line, while a notice may be showing, so that it can be withdrawn after a
- *   restart.
+ * @param {() => Promise<void>} [opts.withdraw]  Takes that notice back. If it, or
+ *   raising the notice again for another certificate, rejects, it is tried again
+ *   when the trusted certificate next connects.
+ * @param {string} [opts.noticeFile]  Holds the reported fingerprints not yet
+ *   trusted, one per line, the newest last, so that this holds across restarts.
  */
 function createCoreTrust({
   pin = '', sslDir = SSL_DIR, ca, log = () => {}, notify = async () => {}, withdraw = async () => {}, noticeFile = '',
@@ -137,7 +144,7 @@ function createCoreTrust({
   const warned = new Set();
   const told = new Set();
 
-  // What the notice that may be showing was raised for.
+  // The reported certificates the user has not trusted, the newest last.
   const reported = new Set(noticeFile ? recordedFingerprints(noticeFile) : []);
   // The notice calls run one after another: a withdrawal never overtakes the
   // notice it takes back.
@@ -153,19 +160,28 @@ function createCoreTrust({
     }
   }
 
-  /** The user trusts this certificate: a notice raised for it has been answered. */
+  function raise(shown) {
+    remember(told, shown);
+    return notify({ fingerprint: shown }).catch((err) => {
+      told.delete(shown);
+      throw err;
+    });
+  }
+
+  /** The user trusts this certificate: whatever it was reported for is answered. */
   function trusted(fingerprint) {
-    if (!reported.has(fingerprint)) return;
-    const taken = [...reported];
-    reported.clear();
+    if (!reported.delete(fingerprint)) return;
     save();
-    told.clear();
-    calls = calls.then(() => withdraw()).catch((err) => {
+    told.delete(printedFingerprint(fingerprint));
+    const newest = [...reported].at(-1);
+    if (!newest) told.clear();
+    calls = calls.then(() => (newest ? raise(printedFingerprint(newest)) : withdraw())).catch((err) => {
+      // Back as the oldest, so that its next connection does this again.
       const since = [...reported];
       reported.clear();
-      for (const each of [...taken, ...since]) remember(reported, each);
+      for (const each of [fingerprint, ...since]) remember(reported, each);
       save();
-      log(`the certificate notice could not be dismissed: ${err.message}`);
+      log(`the certificate notice could not be ${newest ? 'raised again' : 'dismissed'}: ${err.message}`);
     });
   }
 
@@ -181,13 +197,15 @@ function createCoreTrust({
         + ` Keep this certificate under ${sslDir} or pin it with ${PIN_OPTION}, after checking it is yours`);
     }
     if (told.has(shown)) return;
-    remember(told, shown);
     if (fingerprint) {
+      // Moved to the end: the notice now shows this one.
+      reported.delete(fingerprint);
       remember(reported, fingerprint);
       save();
     }
-    calls = calls.then(() => notify({ fingerprint: shown })).catch((err) => {
-      told.delete(shown);
+    // Marked now: the next connection may come before the call is made.
+    remember(told, shown);
+    calls = calls.then(() => raise(shown)).catch((err) => {
       log(`the certificate notice could not be raised: ${err.message}`);
     });
   }
