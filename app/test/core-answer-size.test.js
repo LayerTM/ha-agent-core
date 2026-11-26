@@ -318,6 +318,14 @@ async function untilHeld(which, done, what, ms = 20000) {
 // Whether one more answer of a share's size fits: what an agent's next call depends on.
 const full = (held) => held + LARGE_SHARE * MIB > HELD_MIB * MIB;
 const hasRoom = (held) => !full(held);
+// Both budgets are the process's, and a relay gives a share back only once it has seen
+// the connection close, which can be after the test that closed it has ended. A test
+// that starts on what an earlier one still holds would measure that instead of its own.
+beforeEach(async () => {
+  for (const which of ['agents', 'own']) {
+    await untilHeld(which, (held) => held === 0, 'what the last test held, given back');
+  }
+});
 
 // Writes `mib` MiB of a JSON string and leaves the answer open, as a stalled
 // Home Assistant would. Resolves when the relay has closed the connection.

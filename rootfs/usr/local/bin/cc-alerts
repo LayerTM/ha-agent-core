@@ -7,6 +7,9 @@
 # enters an anomaly we push one batched ha-notify; a still-active
 # anomaly is remembered in /data/alerts-state.json so it doesn't re-notify every
 # cycle, and is dropped when it clears so it can alert again next time.
+# A threshold alert that is active clears only once the value is back past its
+# threshold by that rule's margin, so a reading that hovers at the threshold is
+# one alert, not many.
 #
 # Unlike cc-monitor / cc-digest this spends NO plan usage — it is pure bash + jq,
 # so there is no model and thus no prompt-injection surface. SUPERVISOR_TOKEN is
@@ -94,6 +97,28 @@ if [ "${offline_enabled}" = "true" ] && [ "${offline_entities}" = '[]' ]; then
 fi
 quiet="$(jqopt '.alert_quiet_hours' '')"             # "" = off, else "HH:MM-HH:MM"
 
+# --- Clear margins (hysteresis) ----------------------------------------------
+# How far back past its threshold a value must be before an ACTIVE alert clears;
+# 0 clears it as soon as the value is no longer past the threshold. Raising an
+# alert never depends on the margin. A margin under which an alert could never
+# clear counts as 0.
+margin() {  # $1=option $2=default $3=threshold(s), a JSON array $4=jq test of $m against them $5=rule on
+    local value
+    [ "$5" = "true" ] || { printf '0'; return; }
+    value="$(jqopt ".$1" "$2")"
+    if ! jq -en --arg m "${value}" --argjson t "$3" \
+        "(\$m | tonumber) as \$m | \$m >= 0 and (\$m == 0 or ($4))" >/dev/null 2>&1; then
+        log "$1: ${value} is negative, not a number, or too wide for an alert to clear; using 0"
+        value=0
+    fi
+    printf '%s' "${value}"
+}
+on_above_zero() { if [ "$1" -gt 0 ] 2>/dev/null; then printf 'true'; else printf 'false'; fi; }
+batt_margin="$(margin alert_battery_margin 0 "[${batt_below}]" '$t[0] + $m <= 100' "$(on_above_zero "${batt_below}")")"
+temp_margin="$(margin alert_temp_margin 0 "[${temp_low},${temp_high}]" '2 * $m < $t[1] - $t[0]' "${temp_enabled}")"
+co2_margin="$(margin alert_co2_margin 100 "[${co2_above}]" '$m < $t[0]' "$(on_above_zero "${co2_above}")")"
+humidity_margin="$(margin alert_humidity_margin 0 "[${humidity_low},${humidity_high}]" '2 * $m < $t[1] - $t[0]' "${humidity_enabled}")"
+
 # --- Time-window helpers ----------------------------------------------------
 in_window() {  # $1=now $2=start $3=end (HH:MM); handles overnight wrap (start>end)
     local now="$1" start="$2" end="$3" nm sm em
@@ -112,7 +137,7 @@ in_window() {  # $1=now $2=start $3=end (HH:MM); handles overnight wrap (start>e
 
 # --- One check cycle --------------------------------------------------------
 run_cycle() {
-    local now_hm states anomalies_json prev_active is_night is_quiet result msg
+    local now_hm states anomalies_json prev_active prev_sides is_night is_quiet result msg
 
     now_hm="${CC_ALERTS_NOW:-$(date +%H:%M)}"
 
@@ -133,12 +158,24 @@ run_cycle() {
         states="$(ha_curl "${SUPERVISOR_TOKEN}" -sS \
             http://supervisor/core/api/states 2>/dev/null)"
     fi
-    [ -n "${states}" ] || return 0
+
+    # What was active after the last cycle: the keys (dedupe and hysteresis) and,
+    # for a rule with two thresholds, the side that holds each alert.
+    prev_active="$(jq -c '.active // [] | arrays' "${STATE}" 2>/dev/null)"
+    [ -n "${prev_active}" ] || prev_active="[]"
+    prev_sides="$(jq -c '[.items[]? | select(.side) | {(.key): .side}] | add // {}' "${STATE}" 2>/dev/null)"
+    [ -n "${prev_sides}" ] || prev_sides="{}"
 
     # Deterministic anomaly detection. Every entry degrades to `empty` on bad
     # fields, so one malformed state never breaks the array (or the loop).
     anomalies_json="$(printf '%s' "${states}" | jq -c \
+        --argjson prev "${prev_active}" \
+        --argjson sides "${prev_sides}" \
         --argjson batt "${batt_below}" \
+        --argjson battm "${batt_margin}" \
+        --argjson tm "${temp_margin}" \
+        --argjson co2m "${co2_margin}" \
+        --argjson hm "${humidity_margin}" \
         --argjson water "${water}" \
         --argjson nopen "${is_night}" \
         --argjson tenab "${temp_enabled}" \
@@ -151,7 +188,18 @@ run_cycle() {
         --argjson hhigh "${humidity_high}" \
         --argjson offen "${offline_enabled}" \
         --argjson watch "${offline_entities}" '
-        [ .[]
+        def active($key): ($prev | index($key)) != null;
+        # The side of a two-threshold band an entity is alerting on, if any. A
+        # reading past either threshold raises that side; an active alert is held
+        # by its own side only. With no side on record, the reading decides.
+        def band($key; $v; $low; $high; $m):
+            if $v < $low then "low"
+            elif $v > $high then "high"
+            elif active($key) | not then empty
+            elif $sides[$key] != "low" and $v > $high - $m then "high"
+            elif $sides[$key] != "high" and $v < $low + $m then "low"
+            else empty end;
+        arrays | [ .[]
           | (.attributes.device_class // "") as $dc
           | (.state // "") as $st
           | (.entity_id) as $eid
@@ -173,7 +221,8 @@ run_cycle() {
               ( select($st != "unavailable" and $st != "unknown" and $st != "")
                 | (((.state | tonumber?) // null)) as $num
                 | (
-                    ( if ($batt > 0) and ($dc == "battery") and ($num != null) and ($num < $batt)
+                    ( if ($batt > 0) and ($dc == "battery") and ($num != null)
+                         and ($num < $batt or (active("battery:" + $eid) and $num < $batt + $battm))
                       then {key:("battery:" + .entity_id), critical:false,
                             line:("Low battery: " + $name + " (" + ($num|tostring) + "%)")}
                       else empty end ),
@@ -186,28 +235,34 @@ run_cycle() {
                       then {key:("night_open:" + .entity_id), critical:false,
                             line:("Open at night: " + $name)}
                       else empty end ),
-                    ( if $tenab and ($dc == "temperature") and ($num != null) and ($num < $tlow or $num > $thigh)
+                    ( if $tenab and ($dc == "temperature") and ($num != null)
                          and (($tents | length) == 0 or (($tents | index($eid)) != null))
-                      then {key:("temp:" + .entity_id), critical:false,
+                      then ("temp:" + $eid) as $key
+                         | band($key; $num; $tlow; $thigh; $tm) as $side
+                         | {key:$key, critical:false, side:$side,
                             line:("Temperature out of range: " + $name + " (" + ($num|tostring) + "°)")}
                       else empty end ),
-                    ( if ($co2 > 0) and ($dc == "carbon_dioxide") and ($num != null) and ($num > $co2)
+                    ( if ($co2 > 0) and ($dc == "carbon_dioxide") and ($num != null)
+                         and ($num > $co2 or (active("co2:" + $eid) and $num > $co2 - $co2m))
                       then {key:("co2:" + .entity_id), critical:false,
                             line:("High CO2: " + $name + " (" + ($num|tostring) + " ppm)")}
                       else empty end ),
-                    ( if $henab and ($dc == "humidity") and ($num != null) and ($num < $hlow or $num > $hhigh)
-                      then {key:("humidity:" + .entity_id), critical:false,
+                    ( if $henab and ($dc == "humidity") and ($num != null)
+                      then ("humidity:" + $eid) as $key
+                         | band($key; $num; $hlow; $hhigh; $hm) as $side
+                         | {key:$key, critical:false, side:$side,
                             line:("Humidity out of range: " + $name + " (" + ($num|tostring) + "%)")}
                       else empty end )
                   )
               )
             )
-        ]' 2>/dev/null)"
-    [ -n "${anomalies_json}" ] || anomalies_json="[]"
-
-    # Previously-active anomaly keys (dedupe memory).
-    prev_active="$(jq -c '.active // []' "${STATE}" 2>/dev/null)"
-    [ -n "${prev_active}" ] || prev_active="[]"
+        ]' 2>/dev/null)" && [ -n "${anomalies_json}" ] || {
+        # No list of states (a failed or cut-off fetch, an error body) is no
+        # reading. Taking it for "nothing is wrong" would clear every active
+        # alert, and each would then notify again.
+        log "states: no usable reading this cycle; the active alerts are unchanged"
+        return 0
+    }
 
     # Diff: notify only NEWLY-appeared anomalies. During quiet hours, non-critical
     # ones are suppressed AND kept out of the active set, so they stay pending and
