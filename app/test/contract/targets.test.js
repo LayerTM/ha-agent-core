@@ -347,6 +347,17 @@ test('a candidate by name is not the answer unless the matcher found that very d
   assert.deepEqual(out.proposal.intents[0].targets, ['light.reading']);
 });
 
+test('when the registry cannot be read, a name whose own candidate is not the device stays unpinned', async () => {
+  aliasesUp = false;
+  records.length = 0;
+  try {
+    const out = await resolveProposal(proposalOf(intent(['Reading Light'])));
+    assert.equal(out.proposal, null, 'light.reading answers by an alias that cannot be read');
+    assert.deepEqual(out.problems, [{ problem: 'unpinned', ref: 'Reading Light', candidates: [{ id: 'light.shelf', name: 'Reading Light' }] }]);
+    assert.equal(records.filter((l) => /^config\/entity_registry\/get_entries run=r1 \(lookup, failed\)/.test(l)).length, 1, records.join('\n'));
+  } finally { aliasesUp = true; }
+});
+
 test('two devices that print the same are not told apart by their print', async () => {
   for (const [ref, twins] of [['Lamp, Desk', ['light.x', 'light.y']], ['Shade, Top', ['cover.x', 'cover.y']]]) {
     const out = await resolveProposal(proposalOf(intent([ref])));
