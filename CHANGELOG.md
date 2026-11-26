@@ -8,6 +8,22 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [0.15.3] - 2026-11-26
 
+### Changed
+
+- A threshold alert that is already active now clears only once the value is back
+  past its threshold by that rule's margin, so a reading that hovers at the
+  threshold raises one alert instead of a new one each time it crosses. Raising
+  an alert is unchanged. New options, one per rule: `alert_co2_margin` (ppm,
+  default 100: with the threshold at 1400, an active CO2 alert clears at 1300),
+  `alert_battery_margin` (percentage points, default 0),
+  `alert_temp_margin` (the sensor's unit, default 0) and
+  `alert_humidity_margin` (%RH, default 0); 0 clears an alert as soon as the
+  value is no longer past the threshold. While it is held, an alert shows the
+  current reading, which can be inside the threshold. For temperature and
+  humidity only the side that raised the alert holds it. A margin under which an
+  alert could never clear counts as 0 and is logged at start-up. An unavailable
+  sensor still clears its alert.
+
 ### Fixed
 
 - When a device name is ambiguous, or matches a device that cannot be pinned to
@@ -265,7 +281,6 @@ uses [Semantic Versioning](https://semver.org/).
   running an hour after its agent left is given up on. With 64 requests waiting for
   Home Assistant to answer, new ones from agents are refused with an error that says
   why, and none of those waiting is closed for it. Affected version: 0.11.4.
-
 
 ## [0.11.4] - 2026-11-04
 
