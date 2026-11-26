@@ -42,6 +42,7 @@ const {
 const { haBasename } = require('./ha-tool-names');
 const { createStateNames } = require('./state-names');
 const { readExposedIds } = require('./exposure');
+const { readEntityAliases, coreWebSocketUrl } = require('./registry');
 
 // Exactly what the add-on needs, and nothing else.
 const MCP_PATH = '/api/mcp';
@@ -401,6 +402,8 @@ function deny(res, status, message) {
  * @param {string} opts.haToken     The Home Assistant LLAT. Stays in this process.
  * @param {string} [opts.supervisorToken]  Reads the exposed-entities list (exposure.js) and nothing else.
  * @param {(opts: {token: string}) => Promise<Set<string>>} [opts.readExposed]  How that list is read (exposure.js unless a test stands in).
+ * @param {(opts: {url: string, token: string, entityIds: string[]}) => Promise<Map<string, string[]>>} [opts.readAliases]
+ *   How the registry aliases are read, with the Home Assistant token (registry.js unless a test stands in).
  * @param {(msg: string) => void} [opts.log]
  * @param {(line: string) => void} [opts.record]  One audit line per tool call.
  * @param {number} [opts.authProbeEveryMs]  Probe the token at start and then this
@@ -425,6 +428,7 @@ function deny(res, status, message) {
  *     live: (name: string) => Promise<{ok: boolean, text: string}>,
  *     liveDomain: (domain: string) => Promise<{ok: boolean, text: string}>,
  *     states: () => Promise<Array<{entity_id: string, attributes?: object}>>,
+ *     aliases: (entityIds: string[]) => Promise<Map<string, string[]>>,
  *   },
  *   act: (runId: string) => (basename: string, args: object) => Promise<{ok: boolean, error?: string}>,
  * }>}
@@ -436,7 +440,7 @@ function deny(res, status, message) {
  * something Home Assistant never promised.
  */
 async function startCoreRelay({
-  coreOrigin, haToken, supervisorToken = '', readExposed = readExposedIds,
+  coreOrigin, haToken, supervisorToken = '', readExposed = readExposedIds, readAliases = readEntityAliases,
   log = () => {}, record = () => {}, authProbeEveryMs = 0,
   deliveryDeadlineMs = DELIVERY_DEADLINE_MS,
   abandonedRequestMs = ABANDONED_REQUEST_MS,
@@ -1213,6 +1217,19 @@ async function startCoreRelay({
             const ids = await readExposed({ token: supervisorToken });
             record(describeCall(call, ' (lookup)'));
             return ids;
+          } catch (err) {
+            record(describeCall(call, ' (lookup, failed)'));
+            throw err;
+          }
+        },
+        // The registry aliases of these entities, read with the Home Assistant token
+        // (registry.js). Recorded like every lookup; rejects when they cannot be read.
+        async aliases(entityIds) {
+          const call = { name: 'config/entity_registry/get_entries', args: {}, runId };
+          try {
+            const aliases = await readAliases({ url: coreWebSocketUrl(coreOrigin), token: haToken, entityIds });
+            record(describeCall(call, ' (lookup)'));
+            return aliases;
           } catch (err) {
             record(describeCall(call, ' (lookup, failed)'));
             throw err;

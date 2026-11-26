@@ -6,6 +6,17 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- When a device name is ambiguous, or matches a device that cannot be pinned to
+  one entity, the answer now lists every exposed device that answers to it,
+  including those that carry the name only as an alias. Aliases are read from
+  Home Assistant's entity registry (`config/entity_registry/get_entries`) with
+  the add-on's Home Assistant token, which needs no administrator rights, and
+  only for entities Home Assistant exposes. A device matched by an alias is
+  listed for the user to choose, never proposed by itself. When the registry
+  cannot be read, the answer lists the devices found by name, as before.
+
 ## [0.15.2] - 2026-11-26
 
 ### Fixed
