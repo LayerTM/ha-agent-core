@@ -26,18 +26,17 @@ function coreWebSocketUrl(coreOrigin) {
  * know, or knows without aliases, is absent; an id that was not asked for is never
  * in the answer.
  *
- * @param {{ url: string, token?: string, entityIds: string[], timeoutMs?: number, maxBytes?: number }} opts
+ * `tls` is how a wss endpoint's certificate is judged (core-trust.js).
+ *
+ * @param {{ url: string, token?: string, entityIds: string[], tls?: object, timeoutMs?: number, maxBytes?: number }} opts
  * @returns {Promise<Map<string, string[]>>}
  */
-function readEntityAliases({ url, token, entityIds, timeoutMs, maxBytes }) {
+function readEntityAliases({ url, token, entityIds, tls, timeoutMs, maxBytes }) {
   const asked = new Set(entityIds);
   if (asked.size === 0) return Promise.resolve(new Map());
   return wsCommand({
     url, token, timeoutMs, maxBytes, tokenName: 'Home Assistant token', what: WHAT,
-    // As for every request to Core (core-relay.js): the name in Core's certificate cannot
-    // match the internal one, the hop never leaves the host, and the endpoint is derived
-    // from the Supervisor's answer, never supplied by anyone.
-    anyCertificate: url.startsWith('wss:'),
+    tls,
     command: { type: COMMAND, entity_ids: [...asked] },
     read(result) {
       if (!result || typeof result !== 'object' || Array.isArray(result)) throw new Error(`Home Assistant refused ${WHAT}`);

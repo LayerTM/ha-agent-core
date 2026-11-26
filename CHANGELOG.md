@@ -6,6 +6,19 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- When Home Assistant serves TLS itself, the prompt server now checks the
+  certificate on every connection to it. The name is not checked, because the
+  certificate is issued for the outside name. It is accepted when its chain leads
+  to an authority Node trusts, when it is a certificate found under `/ssl`, or
+  when its SHA-256 fingerprint is set in the new `core_certificate_sha256` option.
+  Otherwise the log and a Home Assistant notification give the fingerprint; the
+  notification is dismissed once every certificate it reported is trusted through
+  the pin or `/ssl`. In this version the connection is still made; a later version may refuse it. An
+  add-on needs `ssl` mapped read-only and has to declare the option. Home
+  Assistant without TLS is not affected.
+
 ## [0.15.3] - 2026-11-26
 
 ### Changed

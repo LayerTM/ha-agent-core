@@ -216,6 +216,36 @@ the answer is nullable there, and a `null` for it is treated as absent.
   - audit lines say `cost=unknown`;
   - a non-zero `chat_daily_budget_usd` keeps the prompt API from starting instead of pretending to enforce it.
 
+### Home Assistant's certificate
+
+When Home Assistant serves TLS itself (the Supervisor reports `ssl: true`), the
+prompt server connects to it as `homeassistant` over the add-on network. The
+certificate carries the name users type from outside, so its name is not checked.
+The certificate is accepted when any of these holds
+(`app/server/prompt/core-trust.js`):
+- its chain leads to a certificate authority Node trusts;
+- it is the same certificate as one in a `.pem`, `.crt` or `.cer` file under
+  `/ssl` — a self-signed certificate, or one from a private authority. The add-on
+  maps `ssl` read-only for this;
+- its SHA-256 fingerprint is the one in the `core_certificate_sha256` add-on
+  option (64 hex digits, colons optional). The add-on declares the option. A pin
+  names one certificate, so it has to be set again when that certificate is
+  renewed.
+
+Any other certificate is logged with its fingerprint and raised once as a Home
+Assistant notification, and **the connection is still made**. A later version may
+refuse it. Trusting a reported certificate through the pin or `/ssl` answers
+that certificate only: while others are unanswered the notification is raised
+again for the newest of them, and after the last one it is dismissed, also across
+restarts of the add-on. No other connection changes it, so a certificate that
+appeared only for a moment stays reported until you dismiss the notification
+yourself.
+
+A chain to a trusted authority is accepted whatever name the certificate was
+issued for, so that rule alone does not tell Home Assistant from another holder
+of a publicly issued certificate. A Home Assistant reached without TLS is
+connected to as before, and nothing is judged.
+
 ### Home Assistant MCP access
 
 An agent reaches Home Assistant's MCP server only through the prompt server's

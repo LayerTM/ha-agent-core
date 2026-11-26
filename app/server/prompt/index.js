@@ -18,6 +18,7 @@ const { buildRedactor } = require('./security');
 const { checkWebOptions } = require('./web');
 const { adapter } = require('../adapter-contract');
 const { resolveCoreTarget } = require('./core-target');
+const { createCoreTrust, certificateNotice, NOTICE_ID } = require('./core-trust');
 const { startCoreRelay } = require('./core-relay');
 const { createSessionPool } = require('./session-pool');
 const { READ_HA_BASENAMES } = require('./run');
@@ -110,6 +111,17 @@ function supervisorRequest(pathname, options = {}) {
     },
     signal: AbortSignal.timeout(10000),
   });
+}
+
+// A certificate of Core's that could not be verified (core-trust.js) is told to
+// the user in Home Assistant, and taken back, over the Supervisor's own plain
+// proxy.
+async function persistentNotification(service, data) {
+  const res = await supervisorRequest(`/core/api/services/persistent_notification/${service}`, {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error(`persistent_notification.${service} HTTP ${res.status}`);
 }
 
 // Announce {host, port, token} to the Supervisor so the claude_ha integration
@@ -225,8 +237,15 @@ async function start() {
     // same format, as the audit hook writes for a console run — the relay is the
     // one place that sees the call, its arguments and Core's answer for EVERY
     // engine, with hooks or without.
+    const trust = createCoreTrust({
+      pin: optionString(options, 'core_certificate_sha256'),
+      log,
+      notify: ({ fingerprint }) => persistentNotification('create', certificateNotice(fingerprint)),
+      withdraw: () => persistentNotification('dismiss', { notification_id: NOTICE_ID }),
+      noticeFile: path.join(DATA_DIR, 'core-certificate-notice'),
+    });
     relay = await startCoreRelay({
-      coreOrigin: coreTarget.origin, haToken, supervisorToken: process.env.SUPERVISOR_TOKEN || '', log, record: audit, authProbeEveryMs: MCP_AUTH_PROBE_MS,
+      trust, coreOrigin: coreTarget.origin, haToken, supervisorToken: process.env.SUPERVISOR_TOKEN || '', log, record: audit, authProbeEveryMs: MCP_AUTH_PROBE_MS,
     });
     log(`core relay on 127.0.0.1:${relay.port}`);
   }

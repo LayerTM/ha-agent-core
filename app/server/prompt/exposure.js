@@ -13,9 +13,9 @@
 //
 // That command is for administrators only, while the token the user configured
 // may belong to a restricted user. So the one call is made with the add-on's
-// Supervisor token, through the Supervisor's proxy to Core. The token is used
-// here and nowhere else in the core: no other Home Assistant request carries it,
-// and the engine's environment never holds it (run.js).
+// Supervisor token, through the Supervisor's proxy to Core. No other request a
+// run causes carries that token, and the engine's environment never holds it
+// (run.js).
 
 const { wsCommand } = require('./ha-ws');
 

@@ -10,18 +10,14 @@
 // 1. TLS on Core. When Core terminates TLS itself, the certificate is issued for
 //    the name users type from outside, while the add-on reaches Core over the
 //    internal docker network as `homeassistant`. The names cannot match, by
-//    construction — so certificate verification on this hop can never pass and
-//    protects nothing. The hop does not leave the host. Home Assistant's own
-//    Supervisor reached the same conclusion: it talks to Core over a unix socket
-//    where it can, and over the network it connects by IP with verification off
-//    (`supervisor/homeassistant/api.py` — `api_authority`, and `ssl=False` on its
-//    Core requests). We do the same, and only ever to the address WE derive from
-//    the Supervisor — never to a user-supplied host, so there is no destination
-//    an attacker could point the token at.
+//    construction, so the name is not checked; the rest of the certificate is
+//    judged by core-trust.js. The core only ever dials the address it derives
+//    from the Supervisor, never a user-supplied host, so there is no setting
+//    that could point the token elsewhere.
 //
-//    The relay is what makes that possible at all for MCP: the TLS peer there is
-//    the bundled `claude` CLI, not our code, and the MCP config we write it
-//    carries only {type, url, headers} — there is no TLS knob to set. Pointing
+//    The relay is what lets the core decide that for MCP too: the TLS peer there
+//    would be the bundled `claude` CLI, not our code, and the MCP config we write
+//    it carries only {type, url, headers} — there is no TLS knob to set. Pointing
 //    the CLI at plain HTTP on loopback moves the TLS decision back to us.
 //
 // 2. The child process no longer holds a Home Assistant credential. Before, the
@@ -43,6 +39,7 @@ const { haBasename } = require('./ha-tool-names');
 const { createStateNames } = require('./state-names');
 const { readExposedIds } = require('./exposure');
 const { readEntityAliases, coreWebSocketUrl } = require('./registry');
+const { createCoreTrust } = require('./core-trust');
 
 // Exactly what the add-on needs, and nothing else.
 const MCP_PATH = '/api/mcp';
@@ -402,7 +399,7 @@ function deny(res, status, message) {
  * @param {string} opts.haToken     The Home Assistant LLAT. Stays in this process.
  * @param {string} [opts.supervisorToken]  Reads the exposed-entities list (exposure.js) and nothing else.
  * @param {(opts: {token: string}) => Promise<Set<string>>} [opts.readExposed]  How that list is read (exposure.js unless a test stands in).
- * @param {(opts: {url: string, token: string, entityIds: string[]}) => Promise<Map<string, string[]>>} [opts.readAliases]
+ * @param {(opts: {url: string, token: string, entityIds: string[], tls?: object}) => Promise<Map<string, string[]>>} [opts.readAliases]
  *   How the registry aliases are read, with the Home Assistant token (registry.js unless a test stands in).
  * @param {(msg: string) => void} [opts.log]
  * @param {(line: string) => void} [opts.record]  One audit line per tool call.
@@ -412,6 +409,7 @@ function deny(res, status, message) {
  * @param {number} [opts.abandonedRequestMs]  How long a tool may outlive the agent that called it.
  * @param {number} [opts.maxUnansweredRequests]  How many POSTs may wait for Home Assistant to answer.
  * @param {number} [opts.answerStallMs]  How long Home Assistant may go silent mid-answer.
+ * @param {{options: object}} [opts.trust]  How Core's certificate is judged over TLS (core-trust.js).
  * @returns {Promise<{
  *   url: string, port: number, issue: (runId: string) => string,
  *   issueSession: (may?: {basenames?: string[]}) => string,
@@ -446,6 +444,7 @@ async function startCoreRelay({
   abandonedRequestMs = ABANDONED_REQUEST_MS,
   maxUnansweredRequests = MAX_UNANSWERED_REQUESTS,
   answerStallMs = ANSWER_STALL_MS,
+  trust = createCoreTrust({ log }),
 }) {
   // Whether Home Assistant accepts the add-on's token on the MCP path, from the
   // latest answer that said so: 'ok', 'unauthorized', 'unreachable' (a probe got
@@ -556,6 +555,7 @@ async function startCoreRelay({
   const target = new URL(coreOrigin);
   const secure = target.protocol === 'https:';
   const transport = secure ? https : http;
+  const tlsOptions = secure ? trust.options : {};
 
   const server = http.createServer((req, res) => {
     let pathname;
@@ -710,10 +710,7 @@ async function startCoreRelay({
         method: req.method,
         path: pathname,
         headers,
-        // See the header comment: the name in the certificate cannot match the
-        // internal one, the hop never leaves the host, and the destination is
-        // derived by us rather than supplied by anyone.
-        ...(secure ? { rejectUnauthorized: false } : {}),
+        ...tlsOptions,
       },
       (upRes) => {
         answerStream = upRes;
@@ -1023,7 +1020,7 @@ async function startCoreRelay({
         path: pathname,
         headers,
         timeout: LOOKUP_TIMEOUT_MS,
-        ...(secure ? { rejectUnauthorized: false } : {}),
+        ...tlsOptions,
       }, (upRes) => {
         if (pathname === MCP_PATH) observeMcpAnswer(upRes.statusCode, `${method} ${pathname}`);
         upRes.on('error', reject);
@@ -1227,7 +1224,7 @@ async function startCoreRelay({
         async aliases(entityIds) {
           const call = { name: 'config/entity_registry/get_entries', args: {}, runId };
           try {
-            const aliases = await readAliases({ url: coreWebSocketUrl(coreOrigin), token: haToken, entityIds });
+            const aliases = await readAliases({ url: coreWebSocketUrl(coreOrigin), token: haToken, entityIds, tls: tlsOptions });
             record(describeCall(call, ' (lookup)'));
             return aliases;
           } catch (err) {
