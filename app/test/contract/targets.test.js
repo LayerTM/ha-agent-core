@@ -69,6 +69,9 @@ const HOME = [
   { id: 'light.shed_lamp', name: 'Shed Lamp' },
   { id: 'light.shed_light', name: 'Shed Light' },
   { id: 'lock.front_door', name: 'Front Door', exposed: false },
+  // Two exposed devices answer to "Study": one by its name, one by an alias only.
+  { id: 'light.study', name: 'Study' },
+  { id: 'input_boolean.study_2', name: 'Study Spot', aliases: ['Study'] },
 ];
 const haNames = (e) => e.haNames || [e.name, ...(e.aliases || [])];
 
@@ -108,6 +111,8 @@ let core;
 let coreUp = true;
 let exposureUp = true;
 const exposureTokens = [];
+let aliasesUp = true;
+const aliasReads = [];
 const coreBearers = new Set();
 let relay;
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'core-targets-'));
@@ -145,6 +150,18 @@ before(async () => {
       exposureTokens.push(token);
       if (!exposureUp) throw new Error('the exposed-entities list could not be read');
       return new Set(HOME.filter((e) => e.exposed !== false).map((e) => e.id));
+    },
+    // The entity registry's aliases, as `config/entity_registry/get_entries` gives
+    // them: the device's names, its own computed name as null. It also answers for
+    // an entity it was not asked about and that is not exposed, and that entity
+    // answers to an alias an exposed device has: it must never be named.
+    readAliases: async ({ url, token, entityIds }) => {
+      aliasReads.push({ url, token, entityIds });
+      if (!aliasesUp) throw new Error('the entity registry could not be read');
+      const out = new Map(HOME.filter((e) => entityIds.includes(e.id))
+        .map((e) => [e.id, haNames(e).map((n) => (n === e.name ? null : n))]));
+      out.set('light.hidden', ['Study', 'Warmer']);
+      return out;
     },
   });
 });
@@ -211,6 +228,52 @@ test('an ambiguous name is refused, naming both candidates', async () => {
     ref: 'Desk Lamp',
     candidates: [{ id: 'light.desk_lamp', name: 'Desk Lamp' }, { id: 'light.desk_lamp_2', name: 'Desk Lamp' }],
   }]);
+});
+
+test('an ambiguous name names every exposed device it matches, an alias match too', async () => {
+  const out = await resolveProposal(proposalOf(intent(['Study'])));
+  assert.equal(out.proposal, null);
+  assert.deepEqual(out.problems, [{
+    problem: 'ambiguous',
+    ref: 'Study',
+    candidates: [{ id: 'light.study', name: 'Study' }, { id: 'input_boolean.study_2', name: 'Study Spot' }],
+  }]);
+});
+
+test('a device not exposed is never named, though the registry gives it the alias', async () => {
+  for (const ref of ['Study', 'Warmer']) {
+    const out = await resolveProposal(proposalOf(intent([ref])));
+    assert.ok(out.problems[0].candidates.length > 0, ref);
+    assert.ok(!JSON.stringify(out).includes('light.hidden'), ref);
+  }
+});
+
+test('a device matched only by an alias is named, never chosen', async () => {
+  const out = await resolveProposal(proposalOf(intent(['Warmer'])));
+  assert.equal(out.proposal, null);
+  assert.deepEqual(out.problems, [{ problem: 'unpinned', ref: 'Warmer', candidates: [{ id: 'switch.heater', name: 'Heater' }] }]);
+});
+
+test('the registry is read with the Home Assistant token, for exactly the exposed ids, once, and only for a refusal', async () => {
+  aliasReads.length = 0;
+  await resolveProposal(proposalOf(intent(['Sandbox Test Lamp', 'light.porch'])));
+  assert.equal(aliasReads.length, 0, 'a resolved name needs no aliases');
+  await resolveProposal(proposalOf(intent(['Study', 'Warmer', 'Desk Lamp'])));
+  assert.equal(aliasReads.length, 1);
+  assert.equal(aliasReads[0].token, 'ha-token');
+  assert.match(aliasReads[0].url, /^ws:\/\/127\.0\.0\.1:\d+\/api\/websocket$/);
+  assert.deepEqual([...aliasReads[0].entityIds].sort(), HOME.filter((e) => e.exposed !== false).map((e) => e.id).sort());
+});
+
+test('when the registry cannot be read the refusal names the candidates it has, and the read is recorded as failed', async () => {
+  aliasesUp = false;
+  records.length = 0;
+  try {
+    const out = await resolveProposal(proposalOf(intent(['Study'])));
+    assert.equal(out.proposal, null);
+    assert.deepEqual(out.problems, [{ problem: 'ambiguous', ref: 'Study', candidates: [{ id: 'light.study', name: 'Study' }] }]);
+    assert.ok(records.some((l) => /^config\/entity_registry\/get_entries run=r1 \(lookup, failed\)/.test(l)), records.join('\n'));
+  } finally { aliasesUp = true; }
 });
 
 test('an unknown name is refused', async () => {
@@ -427,6 +490,14 @@ test('the prompt API says which device it could not find, and proposes nothing',
   const body = await ask((runId) => relay.lookup(runId), proposalOf(intent(['Desk Lamp'])));
   assert.equal(body.proposal, null);
   assert.match(body.text, /“Desk Lamp” matches more than one device \(Desk Lamp: light\.desk_lamp, Desk Lamp: light\.desk_lamp_2\)/);
+});
+
+test('the prompt API names the devices an unpinned name may mean, an alias match included, and none when it has none', async () => {
+  const body = await ask((runId) => relay.lookup(runId), proposalOf(intent(['Warmer'])));
+  assert.equal(body.proposal, null);
+  assert.match(body.text, /I couldn't tell which device “Warmer” is \(Heater: switch\.heater\) — please use its full name\./);
+  const { targetNotice } = require('../../server/prompt/notices');
+  assert.equal(targetNotice('en', [{ problem: 'unpinned', ref: 'X', candidates: [] }]), "I couldn't tell which device “X” is — please use its full name.");
 });
 
 test('a streamed answer a notice replaces ends with the notice, after what already went out', async () => {

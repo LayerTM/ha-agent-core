@@ -32,6 +32,12 @@
 //                answer names more devices, or takes longer, than one answer may;
 //   too_large    Home Assistant's answer to a lookup is past what may be read.
 //
+// A refusal names the exposed devices the user may have meant: the candidates
+// above, and the exposed entities that answer to the reference by a registry
+// alias (registry.js) — the names the live context lists a device by, which the
+// states list does not carry. An alias match is only ever named, never the answer.
+// When the aliases cannot be read the refusal names the candidates alone.
+//
 // Nothing here ever returns an id Home Assistant did not match.
 
 const { validateProposal } = require('./security');
@@ -100,7 +106,8 @@ const RESOLVE_DEADLINE_MS = 30000;
  * @param {{ live(name: string): Promise<{ok: boolean, text: string}>,
  *           liveDomain(domain: string): Promise<{ok: boolean, text: string}>,
  *           exposed(): Promise<Set<string>>,
- *           states(): Promise<Array<{entity_id: string, attributes?: object}>> }} lookup
+ *           states(): Promise<Array<{entity_id: string, attributes?: object}>>,
+ *           aliases(entityIds: string[]): Promise<Map<string, string[]>> }} lookup
  * @param {{ take(bytes: number): boolean }} memory  what may be remembered
  * @param {AbortSignal} signal  aborted once nobody waits for this resolver: it asks nothing more
  */
@@ -141,6 +148,36 @@ function createResolver(lookup, memory, signal) {
     return exposedMemo;
   };
 
+  // The registry aliases of every exposed entity, read once and only when a refusal
+  // is to name its candidates.
+  let aliasesMemo = null;
+  const exposedAliases = () => {
+    if (aliasesMemo === null) {
+      signal.throwIfAborted();
+      aliasesMemo = exposedIds().then((ids) => lookup.aliases([...ids]));
+    }
+    return aliasesMemo;
+  };
+
+  // A refusal's candidates, and after them every exposed entity an alias names
+  // `ref`. The exposed list decides which ids may appear; the registry only says
+  // which of those carry the name.
+  async function withAliasMatches(ref, candidates) {
+    const wanted = normalize(ref);
+    let all; let exposedSet; let aliases;
+    try {
+      [all, exposedSet, aliases] = await Promise.all([states(), exposedIds(), exposedAliases()]);
+    } catch {
+      return candidates;
+    }
+    const named = (id) => (aliases.get(id) || []).some((a) => typeof a === 'string' && normalize(a) === wanted);
+    const matched = all.filter((s) => s && typeof s.entity_id === 'string'
+      && exposedSet.has(s.entity_id)
+      && !candidates.some((c) => c.id === s.entity_id)
+      && named(s.entity_id));
+    return [...candidates, ...matched.map((s) => ({ id: s.entity_id, name: stateName(s) }))];
+  }
+
   // The candidates Home Assistant exposes, each with the identity its own id gets.
   // Exposure is read from the exact list, never inferred from a live-context answer.
   async function exposedCandidates(ref) {
@@ -161,6 +198,12 @@ function createResolver(lookup, memory, signal) {
 
   // One reference → {id} or {problem, ref, candidates}.
   async function resolve(ref) {
+    const result = await pin(ref);
+    if (result.id || result.problem === 'unknown') return result;
+    return { ...result, candidates: await withAliasMatches(ref, result.candidates) };
+  }
+
+  async function pin(ref) {
     const byName = await live(ref);
     if (!byName.ok || deviceCount(byName.text) === 0) return { problem: 'unknown', ref, candidates: [] };
     const exposed = await exposedCandidates(ref);
