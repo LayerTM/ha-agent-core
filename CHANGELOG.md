@@ -6,6 +6,8 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.15.2] - 2026-11-26
+
 ### Fixed
 
 - A device the assistant names is only proposed when Home Assistant exposes it.
@@ -21,6 +23,12 @@ uses [Semantic Versioning](https://semver.org/).
 - A device name that Home Assistant 2026.12 answers only because it is part of
   other names is reported as not found, as before 2026.12, instead of as an
   ambiguous or unpinned device with no candidates to choose from.
+
+### Changed
+
+- Updated packages in the shipped runtime: encodeurl 2.0.3, media-typer 1.1.1,
+  negotiator 1.1.0, object-inspect 1.14.0, on-finished 2.4.2, qs 6.17.1 and
+  router 2.3.0.
 
 ## [0.15.1] - 2026-11-19
 
