@@ -15,9 +15,18 @@ uses [Semantic Versioning](https://semver.org/).
   when its SHA-256 fingerprint is set in the new `core_certificate_sha256` option.
   Otherwise the log and a Home Assistant notification give the fingerprint; the
   notification is dismissed once every certificate it reported is trusted through
-  the pin or `/ssl`. In this version the connection is still made; a later version may refuse it. An
-  add-on needs `ssl` mapped read-only and has to declare the option. Home
-  Assistant without TLS is not affected.
+  the pin or `/ssl`. In this version the connection is still made; a later
+  version may refuse it. An add-on needs `ssl` mapped read-only and has to
+  declare the option. Home Assistant without TLS is not affected.
+
+### Changed
+
+- A device the assistant names by an alias can now be proposed. When no entity
+  matches by name or id, the exposed entities with that alias are checked, and one
+  is proposed only if Home Assistant, asked for it by id, returns the very device
+  it matched for the alias, and no other exposed device looks the same. Otherwise
+  the answer lists the matches for you to choose. When the entity registry cannot
+  be read, nothing is proposed by an alias.
 
 ## [0.15.3] - 2026-11-26
 

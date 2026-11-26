@@ -72,6 +72,9 @@ const HOME = [
   // Two exposed devices answer to "Study": one by its name, one by an alias only.
   { id: 'light.study', name: 'Study' },
   { id: 'input_boolean.study_2', name: 'Study Spot', aliases: ['Study'] },
+  // Two exposed devices answer to "Toaster", both by an alias only.
+  { id: 'switch.counter_socket', name: 'Counter Socket', aliases: ['Toaster'], area: 'Kitchen' },
+  { id: 'switch.pantry_socket', name: 'Pantry Socket', aliases: ['Toaster'], area: 'Pantry' },
 ];
 const haNames = (e) => e.haNames || [e.name, ...(e.aliases || [])];
 
@@ -112,6 +115,8 @@ let coreUp = true;
 let exposureUp = true;
 const exposureTokens = [];
 let aliasesUp = true;
+// What the registry says besides, or instead of, the home's own aliases.
+let registrySays = new Map();
 const aliasReads = [];
 const coreBearers = new Set();
 let relay;
@@ -161,6 +166,7 @@ before(async () => {
       const out = new Map(HOME.filter((e) => entityIds.includes(e.id))
         .map((e) => [e.id, haNames(e).map((n) => (n === e.name ? null : n))]));
       out.set('light.hidden', ['Study', 'Warmer']);
+      for (const [id, aliases] of registrySays) if (entityIds.includes(id)) out.set(id, aliases);
       return out;
     },
   });
@@ -241,20 +247,43 @@ test('an ambiguous name names every exposed device it matches, an alias match to
 });
 
 test('a device not exposed is never named, though the registry gives it the alias', async () => {
-  for (const ref of ['Study', 'Warmer']) {
+  for (const ref of ['Study', 'Toaster']) {
     const out = await resolveProposal(proposalOf(intent([ref])));
     assert.ok(out.problems[0].candidates.length > 0, ref);
     assert.ok(!JSON.stringify(out).includes('light.hidden'), ref);
   }
 });
 
-test('a device matched only by an alias is named, never chosen', async () => {
+test('a device matched only by an alias is the answer when Home Assistant matches it alone', async () => {
   const out = await resolveProposal(proposalOf(intent(['Warmer'])));
-  assert.equal(out.proposal, null);
-  assert.deepEqual(out.problems, [{ problem: 'unpinned', ref: 'Warmer', candidates: [{ id: 'switch.heater', name: 'Heater' }] }]);
+  assert.deepEqual(out.problems, []);
+  assert.deepEqual(out.proposal.intents[0].targets, ['switch.heater']);
 });
 
-test('the registry is read with the Home Assistant token, for exactly the exposed ids, once, and only for a refusal', async () => {
+test('an alias two exposed devices answer to is ambiguous, naming both', async () => {
+  const out = await resolveProposal(proposalOf(intent(['Toaster'])));
+  assert.equal(out.proposal, null);
+  assert.deepEqual(out.problems, [{
+    problem: 'ambiguous',
+    ref: 'Toaster',
+    candidates: [{ id: 'switch.counter_socket', name: 'Counter Socket' }, { id: 'switch.pantry_socket', name: 'Pantry Socket' }],
+  }]);
+});
+
+test("the registry only nominates: an alias it claims for another device never makes it the answer", async () => {
+  try {
+    registrySays = new Map([['light.porch', ['Warmer']]]);
+    const also = await resolveProposal(proposalOf(intent(['Warmer'])));
+    assert.deepEqual(also.proposal.intents[0].targets, ['switch.heater']);
+    // The registry names only the wrong device: nothing is the one HA matched.
+    registrySays.set('switch.heater', []);
+    const only = await resolveProposal(proposalOf(intent(['Warmer'])));
+    assert.equal(only.proposal, null);
+    assert.deepEqual(only.problems, [{ problem: 'unpinned', ref: 'Warmer', candidates: [{ id: 'light.porch', name: 'Porch' }] }]);
+  } finally { registrySays = new Map(); }
+});
+
+test('the registry is read with the Home Assistant token, for exactly the exposed ids, once, and only when no name pins', async () => {
   aliasReads.length = 0;
   await resolveProposal(proposalOf(intent(['Sandbox Test Lamp', 'light.porch'])));
   assert.equal(aliasReads.length, 0, 'a resolved name needs no aliases');
@@ -301,16 +330,21 @@ test('a twin that Home Assistant does not expose is never chosen', async () => {
   assert.deepEqual(out.proposal.intents[0].targets, ['light.porch']);
 });
 
-test('a device matched only by an alias is refused rather than guessed', async () => {
-  const out = await resolveProposal(proposalOf(intent(['Warmer'])));
-  assert.equal(out.proposal, null);
-  assert.equal(out.problems[0].problem, 'unpinned');
+test('when the registry cannot be read an alias-only name stays unpinned, and the read is recorded as failed', async () => {
+  aliasesUp = false;
+  records.length = 0;
+  try {
+    const out = await resolveProposal(proposalOf(intent(['Warmer'])));
+    assert.equal(out.proposal, null);
+    assert.deepEqual(out.problems, [{ problem: 'unpinned', ref: 'Warmer', candidates: [] }]);
+    assert.equal(records.filter((l) => /^config\/entity_registry\/get_entries run=r1 \(lookup, failed\)/.test(l)).length, 1, records.join('\n'));
+  } finally { aliasesUp = true; }
 });
 
 test('a candidate by name is not the answer unless the matcher found that very device', async () => {
+  // light.shelf carries the name, but Home Assistant matched light.reading, by its alias.
   const out = await resolveProposal(proposalOf(intent(['Reading Light'])));
-  assert.equal(out.proposal, null, 'light.shelf carries the name, but Home Assistant matched light.reading');
-  assert.equal(out.problems[0].problem, 'unpinned');
+  assert.deepEqual(out.proposal.intents[0].targets, ['light.reading']);
 });
 
 test('two devices that print the same are not told apart by their print', async () => {
@@ -367,11 +401,12 @@ test('a name that only contains the text is no device it names: several hits, on
 });
 
 test('an entity that is not exposed is not exposed because another entity contains its id', async () => {
-  for (const [ref, problem] of [['Den', 'unpinned'], ['light.den', 'unknown']]) {
-    const out = await resolveProposal(proposalOf(intent([ref])));
-    assert.equal(out.proposal, null, `${ref} must not become light.den`);
-    assert.equal(out.problems[0].problem, problem, ref);
-  }
+  // "Den" is light.den's name, which is not exposed, and light.den_2's alias.
+  const byAlias = await resolveProposal(proposalOf(intent(['Den'])));
+  assert.deepEqual(byAlias.proposal.intents[0].targets, ['light.den_2']);
+  const byId = await resolveProposal(proposalOf(intent(['light.den'])));
+  assert.equal(byId.proposal, null, 'light.den must not become a target');
+  assert.equal(byId.problems[0].problem, 'unknown');
   const auto = await resolveAnswer({ proposal: null, automation: { alias: 'A', triggers: [{ trigger: 'time' }], actions: [{ action: 'light.turn_off', target: { entity_id: 'light.den' } }] } }, relay.lookup('r6'));
   assert.equal(auto.automation, null);
 });
@@ -379,13 +414,13 @@ test('an entity that is not exposed is not exposed because another entity contai
 test('the 2026.11 answer, which has no such search, is refused the same way', async () => {
   fallback = false;
   try {
-    for (const [ref, problem] of [['Shed', 'unknown'], ['Garage', 'unknown'], ['Den', 'unpinned'], ['light.den', 'unknown'], ['Desk Lamp', 'ambiguous'], ['Warmer', 'unpinned']]) {
+    for (const [ref, problem] of [['Shed', 'unknown'], ['Garage', 'unknown'], ['light.den', 'unknown'], ['Desk Lamp', 'ambiguous'], ['Toaster', 'ambiguous']]) {
       const out = await resolveProposal(proposalOf(intent([ref])));
       assert.equal(out.proposal, null, ref);
       assert.equal(out.problems[0].problem, problem, ref);
     }
-    const ok = await resolveProposal(proposalOf(intent(['Sandbox Test Lamp'])));
-    assert.deepEqual(ok.proposal.intents[0].targets, ['input_boolean.sandbox_test_lamp']);
+    const ok = await resolveProposal(proposalOf(intent(['Sandbox Test Lamp', 'Den', 'Warmer'])));
+    assert.deepEqual(ok.proposal.intents[0].targets, ['input_boolean.sandbox_test_lamp', 'light.den_2', 'switch.heater']);
   } finally { fallback = true; }
 });
 
@@ -493,9 +528,13 @@ test('the prompt API says which device it could not find, and proposes nothing',
 });
 
 test('the prompt API names the devices an unpinned name may mean, an alias match included, and none when it has none', async () => {
-  const body = await ask((runId) => relay.lookup(runId), proposalOf(intent(['Warmer'])));
+  registrySays = new Map([['switch.heater', []], ['light.porch', ['Warmer']]]);
+  let body;
+  try {
+    body = await ask((runId) => relay.lookup(runId), proposalOf(intent(['Warmer'])));
+  } finally { registrySays = new Map(); }
   assert.equal(body.proposal, null);
-  assert.match(body.text, /I couldn't tell which device “Warmer” is \(Heater: switch\.heater\) — please use its full name\./);
+  assert.match(body.text, /I couldn't tell which device “Warmer” is \(Porch: light\.porch\) — please use its full name\./);
   const { targetNotice } = require('../../server/prompt/notices');
   assert.equal(targetNotice('en', [{ problem: 'unpinned', ref: 'X', candidates: [] }]), "I couldn't tell which device “X” is — please use its full name.");
 });
