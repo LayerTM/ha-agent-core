@@ -6,6 +6,8 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.15.3] - 2026-11-26
+
 ### Fixed
 
 - When a device name is ambiguous, or matches a device that cannot be pinned to
