@@ -16,27 +16,27 @@
 // device, never whether an entity is exposed. That is the other oracle's: Home
 // Assistant's exact list of exposed entities, keyed by entity id (exposure.js).
 //
-// The states list only proposes candidates: every entity whose id is the
-// reference or whose name is it. A candidate is considered only when the list
-// says it is exposed. It is the answer when asking the live context for its id
-// returns the very device the name returned — same names, same domain, same
-// areas — it is the only such candidate, and no other exposed device of that
-// domain looks the same (the live context joins a device's aliases with ", ", so
+// Candidates are only nominated: by the states list, every entity whose id is the
+// reference or whose name is it; and, only when none of those is the device, by
+// the entity registry (registry.js), every entity with the reference as a whole
+// alias — the names the live context lists a device by, which the states list
+// does not carry. A candidate is considered only when the list says it is
+// exposed. It is the answer when asking the live context for its id returns the
+// very device the name returned — same names, same domain, same areas — it is the
+// only such candidate, and no other exposed device of that domain looks the same (the live context joins a device's aliases with ", ", so
 // two devices can print identically). Anything else is refused:
 //
 //   unknown      the matcher finds no exposed device by that reference (a hit
 //                that only contains the text is no device it names);
 //   ambiguous    it finds several, or the device it found is not unique;
-//   unpinned     it finds one, and no candidate is it (an alias, most likely);
+//   unpinned     it finds one, and no candidate is it;
 //   unavailable  a lookup failed, the exposed list could not be read, or the
 //                answer names more devices, or takes longer, than one answer may;
 //   too_large    Home Assistant's answer to a lookup is past what may be read.
 //
-// A refusal names the exposed devices the user may have meant: the candidates
-// above, and the exposed entities that answer to the reference by a registry
-// alias (registry.js) — the names the live context lists a device by, which the
-// states list does not carry. An alias match is only ever named, never the answer.
-// When the aliases cannot be read the refusal names the candidates alone.
+// A refusal names the exposed devices the user may have meant: the candidates by
+// name and those by alias. When the aliases cannot be read, nothing is pinned by
+// one and the refusal names the candidates by name alone.
 //
 // Nothing here ever returns an id Home Assistant did not match.
 
@@ -148,8 +148,8 @@ function createResolver(lookup, memory, signal) {
     return exposedMemo;
   };
 
-  // The registry aliases of every exposed entity, read once and only when a refusal
-  // is to name its candidates.
+  // The registry aliases of every exposed entity, read once and only when no name
+  // pins a reference.
   let aliasesMemo = null;
   const exposedAliases = () => {
     if (aliasesMemo === null) {
@@ -159,41 +159,46 @@ function createResolver(lookup, memory, signal) {
     return aliasesMemo;
   };
 
-  // A refusal's candidates, and after them every exposed entity an alias names
-  // `ref`. The exposed list decides which ids may appear; the registry only says
+  // The states of the exposed entities an alias names `ref`; none when that cannot
+  // be read. The exposed list decides which ids may appear; the registry only says
   // which of those carry the name.
-  async function withAliasMatches(ref, candidates) {
+  async function aliasMatches(ref) {
     const wanted = normalize(ref);
     let all; let exposedSet; let aliases;
     try {
       [all, exposedSet, aliases] = await Promise.all([states(), exposedIds(), exposedAliases()]);
     } catch {
-      return candidates;
+      return [];
     }
     const named = (id) => (aliases.get(id) || []).some((a) => typeof a === 'string' && normalize(a) === wanted);
-    const matched = all.filter((s) => s && typeof s.entity_id === 'string'
-      && exposedSet.has(s.entity_id)
-      && !candidates.some((c) => c.id === s.entity_id)
-      && named(s.entity_id));
+    return all.filter((s) => s && typeof s.entity_id === 'string' && exposedSet.has(s.entity_id) && named(s.entity_id));
+  }
+
+  // A refusal's candidates, and after them every other entity an alias names `ref`.
+  async function withAliasMatches(ref, candidates) {
+    const matched = (await aliasMatches(ref)).filter((s) => !candidates.some((c) => c.id === s.entity_id));
     return [...candidates, ...matched.map((s) => ({ id: s.entity_id, name: stateName(s) }))];
   }
 
-  // The candidates Home Assistant exposes, each with the identity its own id gets.
-  // Exposure is read from the exact list, never inferred from a live-context answer.
-  async function exposedCandidates(ref) {
-    const wanted = normalize(ref);
-    const all = await states();
-    const candidates = all.filter((s) => s && typeof s.entity_id === 'string'
-      && (s.entity_id === ref || normalize(stateName(s)) === wanted));
-    if (candidates.length === 0) return [];
+  // Of the nominated states, those Home Assistant exposes, each with the identity
+  // its own id gets. Exposure is read from the exact list, never inferred from a
+  // live-context answer.
+  async function identified(nominated) {
+    if (nominated.length === 0) return [];
     const exposedSet = await exposedIds();
     const out = [];
-    for (const s of candidates) {
+    for (const s of nominated) {
       if (!exposedSet.has(s.entity_id)) continue;
       const answer = await live(s.entity_id);
       if (answer.ok) out.push({ id: s.entity_id, name: stateName(s), identity: identity(answer.text) });
     }
     return out;
+  }
+
+  async function exposedByName(ref) {
+    const wanted = normalize(ref);
+    return identified((await states()).filter((s) => s && typeof s.entity_id === 'string'
+      && (s.entity_id === ref || normalize(stateName(s)) === wanted)));
   }
 
   // One reference → {id} or {problem, ref, candidates}.
@@ -206,14 +211,16 @@ function createResolver(lookup, memory, signal) {
   async function pin(ref) {
     const byName = await live(ref);
     if (!byName.ok || deviceCount(byName.text) === 0) return { problem: 'unknown', ref, candidates: [] };
-    const exposed = await exposedCandidates(ref);
+    const exposed = await exposedByName(ref);
     // No exposed entity is named so, and no device answers to it as a whole name or
     // alias: what the matcher returned only contains the text.
     if (exposed.length === 0 && !namesRef(byName.text, ref)) return { problem: 'unknown', ref, candidates: [] };
     const candidates = exposed.map(({ id, name }) => ({ id, name }));
     if (deviceCount(byName.text) > 1) return { problem: 'ambiguous', ref, candidates };
     const found = identity(byName.text);
-    const same = exposed.filter((c) => c.identity === found);
+    const isFound = (c) => c.identity === found;
+    let same = exposed.filter(isFound);
+    if (same.length === 0) same = (await identified(await aliasMatches(ref))).filter(isFound);
     if (same.length > 1) return { problem: 'ambiguous', ref, candidates };
     if (same.length === 0) return { problem: 'unpinned', ref, candidates };
     // The identity must single out one exposed device, or it does not prove which one it is.
