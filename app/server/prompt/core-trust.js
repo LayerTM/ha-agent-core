@@ -13,8 +13,10 @@
 //   - its SHA-256 fingerprint is the one the user pinned.
 //
 // An unaccepted certificate is logged and reported once, with its fingerprint,
-// and the connection is still made. The next accepted connection withdraws the
-// report.
+// and the connection is still made. The report is withdrawn only once the user
+// trusts a certificate it was about, by the pin or the ssl directory. Another
+// accepted connection leaves it: an unaccepted certificate that was there for a
+// moment is not to vanish with the next normal one.
 
 const crypto = require('node:crypto');
 const fs = require('node:fs');
@@ -32,6 +34,15 @@ const MAX_ENTRIES = 500;
 const MAX_FILE_BYTES = 256 * 1024;
 // How many unaccepted certificates are remembered as already reported.
 const MAX_REMEMBERED = 32;
+
+/** The fingerprints a notice file records, none if it cannot be read. */
+function recordedFingerprints(file) {
+  try {
+    return fs.readFileSync(file, 'utf8').split('\n').map(normalFingerprint).filter(Boolean).slice(-MAX_REMEMBERED);
+  } catch {
+    return [];
+  }
+}
 
 /** Adds to a set that keeps only its newest `MAX_REMEMBERED` entries. */
 function remember(set, value) {
@@ -94,6 +105,8 @@ function certificateNotice(fingerprint) {
       + ' on the certificate file Home Assistant uses. If the fingerprints match, either keep that file under `/ssl`'
       + ` or set the add-on option \`${PIN_OPTION}\` to the fingerprint, and restart the add-on.`
       + ' If they do not match, do not pin it: something else is answering as Home Assistant.',
+      'This notification is removed when the add-on next connects after you have trusted a reported certificate in one'
+      + ' of those two ways. You can also dismiss it yourself.',
     ].join('\n\n'),
   };
 }
@@ -110,9 +123,10 @@ function certificateNotice(fingerprint) {
  * @param {(found: {fingerprint: string}) => Promise<void>} [opts.notify]  Tells
  *   the user; one that rejects is tried again at the next connection.
  * @param {() => Promise<void>} [opts.withdraw]  Takes that notice back; one that
- *   rejects is tried again at the next accepted connection.
- * @param {string} [opts.noticeFile]  Exists while a notice may be showing, so
- *   that one raised before a restart is still withdrawn after it.
+ *   rejects is tried again at the next connection that calls for it.
+ * @param {string} [opts.noticeFile]  Holds the reported fingerprints, one per
+ *   line, while a notice may be showing, so that it can be withdrawn after a
+ *   restart.
  */
 function createCoreTrust({
   pin = '', sslDir = SSL_DIR, ca, log = () => {}, notify = async () => {}, withdraw = async () => {}, noticeFile = '',
@@ -123,37 +137,43 @@ function createCoreTrust({
   const warned = new Set();
   const told = new Set();
 
-  let showing = Boolean(noticeFile) && fs.existsSync(noticeFile);
+  // What the notice that may be showing was raised for.
+  const reported = new Set(noticeFile ? recordedFingerprints(noticeFile) : []);
   // The notice calls run one after another: a withdrawal never overtakes the
   // notice it takes back.
   let calls = Promise.resolve();
 
-  function setShowing(value) {
-    showing = value;
+  function save() {
     if (!noticeFile) return;
     try {
-      if (value) fs.writeFileSync(noticeFile, '', { mode: 0o600 });
+      if (reported.size) fs.writeFileSync(noticeFile, [...reported].map((line) => `${line}\n`).join(''), { mode: 0o600 });
       else fs.rmSync(noticeFile, { force: true });
     } catch (err) {
       log(`the state of the certificate notice could not be saved: ${err.message}`);
     }
   }
 
-  function accept() {
-    if (!showing) return;
-    setShowing(false);
+  /** The user trusts this certificate: a notice raised for it has been answered. */
+  function trusted(fingerprint) {
+    if (!reported.has(fingerprint)) return;
+    const taken = [...reported];
+    reported.clear();
+    save();
     told.clear();
     calls = calls.then(() => withdraw()).catch((err) => {
-      setShowing(true);
+      const since = [...reported];
+      reported.clear();
+      for (const each of [...taken, ...since]) remember(reported, each);
+      save();
       log(`the certificate notice could not be dismissed: ${err.message}`);
     });
   }
 
   function judge(socket) {
-    if (socket.authorized) { accept(); return; }
+    if (socket.authorized) return;
     const shown = socket.getPeerCertificate().fingerprint256 || '';
     const fingerprint = normalFingerprint(shown);
-    if (fingerprint && (fingerprint === pinned || isUnder(sslDir, fingerprint))) { accept(); return; }
+    if (fingerprint && (fingerprint === pinned || isUnder(sslDir, fingerprint))) { trusted(fingerprint); return; }
     if (!warned.has(shown)) {
       remember(warned, shown);
       log(`WARNING: Home Assistant's certificate could not be verified (${socket.authorizationError});`
@@ -162,7 +182,10 @@ function createCoreTrust({
     }
     if (told.has(shown)) return;
     remember(told, shown);
-    setShowing(true);
+    if (fingerprint) {
+      remember(reported, fingerprint);
+      save();
+    }
     calls = calls.then(() => notify({ fingerprint: shown })).catch((err) => {
       told.delete(shown);
       log(`the certificate notice could not be raised: ${err.message}`);

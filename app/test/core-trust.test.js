@@ -232,6 +232,9 @@ test('one certificate is warned about once across connections; a notice that fai
   assert.ok(logged.some((line) => line.includes('Core is starting')), logged.join('\n'));
 });
 
+/** A certificate's fingerprint as the notice file records it. */
+const hex = (identity) => identity.fingerprint.replaceAll(':', '').toLowerCase();
+
 /** Reads the registry (a new connection each time) through `trust` from a Core presenting `identity`. */
 async function connect(trust, identity, times = 1) {
   await withCore(identity, async (origin) => {
@@ -254,7 +257,7 @@ function tracked(options, calls) {
   });
 }
 
-test('the notice is dismissed once by the first accepted connection, also after a restart that pins', async () => {
+test('pinning the reported certificate and restarting dismisses the notice, once', async () => {
   const noticeFile = path.join(sslDir(), 'notice');
   const calls = [];
   await connect(tracked({ noticeFile }, calls), certs.self);
@@ -267,13 +270,41 @@ test('the notice is dismissed once by the first accepted connection, also after 
   assert.deepEqual(calls, ['raise', 'dismiss']);
 });
 
+test('an unknown certificate seen once keeps its notice through the normal connections that follow', async () => {
+  const noticeFile = path.join(sslDir(), 'notice');
+  const calls = [];
+  // The normal Core: a chain to a trusted authority.
+  const trust = tracked({ noticeFile, ca: certs.ca }, calls);
+  await connect(trust, certs.self);
+  await connect(trust, certs.signed, 2);
+  assert.deepEqual(calls, ['raise']);
+  assert.equal(fs.readFileSync(noticeFile, 'utf8'), `${hex(certs.self)}\n`);
+});
+
+test('trusting another certificate than the reported one keeps the notice, also after a restart', async () => {
+  const noticeFile = path.join(sslDir(), 'notice');
+  const calls = [];
+  await connect(tracked({ noticeFile }, calls), certs.self);
+  await connect(tracked({ noticeFile, pin: certs.other.fingerprint }, calls), certs.other, 2);
+  await connect(tracked({ noticeFile, sslDir: sslDir({ 'fullchain.pem': certs.other.cert }) }, calls), certs.other);
+  assert.deepEqual(calls, ['raise']);
+});
+
+test('a chain to a trusted authority never dismisses, even for a certificate reported before', async () => {
+  const noticeFile = path.join(sslDir(), 'notice');
+  const calls = [];
+  await connect(tracked({ noticeFile }, calls), certs.signed);
+  await connect(tracked({ noticeFile, ca: certs.ca }, calls), certs.signed, 2);
+  assert.deepEqual(calls, ['raise']);
+});
+
 test('nothing is dismissed when nothing was warned about', async () => {
   const calls = [];
   await connect(tracked({ noticeFile: path.join(sslDir(), 'notice'), pin: certs.self.fingerprint }, calls), certs.self, 2);
   assert.deepEqual(calls, []);
 });
 
-test('a certificate accepted without a restart dismisses the notice, and a later unknown one raises it again', async () => {
+test('the reported certificate put under the ssl directory dismisses the notice, and a later unknown one raises it again', async () => {
   const root = sslDir();
   const calls = [];
   const trust = tracked({ sslDir: root }, calls);
@@ -320,15 +351,18 @@ test('a dismiss waits for the notice still being raised', async () => {
   assert.deepEqual(calls, ['raised', 'dismissed']);
 });
 
-test('only the last 32 unknown certificates are remembered, the oldest forgotten first', () => {
+test('only the last 32 unknown certificates are remembered and recorded, the oldest forgotten first', () => {
   const logged = [];
-  const trust = createCoreTrust({ sslDir: sslDir(), log: (line) => { logged.push(line); } });
+  const noticeFile = path.join(sslDir(), 'notice');
+  const trust = createCoreTrust({ sslDir: sslDir(), noticeFile, log: (line) => { logged.push(line); } });
   const show = (n) => trust.judge({
     authorized: false,
     authorizationError: 'DEPTH_ZERO_SELF_SIGNED_CERT',
     getPeerCertificate: () => ({ fingerprint256: n.toString(16).padStart(64, '0') }),
   });
   for (let n = 0; n < 33; n += 1) show(n);
+  const recorded = fs.readFileSync(noticeFile, 'utf8').trim().split('\n').map((line) => Number.parseInt(line, 16));
+  assert.deepEqual(recorded, Array.from({ length: 32 }, (_, i) => i + 1));
   logged.length = 0;
   show(32);
   show(1);
@@ -359,4 +393,5 @@ test('the notice has one id, names the fingerprint and says how to check it befo
   assert.ok(notice.message.includes('AA:BB'));
   assert.ok(notice.message.includes('core_certificate_sha256'));
   assert.ok(notice.message.includes('openssl x509'));
+  assert.ok(notice.message.includes('dismiss it yourself'));
 });

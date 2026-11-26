@@ -234,8 +234,10 @@ The certificate is accepted when any of these holds
 
 Any other certificate is logged with its fingerprint and raised once as a Home
 Assistant notification, and **the connection is still made**. A later version may
-refuse it. The next accepted connection dismisses the notification, also after a
-restart of the add-on.
+refuse it. The notification is dismissed once a certificate it reported is
+trusted through the pin or `/ssl`, also after a restart of the add-on. Any other
+accepted connection leaves it, so a certificate that appeared only for a moment
+stays reported until you dismiss the notification yourself.
 
 A chain to a trusted authority is accepted whatever name the certificate was
 issued for, so that rule alone does not tell Home Assistant from another holder
