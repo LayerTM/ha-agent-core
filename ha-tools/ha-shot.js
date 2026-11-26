@@ -6,6 +6,9 @@
 // Auth: injects the add-on's Long-Lived Access Token (HA_TOKEN) into
 // localStorage `hassTokens` before navigation, mirroring the HA frontend's
 // own token bootstrap. Requires the "HA Token" add-on option to be set.
+// Address: HA_URL, which the add-on's start script exports. There is no default:
+// a guessed host name can resolve to a real Home Assistant wherever this runs,
+// and the token would be sent to it.
 
 const { chromium } = require('playwright-core');
 
@@ -35,6 +38,12 @@ async function main() {
       'Profile → Security → Long-lived access tokens.');
   }
 
+  if (!process.env.HA_URL) {
+    fail('ha-shot: HA_URL is not set.\n' +
+      'The add-on sets it at start. Anywhere else, set HA_URL to the Home\n' +
+      'Assistant that the token in HA_TOKEN belongs to.');
+  }
+
   // The frontend accepts seeded tokens only when `hassUrl` equals the page's
   // `location.origin`, and an origin never carries its scheme's default port:
   // with Core on port 80, HA_URL `http://homeassistant:80` is origin
@@ -42,7 +51,7 @@ async function main() {
   // login. So everything below is built from the origin the browser will see.
   let baseUrl;
   try {
-    baseUrl = new URL(process.env.HA_URL || 'http://homeassistant:8123').origin;
+    baseUrl = new URL(process.env.HA_URL).origin;
   } catch {
     fail(`ha-shot: HA_URL "${process.env.HA_URL}" is not a URL`);
   }
