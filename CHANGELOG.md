@@ -6,6 +6,19 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- The morning briefing could say all was well while an alert condition held, such
+  as a water leak: it picked what to mention by its own, shorter list. It is now
+  given every alert the proactive alerts would raise on the same reading and the
+  same `alert_*` options, critical ones first, whether or not `proactive_alerts`
+  is on, and is asked to state them before anything else. Low batteries in the
+  briefing follow `alert_battery_below` (default 15) instead of a fixed 20.
+- A briefing whose reading of Home Assistant's states failed was written from
+  empty data. No briefing is sent now, and the log says why.
+- A briefing longer than 1500 characters lost its beginning; it is now cut at
+  its end.
+
 ### Changed
 
 - `ha-shot` no longer falls back to `http://homeassistant:8123`: it stops before

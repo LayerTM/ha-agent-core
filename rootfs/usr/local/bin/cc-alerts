@@ -34,7 +34,8 @@ NOTIFY_CMD="${CC_ALERTS_NOTIFY_CMD:-ha-notify}"
 source "${BASH_SOURCE[0]%/*}/../lib/addon-branding.sh"
 # shellcheck source-path=SCRIPTDIR source=../lib/ha-curl.sh
 source "${BASH_SOURCE[0]%/*}/../lib/ha-curl.sh"
-
+# shellcheck source-path=SCRIPTDIR source=../lib/ha-anomalies.sh
+source "${BASH_SOURCE[0]%/*}/../lib/ha-anomalies.sh"
 
 DATA_DIR="${CC_ALERTS_DATA_DIR:-/data}"
 OPTIONS="${DATA_DIR}/options.json"
@@ -43,49 +44,14 @@ STATE="${DATA_DIR}/alerts-state.json"
 log() { printf '[cc-alerts] %s\n' "$1" >&2; }
 
 # --- Config (from options.json, with sensible built-in defaults) ------------
-jqopt() {  # $1 = jq filter, $2 = default (used when key is absent/null/unreadable)
-    local v
-    v="$(jq -r "$1" "${OPTIONS}" 2>/dev/null)"
-    if [ -z "${v}" ] || [ "${v}" = "null" ]; then printf '%s' "$2"; else printf '%s' "${v}"; fi
-}
-
 enabled="$(jqopt '.proactive_alerts' false)"
 [ "${enabled}" = "true" ] || exit 0   # master switch off/absent → do nothing
 
 interval="${CC_ALERTS_INTERVAL_MINUTES:-$(jqopt '.proactive_alerts_interval_minutes' 15)}"
 [ "${interval}" -ge 1 ] 2>/dev/null || interval=15
 
-batt_below="$(jqopt '.alert_battery_below' 15)"      # 0 = off
-water="$(jqopt '.alert_water_leak' true)"            # CRITICAL, always sent
-night_open="$(jqopt '.alert_open_at_night' true)"
-night_start="$(jqopt '.alert_night_start' '23:00')"
-night_end="$(jqopt '.alert_night_end' '06:00')"
-temp_enabled="$(jqopt '.alert_temp_enabled' false)"
-temp_low="$(jqopt '.alert_temp_low' 5)"
-temp_high="$(jqopt '.alert_temp_high' 45)"
-# Optional opt-in scoping for the temperature check (a JSON list). When set to a
-# NON-empty list only those entities are flagged out of band — so device temps
-# (NAS/switch CPUs) don't false-trigger. An empty/absent list keeps the legacy
-# behaviour of checking every temperature sensor.
-temp_entities="$(jq -c '.alert_temp_entities // empty' "${OPTIONS}" 2>/dev/null)"
-[ -n "${temp_entities}" ] || temp_entities='[]'
-co2_above="$(jqopt '.alert_co2_above' 1400)"         # 0 = off, non-critical
-humidity_enabled="$(jqopt '.alert_humidity_enabled' false)"
-humidity_low="$(jqopt '.alert_humidity_low' 25)"
-humidity_high="$(jqopt '.alert_humidity_high' 70)"
-offline_enabled="$(jqopt '.alert_offline' true)"     # CRITICAL, always sent
-# Which entities to watch for going offline (a JSON list). NOT SETTING IT MEANS
-# THE SAME AS SETTING IT EMPTY: nothing is watched. This add-on cannot know an
-# entity id that exists in the home it was installed into, and a built-in one
-# watched a device that is not there — an alert nobody asked for, about a name
-# that means nothing to them, while the home they do have goes unwatched.
-#
-# Note the polarity is the opposite of `alert_temp_entities` above, and
-# deliberately so: an empty temperature list means every temperature sensor,
-# because that check knows what to look at from the device class alone. This one
-# has nothing to widen to, so an empty list is the only honest answer.
-offline_entities="$(jq -c '.alert_offline_entities // empty' "${OPTIONS}" 2>/dev/null)"
-[ -n "${offline_entities}" ] || offline_entities='[]'
+load_alert_options
+
 # An empty list is a correct configuration, and it is also the one state in which
 # this check can never say anything — so from outside "watching, and all clear"
 # and "watching nothing" look identical: the offline alert is on, the list is
@@ -119,32 +85,11 @@ temp_margin="$(margin alert_temp_margin 0 "[${temp_low},${temp_high}]" '2 * $m <
 co2_margin="$(margin alert_co2_margin 100 "[${co2_above}]" '$m < $t[0]' "$(on_above_zero "${co2_above}")")"
 humidity_margin="$(margin alert_humidity_margin 0 "[${humidity_low},${humidity_high}]" '2 * $m < $t[1] - $t[0]' "${humidity_enabled}")"
 
-# --- Time-window helpers ----------------------------------------------------
-in_window() {  # $1=now $2=start $3=end (HH:MM); handles overnight wrap (start>end)
-    local now="$1" start="$2" end="$3" nm sm em
-    printf '%s' "${now}"   | grep -Eq '^[0-2][0-9]:[0-5][0-9]$' || return 1
-    printf '%s' "${start}" | grep -Eq '^[0-2][0-9]:[0-5][0-9]$' || return 1
-    printf '%s' "${end}"   | grep -Eq '^[0-2][0-9]:[0-5][0-9]$' || return 1
-    nm=$(( 10#${now%%:*} * 60 + 10#${now#*:} ))
-    sm=$(( 10#${start%%:*} * 60 + 10#${start#*:} ))
-    em=$(( 10#${end%%:*} * 60 + 10#${end#*:} ))
-    if [ "${sm}" -le "${em}" ]; then
-        [ "${nm}" -ge "${sm}" ] && [ "${nm}" -lt "${em}" ]
-    else   # overnight window, e.g. 23:00–06:00
-        [ "${nm}" -ge "${sm}" ] || [ "${nm}" -lt "${em}" ]
-    fi
-}
-
 # --- One check cycle --------------------------------------------------------
 run_cycle() {
-    local now_hm states anomalies_json prev_active prev_sides is_night is_quiet result msg
+    local now_hm states anomalies_json prev_active prev_sides is_quiet result msg
 
     now_hm="${CC_ALERTS_NOW:-$(date +%H:%M)}"
-
-    is_night=false
-    if [ "${night_open}" = "true" ] && in_window "${now_hm}" "${night_start}" "${night_end}"; then
-        is_night=true
-    fi
 
     is_quiet=false
     if [ -n "${quiet}" ] && [[ "${quiet}" == *-* ]]; then
@@ -168,95 +113,8 @@ run_cycle() {
 
     # Deterministic anomaly detection. Every entry degrades to `empty` on bad
     # fields, so one malformed state never breaks the array (or the loop).
-    anomalies_json="$(printf '%s' "${states}" | jq -c \
-        --argjson prev "${prev_active}" \
-        --argjson sides "${prev_sides}" \
-        --argjson batt "${batt_below}" \
-        --argjson battm "${batt_margin}" \
-        --argjson tm "${temp_margin}" \
-        --argjson co2m "${co2_margin}" \
-        --argjson hm "${humidity_margin}" \
-        --argjson water "${water}" \
-        --argjson nopen "${is_night}" \
-        --argjson tenab "${temp_enabled}" \
-        --argjson tlow "${temp_low}" \
-        --argjson thigh "${temp_high}" \
-        --argjson tents "${temp_entities}" \
-        --argjson co2 "${co2_above}" \
-        --argjson henab "${humidity_enabled}" \
-        --argjson hlow "${humidity_low}" \
-        --argjson hhigh "${humidity_high}" \
-        --argjson offen "${offline_enabled}" \
-        --argjson watch "${offline_entities}" '
-        def active($key): ($prev | index($key)) != null;
-        # The side of a two-threshold band an entity is alerting on, if any. A
-        # reading past either threshold raises that side; an active alert is held
-        # by its own side only. With no side on record, the reading decides.
-        def band($key; $v; $low; $high; $m):
-            if $v < $low then "low"
-            elif $v > $high then "high"
-            elif active($key) | not then empty
-            elif $sides[$key] != "low" and $v > $high - $m then "high"
-            elif $sides[$key] != "high" and $v < $low + $m then "low"
-            else empty end;
-        arrays | [ .[]
-          | (.attributes.device_class // "") as $dc
-          | (.state // "") as $st
-          | (.entity_id) as $eid
-          | (.attributes.friendly_name // .entity_id) as $name
-          | (
-              # Offline / network watch. Runs on EVERY entity — including the
-              # unavailable/unknown ones the value checks below skip — because a
-              # watched device dropping off is exactly the anomaly. For a
-              # device_tracker, "not_home" also counts as down (e.g. the internet
-              # gateway). Critical: always sent, even during quiet hours.
-              ( if $offen and (($watch | index($eid)) != null)
-                   and ( $st == "unavailable" or $st == "unknown"
-                         or ($st == "not_home" and ($eid | startswith("device_tracker."))) )
-                then {key:("offline:" + $eid), critical:true,
-                      line:("Offline: " + $name)}
-                else empty end ),
-              # Value-based checks only make sense on an entity reporting a real
-              # reading, so they skip unavailable/unknown/empty states.
-              ( select($st != "unavailable" and $st != "unknown" and $st != "")
-                | (((.state | tonumber?) // null)) as $num
-                | (
-                    ( if ($batt > 0) and ($dc == "battery") and ($num != null)
-                         and ($num < $batt or (active("battery:" + $eid) and $num < $batt + $battm))
-                      then {key:("battery:" + .entity_id), critical:false,
-                            line:("Low battery: " + $name + " (" + ($num|tostring) + "%)")}
-                      else empty end ),
-                    ( if $water and ($dc == "moisture") and ($st == "on")
-                      then {key:("leak:" + .entity_id), critical:true,
-                            line:("WATER LEAK detected: " + $name)}
-                      else empty end ),
-                    ( if $nopen and ($st == "on")
-                         and ($dc == "door" or $dc == "window" or $dc == "garage_door" or $dc == "opening")
-                      then {key:("night_open:" + .entity_id), critical:false,
-                            line:("Open at night: " + $name)}
-                      else empty end ),
-                    ( if $tenab and ($dc == "temperature") and ($num != null)
-                         and (($tents | length) == 0 or (($tents | index($eid)) != null))
-                      then ("temp:" + $eid) as $key
-                         | band($key; $num; $tlow; $thigh; $tm) as $side
-                         | {key:$key, critical:false, side:$side,
-                            line:("Temperature out of range: " + $name + " (" + ($num|tostring) + "°)")}
-                      else empty end ),
-                    ( if ($co2 > 0) and ($dc == "carbon_dioxide") and ($num != null)
-                         and ($num > $co2 or (active("co2:" + $eid) and $num > $co2 - $co2m))
-                      then {key:("co2:" + .entity_id), critical:false,
-                            line:("High CO2: " + $name + " (" + ($num|tostring) + " ppm)")}
-                      else empty end ),
-                    ( if $henab and ($dc == "humidity") and ($num != null)
-                      then ("humidity:" + $eid) as $key
-                         | band($key; $num; $hlow; $hhigh; $hm) as $side
-                         | {key:$key, critical:false, side:$side,
-                            line:("Humidity out of range: " + $name + " (" + ($num|tostring) + "%)")}
-                      else empty end )
-                  )
-              )
-            )
-        ]' 2>/dev/null)" && [ -n "${anomalies_json}" ] || {
+    anomalies_json="$(printf '%s' "${states}" \
+        | classify_anomalies "${now_hm}" "${prev_active}" "${prev_sides}")" || {
         # No list of states (a failed or cut-off fetch, an error body) is no
         # reading. Taking it for "nothing is wrong" would clear every active
         # alert, and each would then notify again.

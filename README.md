@@ -776,6 +776,17 @@ answer that fails, is empty or cannot be delivered is logged (`[cc-monitor]`,
 `rootfs/usr/share/agent-core/monitor-known-noise.tsv` are left out of the health
 check.
 
+What counts as an alert, with its thresholds and their defaults, is said once:
+`rootfs/usr/local/lib/ha-anomalies.jq`, with the options read by
+`ha-anomalies.sh` beside it. `cc-alerts` notifies from it, and `cc-digest` puts
+every line it yields for the states it just read, the critical ones first, ahead
+of the rest of the briefing's data, and asks the agent to state them first. The
+briefing does this whether or not `proactive_alerts` is on; the other `alert_*`
+options apply to both, so a rule that is off is off in both, and "open at night"
+is raised only inside the night window. The clear margins and the quiet hours
+concern notifications and do not change the briefing. When the states cannot be
+read, no briefing is sent and the log says so.
+
 ### Retention
 
 Each store the core keeps has a bound (table below). The start script starts
