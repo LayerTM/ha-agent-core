@@ -66,7 +66,13 @@ briefing() {
             | classify_anomalies "${CC_DIGEST_NOW:-$(date +%H:%M)}" '[]' '{}' \
             | jq -c 'sort_by(.critical | not) | map(.line)')"; then
         # A briefing built on no reading would say that all is well.
-        log "states: no usable reading; no briefing this time"
+        local unusable
+        unusable="$(unusable_alert_options | paste -sd ' ' -)"
+        if [ -n "${unusable}" ]; then
+            log "options: ${unusable} has no usable value; no briefing this time"
+        else
+            log "states: no usable reading; no briefing this time"
+        fi
         return 0
     fi
     # A snapshot slice that fails leaves the snapshot empty; the alerts stand.

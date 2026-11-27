@@ -213,6 +213,20 @@ else
     bad "a long answer lost its beginning"
 fi
 
+# A malformed alert_* option stops the briefing too, and the log names the option.
+for bad_option in 'alert_co2_above "high"' 'alert_temp_low "cold"'; do
+    read -r name value <<<"${bad_option}"
+    printf '{"%s": %s}\n' "${name}" "${value}" > "${data}/options.json"
+    digest_with_states 07:00
+    if [ ! -e "${work}/agent.stdin" ] && logged "[cc-digest] options: ${name} has no usable value; no briefing" \
+            && ! logged "states: no usable reading"; then
+        ok "a malformed ${name}: no briefing, and the log names it"
+    else
+        bad "a malformed ${name} is not named: $(cat "${work}/stderr")"
+    fi
+done
+printf '{}\n' > "${data}/options.json"
+
 # --- 6. no usable reading is not a quiet home -------------------------------------
 for body in '401: Unauthorized' '{"message": "API not available"}' '' '[] junk'; do
     printf '%s' "${body}" > "${work}/states.json"

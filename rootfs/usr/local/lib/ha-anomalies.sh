@@ -50,6 +50,26 @@ load_alert_options() {
     batt_margin=0 temp_margin=0 co2_margin=0 humidity_margin=0
 }
 
+_option_type() {  # $1=option $2=JSON type the rules read $3=loaded value
+    printf '%s' "$3" | jq -es --arg t "$2" 'length == 1 and (.[0] | type) == $t' \
+        >/dev/null 2>&1 || printf '%s\n' "$1"
+}
+
+unusable_alert_options() {  # after load_alert_options: the options classifying cannot use
+    _option_type alert_battery_below number "${batt_below}"
+    _option_type alert_water_leak boolean "${water}"
+    _option_type alert_temp_enabled boolean "${temp_enabled}"
+    _option_type alert_temp_low number "${temp_low}"
+    _option_type alert_temp_high number "${temp_high}"
+    _option_type alert_temp_entities array "${temp_entities}"
+    _option_type alert_co2_above number "${co2_above}"
+    _option_type alert_humidity_enabled boolean "${humidity_enabled}"
+    _option_type alert_humidity_low number "${humidity_low}"
+    _option_type alert_humidity_high number "${humidity_high}"
+    _option_type alert_offline boolean "${offline_enabled}"
+    _option_type alert_offline_entities array "${offline_entities}"
+}
+
 in_window() {  # $1=now $2=start $3=end (HH:MM); handles overnight wrap (start>end)
     local now="$1" start="$2" end="$3" nm sm em
     printf '%s' "${now}"   | grep -Eq '^[0-2][0-9]:[0-5][0-9]$' || return 1

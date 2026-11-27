@@ -14,6 +14,7 @@ uses [Semantic Versioning](https://semver.org/).
   same `alert_*` options, critical ones first, whether or not `proactive_alerts`
   is on, and is asked to state them before anything else. Low batteries in the
   briefing follow `alert_battery_below` (default 15) instead of a fixed 20.
+  With `alert_battery_below` set to 0 the briefing no longer mentions batteries.
 - A briefing whose reading of Home Assistant's states failed was written from
   empty data. No briefing is sent now, and the log says why.
 - A briefing longer than 1500 characters lost its beginning; it is now cut at
