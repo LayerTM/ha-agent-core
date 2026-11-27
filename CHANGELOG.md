@@ -6,6 +6,12 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- `ha-shot` no longer falls back to `http://homeassistant:8123`: it stops before
+  starting a browser when `HA_URL` is not set. The add-on sets `HA_URL` at start,
+  so screenshots taken inside it are unaffected.
+
 ## [0.16.0] - 2026-11-26
 
 ### Added
