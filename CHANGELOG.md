@@ -6,6 +6,8 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-11-27
+
 ### Fixed
 
 - The morning briefing could say all was well while an alert condition held, such
