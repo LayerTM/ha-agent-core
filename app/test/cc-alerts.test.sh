@@ -194,9 +194,9 @@ done
 #         also asserted where it lives: the fallback for an absent list is the empty
 #         list, and no other. This catches ANY re-introduced default, not one id,
 #         and it needs no entity id of anyone's home in this repository. ---
-fallback="$(grep -o "offline_entities='[^']*'" "${script}")"
+fallback="$(grep -ho "offline_entities='[^']*'" "${script}" "${repo}/rootfs/usr/local/lib/ha-anomalies.sh")"
 case "${fallback}" in
-    "offline_entities='[]'") pass "an absent offline list falls back to the empty list, in the script itself";;
+    "offline_entities='[]'") pass "an absent offline list falls back to the empty list, in the source itself";;
     *) fail "the only literal offline list in the script must be '[]' (got: ${fallback:-none})";;
 esac
 
